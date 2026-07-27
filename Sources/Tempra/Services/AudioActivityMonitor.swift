@@ -96,6 +96,17 @@ protocol AudioActivityBackend: Sendable {
     func removeListener(_ token: AudioListenerToken)
 }
 
+protocol AudioActivityMonitoring: Sendable {
+    typealias ActivityHandler = @MainActor @Sendable () -> Void
+
+    func watch(
+        revision: UInt64,
+        processIdentifiers: Set<pid_t>,
+        onActivityChange: @escaping ActivityHandler
+    ) async
+    func stop(revision: UInt64) async
+}
+
 final class LiveAudioActivityBackend: AudioActivityBackend, @unchecked Sendable {
     private struct Registration {
         let target: AudioListenerTarget
@@ -194,7 +205,7 @@ final class LiveAudioActivityBackend: AudioActivityBackend, @unchecked Sendable 
     }
 }
 
-actor AudioActivityMonitor {
+actor AudioActivityMonitor: AudioActivityMonitoring {
     typealias ActivityHandler = @MainActor @Sendable () -> Void
 
     private let backend: any AudioActivityBackend
@@ -202,21 +213,27 @@ actor AudioActivityMonitor {
     private var processListeners: [AudioObjectID: AudioListenerToken] = [:]
     private var processListListener: AudioListenerToken?
     private var onActivityChange: ActivityHandler?
+    private var revision: UInt64 = 0
 
     init(backend: any AudioActivityBackend = LiveAudioActivityBackend()) {
         self.backend = backend
     }
 
     func watch(
+        revision: UInt64,
         processIdentifiers: Set<pid_t>,
         onActivityChange: @escaping ActivityHandler
     ) {
+        guard revision >= self.revision else { return }
+        self.revision = revision
         watchedProcessIdentifiers = processIdentifiers
         self.onActivityChange = onActivityChange
         updateListeners()
     }
 
-    func stop() {
+    func stop(revision: UInt64) {
+        guard revision >= self.revision else { return }
+        self.revision = revision
         watchedProcessIdentifiers.removeAll()
         onActivityChange = nil
         removeAllListeners()
@@ -236,8 +253,9 @@ actor AudioActivityMonitor {
         }
 
         for objectID in desiredObjects where processListeners[objectID] == nil {
+            let listenerRevision = revision
             let token = backend.addListener(for: .runningOutput(objectID)) { [weak self] in
-                Task { await self?.notifyActivityChanged() }
+                Task { await self?.notifyActivityChanged(revision: listenerRevision) }
             }
             processListeners[objectID] = token
         }
@@ -252,7 +270,7 @@ actor AudioActivityMonitor {
 
     private func processListChanged() async {
         updateListeners()
-        await notifyActivityChanged()
+        await notifyActivityChanged(revision: revision)
     }
 
     private func removeAllListeners() {
@@ -264,7 +282,8 @@ actor AudioActivityMonitor {
         }
     }
 
-    private func notifyActivityChanged() async {
+    private func notifyActivityChanged(revision: UInt64) async {
+        guard revision == self.revision else { return }
         await onActivityChange?()
     }
 }

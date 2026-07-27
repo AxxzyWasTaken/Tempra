@@ -34,18 +34,33 @@ struct ProcessChangeNotification: Equatable, Sendable {
 final class ManagedProcessWatcher {
     typealias ChangeHandler = @MainActor @Sendable (ProcessChangeNotification) -> Void
 
-    private let audioMonitor: AudioActivityMonitor
-    private let minimumRefreshInterval: TimeInterval = 5
-    private let eventDebounceInterval: TimeInterval = 0.1
+    private enum AudioUpdate: Sendable {
+        case watch(
+            revision: UInt64,
+            processIdentifiers: Set<pid_t>,
+            onActivityChange: AudioActivityMonitoring.ActivityHandler
+        )
+        case stop(revision: UInt64)
+    }
+
+    private let audioMonitor: any AudioActivityMonitoring
+    private let eventDebounceInterval: TimeInterval
     private var processEventSources: [ProcessIdentity: any DispatchSourceProcess] = [:]
     private var processChangeWorkItem: DispatchWorkItem?
     private var pendingMetadataInvalidations: Set<ProcessIdentity> = []
     private var pendingProcessTableChange = false
-    private var lastRefreshTime: TimeInterval = 0
+    private var pendingAudioUpdate: AudioUpdate?
+    private var audioUpdateTask: Task<Void, Never>?
+    private var audioRevision: UInt64 = 0
+    private var isStopped = false
     private var onChange: ChangeHandler?
 
-    init(audioMonitor: AudioActivityMonitor = AudioActivityMonitor()) {
+    init(
+        audioMonitor: any AudioActivityMonitoring = AudioActivityMonitor(),
+        eventDebounceInterval: TimeInterval = 0.1
+    ) {
         self.audioMonitor = audioMonitor
+        self.eventDebounceInterval = eventDebounceInterval
     }
 
     func watch(
@@ -53,6 +68,7 @@ final class ManagedProcessWatcher {
         audioProcessIdentifiers: Set<pid_t>,
         onChange: @escaping ChangeHandler
     ) {
+        guard !isStopped else { return }
         self.onChange = onChange
         for identity in Set(processEventSources.keys).subtracting(processIdentities) {
             processEventSources.removeValue(forKey: identity)?.cancel()
@@ -69,7 +85,7 @@ final class ManagedProcessWatcher {
                 if events.contains(.exit) {
                     processEventSources.removeValue(forKey: identity)?.cancel()
                 }
-                scheduleRefresh(
+                handleProcessChange(
                     for: Self.notification(
                         for: events,
                         identity: identity
@@ -80,15 +96,25 @@ final class ManagedProcessWatcher {
             processEventSources[identity] = source
         }
 
-        Task { [audioMonitor] in
-            await audioMonitor.watch(
-                processIdentifiers: audioProcessIdentifiers,
-                onActivityChange: { onChange(.audioActivity) }
-            )
-        }
+        let revision = nextAudioRevision()
+        enqueueAudioUpdate(.watch(
+            revision: revision,
+            processIdentifiers: audioProcessIdentifiers,
+            onActivityChange: { [weak self] in
+                guard let self,
+                      !self.isStopped,
+                      revision == self.audioRevision else { return }
+                self.onChange?(.audioActivity)
+            }
+        ))
     }
 
     func stop() async {
+        guard !isStopped else {
+            await audioUpdateTask?.value
+            return
+        }
+        isStopped = true
         processChangeWorkItem?.cancel()
         processChangeWorkItem = nil
         pendingMetadataInvalidations.removeAll()
@@ -96,7 +122,8 @@ final class ManagedProcessWatcher {
         processEventSources.values.forEach { $0.cancel() }
         processEventSources.removeAll()
         onChange = nil
-        await audioMonitor.stop()
+        enqueueAudioUpdate(.stop(revision: nextAudioRevision()))
+        await audioUpdateTask?.value
     }
 
     static func notification(
@@ -111,19 +138,14 @@ final class ManagedProcessWatcher {
         )
     }
 
-    private func scheduleRefresh(for notification: ProcessChangeNotification) {
+    func handleProcessChange(for notification: ProcessChangeNotification) {
+        guard !isStopped else { return }
         pendingMetadataInvalidations.formUnion(notification.invalidatedMetadata)
         pendingProcessTableChange = pendingProcessTableChange || notification.processTableChanged
         guard processChangeWorkItem == nil else { return }
-        let now = ProcessInfo.processInfo.systemUptime
-        let delay = max(
-            eventDebounceInterval,
-            lastRefreshTime + minimumRefreshInterval - now
-        )
         let workItem = DispatchWorkItem { [weak self] in
             guard let self else { return }
             processChangeWorkItem = nil
-            lastRefreshTime = ProcessInfo.processInfo.systemUptime
             let notification = ProcessChangeNotification(
                 invalidatedMetadata: pendingMetadataInvalidations,
                 processTableChanged: pendingProcessTableChange
@@ -133,6 +155,45 @@ final class ManagedProcessWatcher {
             onChange?(notification)
         }
         processChangeWorkItem = workItem
-        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: workItem)
+        DispatchQueue.main.asyncAfter(
+            deadline: .now() + eventDebounceInterval,
+            execute: workItem
+        )
+    }
+
+    private func nextAudioRevision() -> UInt64 {
+        if audioRevision < UInt64.max {
+            audioRevision += 1
+        }
+        return audioRevision
+    }
+
+    private func enqueueAudioUpdate(_ update: AudioUpdate) {
+        pendingAudioUpdate = update
+        startAudioUpdateTaskIfNeeded()
+    }
+
+    private func startAudioUpdateTaskIfNeeded() {
+        guard audioUpdateTask == nil else { return }
+        audioUpdateTask = Task { [weak self] in
+            guard let self else { return }
+            while let update = self.pendingAudioUpdate {
+                self.pendingAudioUpdate = nil
+                switch update {
+                case .watch(let revision, let processIdentifiers, let onActivityChange):
+                    await self.audioMonitor.watch(
+                        revision: revision,
+                        processIdentifiers: processIdentifiers,
+                        onActivityChange: onActivityChange
+                    )
+                case .stop(let revision):
+                    await self.audioMonitor.stop(revision: revision)
+                }
+            }
+            self.audioUpdateTask = nil
+            if self.pendingAudioUpdate != nil {
+                self.startAudioUpdateTaskIfNeeded()
+            }
+        }
     }
 }
