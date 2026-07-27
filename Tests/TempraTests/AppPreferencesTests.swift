@@ -4,6 +4,22 @@ import Testing
 
 @Suite("App preferences")
 struct AppPreferencesTests {
+    @Test("CPU limit range scales with logical cores")
+    func cpuLimitRangeScalesWithLogicalCores() {
+        #expect(CPULimitRange.maximumPercent(logicalCoreCount: 0) == 100)
+        #expect(CPULimitRange.maximumPercent(logicalCoreCount: 1) == 100)
+        #expect(CPULimitRange.maximumPercent(logicalCoreCount: 8) == 800)
+        #expect(CPULimitRange.singleCore == 1...100)
+    }
+
+    @Test("CPU limits clamp to the authoritative range")
+    func cpuLimitsUseAuthoritativeRange() {
+        #expect(CPULimitRange.clamped(0) == CPULimitRange.allowed.lowerBound)
+        #expect(CPULimitRange.clamped(.greatestFiniteMagnitude)
+            == CPULimitRange.allowed.upperBound)
+        #expect(CPULimitRange.clamped(50) == 50)
+    }
+
     @Test("Custom profiles, active selection, and appearance persist")
     func preferencesRoundTrip() throws {
         let suiteName = "TempraTests.\(UUID().uuidString)"

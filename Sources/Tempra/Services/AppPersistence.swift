@@ -31,9 +31,6 @@ struct AppPersistence {
     let defaults: UserDefaults
     private let writer: (Any?, String) -> Void
     private static let maximumStoredBytes = 16 * 1_024 * 1_024
-    private static let maximumCPUPercent = Double(
-        max(1, ProcessInfo.processInfo.activeProcessorCount) * 100
-    )
 
     init(
         defaults: UserDefaults = .standard,
@@ -201,8 +198,7 @@ struct AppPersistence {
             }
             try validateFinite(rule.limitPercent, field: "CPU limit", in: "app rules")
             try validateFinite(rule.delaySeconds, field: "delay", in: "app rules")
-            guard rule.limitPercent >= 1,
-                  rule.limitPercent <= Self.maximumCPUPercent,
+            guard CPULimitRange.allowed.contains(rule.limitPercent),
                   rule.delaySeconds >= 0,
                   rule.delaySeconds <= 5 * 60 else {
                 throw invalid("app rules", "a CPU limit or delay is outside its allowed range")
@@ -220,7 +216,7 @@ struct AppPersistence {
         try validateFinite(preferences.highCPUDuration, field: "high CPU duration", in: "preferences")
         try validateFinite(preferences.notificationCooldown, field: "notification cooldown", in: "preferences")
         guard preferences.highCPUThreshold >= 25,
-              preferences.highCPUThreshold <= Self.maximumCPUPercent,
+              preferences.highCPUThreshold <= CPULimitRange.maximumPercent,
               preferences.highCPUDuration > 0,
               preferences.notificationCooldown > 0 else {
             throw invalid("preferences", "a CPU alert value is outside its allowed range")
@@ -236,8 +232,7 @@ struct AppPersistence {
             }
             try validateFinite(profile.limitPercent, field: "profile CPU limit", in: "preferences")
             try validateFinite(profile.delaySeconds, field: "profile delay", in: "preferences")
-            guard profile.limitPercent >= 1,
-                  profile.limitPercent <= Self.maximumCPUPercent,
+            guard CPULimitRange.allowed.contains(profile.limitPercent),
                   profile.delaySeconds >= 0,
                   profile.delaySeconds <= 5 * 60 else {
                 throw invalid("preferences", "a profile limit or delay is outside its allowed range")

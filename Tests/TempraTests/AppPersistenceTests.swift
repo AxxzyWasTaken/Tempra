@@ -118,6 +118,26 @@ struct AppPersistenceTests {
         }
     }
 
+    @Test("Multi-core CPU limits survive persistence")
+    func multiCoreLimitsRoundTrip() throws {
+        try withDefaults { defaults in
+            let limit = min(150, CPULimitRange.maximumPercent)
+            #expect(limit > CPULimitRange.oneCorePercent)
+            let rule = AppRule(
+                bundleIdentifier: "example.app",
+                displayName: "Example",
+                action: .limit,
+                limitPercent: limit
+            )
+            let persistence = AppPersistence(defaults: defaults)
+
+            try persistence.saveRules([rule.bundleIdentifier: rule])
+            let restored = try #require(persistence.loadRules()[rule.bundleIdentifier])
+
+            #expect(restored.limitPercent == limit)
+        }
+    }
+
     @Test("Duplicate rule identifiers are rejected")
     func duplicateRulesAreRejected() throws {
         try withDefaults { defaults in

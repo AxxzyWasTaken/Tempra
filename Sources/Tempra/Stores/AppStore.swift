@@ -133,7 +133,7 @@ final class AppStore: ObservableObject {
                 .isSystemProcess != true else { return }
 
         var normalized = rule
-        normalized.limitPercent = min(max(1, normalized.limitPercent), maximumLimit)
+        normalized.limitPercent = CPULimitRange.clamped(normalized.limitPercent)
         if normalized.action == .pause {
             normalized.runOnEfficiencyCores = false
         }
@@ -276,7 +276,10 @@ final class AppStore: ObservableObject {
     }
 
     func setHighCPUThreshold(_ threshold: Double) {
-        preferences.highCPUThreshold = min(max(25, threshold), maximumLimit)
+        preferences.highCPUThreshold = min(
+            max(25, threshold),
+            CPULimitRange.maximumPercent
+        )
         persistPreferences()
     }
 
@@ -352,9 +355,8 @@ final class AppStore: ObservableObject {
         }
         update(&preferences.profiles[index])
         preferences.profiles[index].name = profileName(from: preferences.profiles[index].name)
-        preferences.profiles[index].limitPercent = min(
-            max(1, preferences.profiles[index].limitPercent),
-            maximumLimit
+        preferences.profiles[index].limitPercent = CPULimitRange.clamped(
+            preferences.profiles[index].limitPercent
         )
         preferences.profiles[index].delaySeconds = min(
             max(0, preferences.profiles[index].delaySeconds),

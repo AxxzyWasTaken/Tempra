@@ -287,7 +287,7 @@ struct TempraSettingsView: View {
                     if profile.limitPolicy != .inherit {
                         TempraNumberField(
                             value: profileBinding(profile, keyPath: \.limitPercent),
-                            range: 1...maximumLimit,
+                            range: CPULimitRange.allowed,
                             width: 58,
                             suffix: "%"
                         )
@@ -360,7 +360,7 @@ struct TempraSettingsView: View {
                         get: { store.preferences.highCPUThreshold },
                         set: { threshold in store.setHighCPUThreshold(threshold) }
                     ),
-                    in: 25...maximumLimit,
+                    in: 25...CPULimitRange.maximumPercent,
                     step: 25
                 ) {
                     Text("\(Int(store.preferences.highCPUThreshold))% CPU")
@@ -616,9 +616,6 @@ struct TempraSettingsView: View {
         return "\(Int(duration))s"
     }
 
-    private var maximumLimit: Double {
-        Double(max(1, ProcessInfo.processInfo.activeProcessorCount) * 100)
-    }
 }
 
 private extension View {

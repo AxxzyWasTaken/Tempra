@@ -12,6 +12,7 @@ struct RuleEditorView: View {
     @State private var isTitleHovered = false
     @State private var isBackgroundHeaderHovered = false
     @State private var isRemovingRule = false
+    @State private var allowsMultipleCPUCores: Bool
 
     init(
         item: AppDisplayItem,
@@ -25,6 +26,10 @@ struct RuleEditorView: View {
         let initial = initialRule ?? store.rule(for: item)
         _original = State(initialValue: initial)
         _draft = State(initialValue: initial)
+        _allowsMultipleCPUCores = State(
+            initialValue: CPULimitRange.maximumPercent > CPULimitRange.oneCorePercent
+                && initial.limitPercent > CPULimitRange.oneCorePercent
+        )
     }
 
     var body: some View {
@@ -60,7 +65,7 @@ struct RuleEditorView: View {
         )
         .font(TempraTypography.body)
         .onChange(of: draft.limitPercent) { _, value in
-            draft.limitPercent = min(max(1, value), 100)
+            draft.limitPercent = CPULimitRange.clamped(value)
         }
         .task(id: draft) {
             guard draft != original else { return }
@@ -182,21 +187,44 @@ struct RuleEditorView: View {
                 HStack(spacing: 9) {
                     TempraNumberField(
                         value: $draft.limitPercent,
-                        range: 1...100,
-                        width: 48,
+                        range: visibleCPULimitRange,
+                        width: allowsMultipleCPUCores ? 58 : 48,
                         suffix: "%",
                         accented: true
                     )
 
-                    TempraTickedSlider(
-                        value: $draft.limitPercent,
-                        range: 1...100,
-                        step: 1
-                    )
+                    if allowsMultipleCPUCores {
+                        Spacer(minLength: 0)
+
+                        Stepper(
+                            value: $draft.limitPercent,
+                            in: CPULimitRange.allowed,
+                            step: 25
+                        ) {
+                            Text(cpuCoreSelection)
+                                .font(TempraTypography.ruleTag.monospacedDigit())
+                                .foregroundStyle(TempraPalette.secondaryText)
+                                .frame(width: 54, alignment: .trailing)
+                        }
+                        .fixedSize()
+                    } else {
+                        TempraTickedSlider(
+                            value: $draft.limitPercent,
+                            range: visibleCPULimitRange,
+                            step: 1
+                        )
+                    }
                 }
                 .padding(.leading, 24)
 
-                Text("Averaged over time; brief CPU spikes can still appear.")
+                if CPULimitRange.maximumPercent > CPULimitRange.oneCorePercent {
+                    Toggle("Allow more than one CPU core", isOn: multipleCoreBinding)
+                        .toggleStyle(TempraCheckboxToggleStyle())
+                        .controlSize(.small)
+                        .padding(.leading, 24)
+                }
+
+                Text("100% equals one CPU core; brief CPU spikes can still appear.")
                     .font(TempraTypography.ruleTag)
                     .foregroundStyle(TempraPalette.secondaryText)
                     .padding(.leading, 24)
@@ -284,6 +312,34 @@ struct RuleEditorView: View {
         ))
         .toggleStyle(TempraCheckboxToggleStyle())
         .controlSize(.small)
+    }
+
+    private var visibleCPULimitRange: ClosedRange<Double> {
+        allowsMultipleCPUCores ? CPULimitRange.allowed : CPULimitRange.singleCore
+    }
+
+    private var multipleCoreBinding: Binding<Bool> {
+        Binding(
+            get: { allowsMultipleCPUCores },
+            set: { allowsMultipleCores in
+                allowsMultipleCPUCores = allowsMultipleCores
+                if !allowsMultipleCores {
+                    draft.limitPercent = min(
+                        draft.limitPercent,
+                        CPULimitRange.oneCorePercent
+                    )
+                }
+            }
+        )
+    }
+
+    private var cpuCoreSelection: String {
+        let cores = draft.limitPercent / CPULimitRange.oneCorePercent
+        let coreCount = cores.formatted(
+            .number.precision(.fractionLength(0...2))
+        )
+        let unit = cores == 1 ? "core" : "cores"
+        return "\(coreCount) \(unit)"
     }
 
     private func idleControl(

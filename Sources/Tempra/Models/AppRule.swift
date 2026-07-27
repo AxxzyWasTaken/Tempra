@@ -1,5 +1,34 @@
 import Foundation
 
+enum CPULimitRange {
+    static let minimumPercent = 1.0
+    static let oneCorePercent = 100.0
+
+    static var logicalCoreCount: Int {
+        max(1, ProcessInfo.processInfo.activeProcessorCount)
+    }
+
+    static var maximumPercent: Double {
+        maximumPercent(logicalCoreCount: logicalCoreCount)
+    }
+
+    static var allowed: ClosedRange<Double> {
+        minimumPercent...maximumPercent
+    }
+
+    static var singleCore: ClosedRange<Double> {
+        minimumPercent...min(oneCorePercent, maximumPercent)
+    }
+
+    static func maximumPercent(logicalCoreCount: Int) -> Double {
+        Double(max(1, logicalCoreCount)) * oneCorePercent
+    }
+
+    static func clamped(_ percent: Double) -> Double {
+        min(max(allowed.lowerBound, percent), allowed.upperBound)
+    }
+}
+
 enum RuleAction: String, Codable, CaseIterable, Identifiable, Sendable {
     case none
     case limit

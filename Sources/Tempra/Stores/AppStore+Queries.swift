@@ -101,10 +101,6 @@ extension AppStore {
         return suspension.until
     }
 
-    var maximumLimit: Double {
-        Double(max(1, ProcessInfo.processInfo.activeProcessorCount) * 100)
-    }
-
     func profileName(from name: String) -> String {
         String(name.trimmingCharacters(in: .whitespacesAndNewlines).prefix(60))
     }
