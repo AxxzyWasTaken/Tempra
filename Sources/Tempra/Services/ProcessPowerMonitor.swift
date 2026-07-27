@@ -215,6 +215,10 @@ struct PowerSavingsEstimator {
                         state.recentUnmanagedEnergyIntensity
                     )
                 }
+                if state.frozenEnergyIntensity == nil,
+                   let energyIntensity = app.cpuEnergyJoulesPerCPUSecond {
+                    state.frozenEnergyIntensity = max(0, energyIntensity)
+                }
                 state.wasManaged = true
 
                 let savedCPU = max(0, savedCPUByIdentifier[identifier] ?? 0)

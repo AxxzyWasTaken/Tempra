@@ -153,37 +153,60 @@ struct ProcessPowerMonitorTests {
 
 @Suite("Power savings estimates")
 struct PowerSavingsEstimatorTests {
-    @Test("Management freezes the recent unmanaged mean and clamps negative savings")
-    func baselineAndClamp() throws {
+    @Test("Management freezes the recent unmanaged energy intensity")
+    func freezesEnergyIntensity() throws {
         var estimator = PowerSavingsEstimator()
-        for watts in [0.2, 0.4, 0.6] {
-            #expect(estimator.update(apps: [app(power: watts, status: .normal)]).isEmpty)
+        for energyIntensity in [2.0, 4.0, 6.0] {
+            #expect(estimator.update(apps: [
+                app(power: nil, energyIntensity: energyIntensity, status: .normal)
+            ]).isEmpty)
         }
 
-        var savings = estimator.update(apps: [app(power: 0.1, status: .limited(10))])
-        #expect(abs(try #require(savings["example.app"]) - 0.3) < 0.000_000_1)
+        var savings = estimator.update(
+            apps: [app(power: 0.1, energyIntensity: 10, status: .limited(10))],
+            savedCPUByIdentifier: ["example.app": 10]
+        )
+        #expect(abs(try #require(savings["example.app"]) - 0.4) < 0.000_000_1)
 
-        savings = estimator.update(apps: [app(power: 0.5, status: .paused)])
-        #expect(try #require(savings["example.app"]) == 0)
+        savings = estimator.update(
+            apps: [app(power: 0.5, energyIntensity: 10, status: .paused)],
+            savedCPUByIdentifier: ["example.app": -10]
+        )
+        #expect(savings.isEmpty)
 
-        savings = estimator.update(apps: [app(power: 0.2, status: .energyEfficient)])
+        savings = estimator.update(
+            apps: [app(power: 0.2, energyIntensity: 10, status: .energyEfficient)],
+            savedCPUByIdentifier: ["example.app": 5]
+        )
         #expect(abs(try #require(savings["example.app"]) - 0.2) < 0.000_000_1)
     }
 
     @Test("Inactive states clear savings and resume baseline learning")
     func inactiveStates() throws {
         var estimator = PowerSavingsEstimator()
-        #expect(estimator.update(apps: [app(power: 0.4, status: .normal)]).isEmpty)
-        #expect(estimator.update(apps: [app(power: 0.6, status: .waiting)]).isEmpty)
+        #expect(estimator.update(apps: [
+            app(power: 0.4, energyIntensity: 4, status: .normal)
+        ]).isEmpty)
+        #expect(estimator.update(apps: [
+            app(power: 0.6, energyIntensity: 6, status: .waiting)
+        ]).isEmpty)
 
-        var savings = estimator.update(apps: [app(power: 0.1, status: .paused)])
-        #expect(abs(try #require(savings["example.app"]) - 0.4) < 0.000_000_1)
+        var savings = estimator.update(
+            apps: [app(power: 0.1, energyIntensity: 1, status: .paused)],
+            savedCPUByIdentifier: ["example.app": 10]
+        )
+        #expect(abs(try #require(savings["example.app"]) - 0.5) < 0.000_000_1)
 
-        #expect(estimator.update(apps: [app(power: 0.8, status: .audioProtected)]).isEmpty)
-        savings = estimator.update(apps: [app(power: 0.2, status: .limited(20))])
-        let expectedBaseline = (0.4 + 0.6 + 0.8) / 3
+        #expect(estimator.update(apps: [
+            app(power: 0.8, energyIntensity: 8, status: .audioProtected)
+        ]).isEmpty)
+        savings = estimator.update(
+            apps: [app(power: 0.2, energyIntensity: 1, status: .limited(20))],
+            savedCPUByIdentifier: ["example.app": 20]
+        )
+        let expectedEnergyIntensity = (4.0 + 6.0 + 8.0) / 3
         #expect(
-            abs(try #require(savings["example.app"]) - (expectedBaseline - 0.2))
+            abs(try #require(savings["example.app"]) - expectedEnergyIntensity * 0.2)
                 < 0.000_000_1
         )
     }
@@ -224,8 +247,13 @@ struct PowerSavingsEstimatorTests {
     }
 
     @Test("Managed samples provide an energy intensity when no baseline exists")
-    func managedEnergyIntensityFallback() throws {
+    func managedEnergyIntensity() throws {
         var estimator = PowerSavingsEstimator()
+        #expect(estimator.update(
+            apps: [app(power: nil, status: .limited(10))],
+            savedCPUByIdentifier: ["example.app": 20]
+        ).isEmpty)
+
         let savings = estimator.update(
             apps: [app(power: 0.1, energyIntensity: 4, status: .limited(10))],
             savedCPUByIdentifier: ["example.app": 20]
