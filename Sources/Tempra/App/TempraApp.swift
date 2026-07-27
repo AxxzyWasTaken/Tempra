@@ -16,18 +16,28 @@ enum TempraApplication {
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var menuPanelCoordinator: MenuPanelCoordinator?
+    private var store: AppStore?
     private let terminationCoordinator = ApplicationTerminationCoordinator()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        let coordinator = MenuPanelCoordinator(store: AppStore.shared)
-        menuPanelCoordinator = coordinator
+        do {
+            let store = try AppStore { error in
+                Self.presentPersistenceFailure(error)
+            }
+            self.store = store
+            menuPanelCoordinator = MenuPanelCoordinator(store: store)
+        } catch {
+            Self.presentStartupFailure(error)
+            NSApp.terminate(nil)
+        }
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard let store else { return .terminateNow }
         menuPanelCoordinator?.closePanels()
         terminationCoordinator.begin(
             shutdown: {
-                await AppStore.shared.shutdown()
+                await store.shutdown()
             },
             presentFailure: { result in
                 Self.presentRestorationFailure(result)
@@ -41,6 +51,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         )
         return .terminateLater
+    }
+
+    private static func presentStartupFailure(_ error: Error) {
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.alertStyle = .critical
+        alert.messageText = "Tempra could not load its saved data"
+        alert.informativeText = error.localizedDescription
+            + " Tempra did not overwrite the saved data and will now quit."
+        alert.addButton(withTitle: "Quit Tempra")
+        alert.runModal()
+    }
+
+    private static func presentPersistenceFailure(_ error: Error) {
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.alertStyle = .critical
+        alert.messageText = "Tempra could not save this change"
+        alert.informativeText = error.localizedDescription
+            + " Tempra did not treat the failed write as successful."
+        alert.addButton(withTitle: "OK")
+        alert.runModal()
     }
 
     private static func presentRestorationFailure(

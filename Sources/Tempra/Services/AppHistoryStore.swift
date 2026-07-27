@@ -14,20 +14,30 @@ final class AppHistoryStore {
     private(set) var activityEvents: [ActivityEvent]
     private(set) var cpuHistorySamples: [CPUHistorySample]
 
-    init(persistence: AppPersistence, now: Date = Date()) {
+    init(
+        persistence: AppPersistence,
+        activityEvents: [ActivityEvent],
+        cpuHistorySamples: [CPUHistorySample],
+        now: Date = Date()
+    ) {
         self.persistence = persistence
-        activityEvents = persistence.loadActivity()
-        cpuHistorySamples = persistence.loadCPUHistory()
+        self.activityEvents = activityEvents
+        self.cpuHistorySamples = cpuHistorySamples
         trimActivity(now: now)
         trimCPUHistory(now: now)
         lastCPUHistorySampleDate = cpuHistorySamples.last?.date
-        persistence.saveActivity(activityEvents)
     }
 
-    func recordActivity(_ event: ActivityEvent, now: Date = Date()) -> [ActivityEvent] {
+    func recordActivity(_ event: ActivityEvent, now: Date = Date()) throws -> [ActivityEvent] {
+        let previousEvents = activityEvents
         activityEvents.insert(event, at: 0)
         trimActivity(now: now)
-        persistence.saveActivity(activityEvents)
+        do {
+            try persistence.saveActivity(activityEvents)
+        } catch {
+            activityEvents = previousEvents
+            throw error
+        }
         return activityEvents
     }
 
@@ -36,12 +46,15 @@ final class AppHistoryStore {
         estimatedSavedSystemPercent: Double,
         interventionCount: Int,
         now: Date = Date()
-    ) -> [CPUHistorySample]? {
+    ) throws -> [CPUHistorySample]? {
         if let lastCPUHistorySampleDate,
            now.timeIntervalSince(lastCPUHistorySampleDate) < cpuHistorySampleInterval {
             return nil
         }
 
+        let previousSamples = cpuHistorySamples
+        let previousSampleDate = lastCPUHistorySampleDate
+        let previousPersistDate = lastCPUHistoryPersistDate
         cpuHistorySamples.append(CPUHistorySample(
             date: now,
             systemCPUPercent: systemCPU.totalPercent,
@@ -58,14 +71,21 @@ final class AppHistoryStore {
         if lastCPUHistoryPersistDate.map({
             now.timeIntervalSince($0) >= cpuHistoryPersistInterval
         }) ?? true {
-            persistence.saveCPUHistory(cpuHistorySamples)
-            lastCPUHistoryPersistDate = now
+            do {
+                try persistence.saveCPUHistory(cpuHistorySamples)
+                lastCPUHistoryPersistDate = now
+            } catch {
+                cpuHistorySamples = previousSamples
+                lastCPUHistorySampleDate = previousSampleDate
+                lastCPUHistoryPersistDate = previousPersistDate
+                throw error
+            }
         }
         return cpuHistorySamples
     }
 
-    func persistCPUHistory() {
-        persistence.saveCPUHistory(cpuHistorySamples)
+    func persistCPUHistory() throws {
+        try persistence.saveCPUHistory(cpuHistorySamples)
     }
 
     private func trimActivity(now: Date) {

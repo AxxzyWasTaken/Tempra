@@ -180,7 +180,14 @@ struct AppPreferences: Codable, Equatable {
             forKey: .profiles
         ) ?? []
         var seenProfileIDs = Set<UUID>()
-        profiles = decodedProfiles.filter { seenProfileIDs.insert($0.id).inserted }
+        guard decodedProfiles.allSatisfy({ seenProfileIDs.insert($0.id).inserted }) else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .profiles,
+                in: container,
+                debugDescription: "Profile identifiers must be unique."
+            )
+        }
+        profiles = decodedProfiles
         let decodedActiveProfileID = try container.decodeIfPresent(
             UUID.self,
             forKey: .activeProfileID

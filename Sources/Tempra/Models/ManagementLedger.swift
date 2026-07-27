@@ -47,6 +47,7 @@ private struct ManagementLedgerState: Codable {
 @MainActor
 final class ManagementLedger {
     nonisolated static let storageKey = "temper.managementLedger.v1"
+    typealias PersistenceErrorHandler = @MainActor @Sendable (Error) -> Void
 
     private let defaults: UserDefaults
     private let storageKey: String
@@ -54,6 +55,7 @@ final class ManagementLedger {
     private let retention: TimeInterval
     private var state: ManagementLedgerState
     private var heartbeatTask: Task<Void, Never>?
+    private static let maximumStoredBytes = 16 * 1_024 * 1_024
 
     init(
         defaults: UserDefaults = .standard,
@@ -62,33 +64,54 @@ final class ManagementLedger {
         now: Date = Date(),
         activityEvents: [ActivityEvent] = [],
         retention: TimeInterval = 7 * 24 * 60 * 60
-    ) {
+    ) throws {
         self.defaults = defaults
         self.storageKey = storageKey
         self.sessionID = sessionID
         self.retention = retention
 
-        if let data = defaults.data(forKey: storageKey),
-           let stored = try? JSONDecoder().decode(ManagementLedgerState.self, from: data),
-           stored.version == 1 {
+        if let storedValue = defaults.object(forKey: storageKey) {
+            guard let data = storedValue as? Data else {
+                throw AppPersistenceError.invalidStoredType(name: "management history")
+            }
+            guard data.count <= Self.maximumStoredBytes else {
+                throw AppPersistenceError.storedDataTooLarge(name: "management history")
+            }
+            let stored: ManagementLedgerState
+            do {
+                stored = try JSONDecoder().decode(ManagementLedgerState.self, from: data)
+            } catch {
+                throw AppPersistenceError.decodingFailed(
+                    name: "management history",
+                    detail: error.localizedDescription
+                )
+            }
+            try Self.validate(stored)
             state = stored
             recoverPriorSessions(now: now)
         } else {
             state = Self.migrate(activityEvents: activityEvents)
         }
         trim(now: now)
-        persist()
     }
 
-    func startHeartbeat() {
+    func startHeartbeat(onPersistenceError: @escaping PersistenceErrorHandler) {
         guard heartbeatTask == nil else { return }
         heartbeatTask = Task { [weak self] in
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(60))
                 guard !Task.isCancelled, let self else { return }
-                heartbeat(at: Date())
+                do {
+                    try heartbeat(at: Date())
+                } catch {
+                    onPersistenceError(error)
+                }
             }
         }
+    }
+
+    func persistLoadedState() throws {
+        try persist()
     }
 
     func transition(
@@ -97,7 +120,29 @@ final class ManagementLedger {
         applicationURL: URL?,
         status: ManagementStatus,
         at date: Date = Date()
-    ) {
+    ) throws {
+        let previousState = state
+        do {
+            try applyTransition(
+                bundleIdentifier: bundleIdentifier,
+                displayName: displayName,
+                applicationURL: applicationURL,
+                status: status,
+                at: date
+            )
+        } catch {
+            state = previousState
+            throw error
+        }
+    }
+
+    private func applyTransition(
+        bundleIdentifier: String,
+        displayName: String,
+        applicationURL: URL?,
+        status: ManagementStatus,
+        at date: Date
+    ) throws {
         let category = ManagementMetricCategory(status: status)
         let activeIndex = state.active.firstIndex {
             $0.bundleIdentifier == bundleIdentifier
@@ -111,7 +156,7 @@ final class ManagementLedger {
                     state.active[activeIndex].lastObservedAt,
                     date
                 )
-                persist()
+                try persist()
                 return
             }
             closeActive(at: activeIndex, endedAt: date)
@@ -130,10 +175,11 @@ final class ManagementLedger {
             ))
         }
         trim(now: date)
-        persist()
+        try persist()
     }
 
-    func heartbeat(at date: Date = Date()) {
+    func heartbeat(at date: Date = Date()) throws {
+        let previousState = state
         for index in state.active.indices where state.active[index].sessionID == sessionID {
             state.active[index].lastObservedAt = max(
                 state.active[index].lastObservedAt,
@@ -141,17 +187,28 @@ final class ManagementLedger {
             )
         }
         trim(now: date)
-        persist()
+        do {
+            try persist()
+        } catch {
+            state = previousState
+            throw error
+        }
     }
 
-    func shutdown(at date: Date = Date()) {
+    func shutdown(at date: Date = Date()) throws {
         heartbeatTask?.cancel()
         heartbeatTask = nil
+        let previousState = state
         for index in state.active.indices.reversed() {
             closeActive(at: index, endedAt: date)
         }
         trim(now: date)
-        persist()
+        do {
+            try persist()
+        } catch {
+            state = previousState
+            throw error
+        }
     }
 
     func durations(since startDate: Date, now: Date = Date()) -> [ManagementDurationSummary] {
@@ -263,9 +320,62 @@ final class ManagementLedger {
         state.completed.removeAll { $0.endedAt < cutoff }
     }
 
-    private func persist() {
-        guard let data = try? JSONEncoder().encode(state) else { return }
+    private func persist() throws {
+        try Self.validate(state)
+        let data: Data
+        do {
+            data = try JSONEncoder().encode(state)
+        } catch {
+            throw AppPersistenceError.encodingFailed(
+                name: "management history",
+                detail: error.localizedDescription
+            )
+        }
+        guard data.count <= Self.maximumStoredBytes else {
+            throw AppPersistenceError.storedDataTooLarge(name: "management history")
+        }
         defaults.set(data, forKey: storageKey)
+        guard defaults.data(forKey: storageKey) == data else {
+            throw AppPersistenceError.writeFailed(name: "management history")
+        }
+    }
+
+    private static func validate(_ state: ManagementLedgerState) throws {
+        guard state.version == 1 else {
+            throw AppPersistenceError.invalidValue(
+                name: "management history",
+                detail: "version \(state.version) is not supported"
+            )
+        }
+        guard state.completed.count <= 100_000, state.active.count <= 10_000 else {
+            throw AppPersistenceError.invalidValue(
+                name: "management history",
+                detail: "there are too many stored intervals"
+            )
+        }
+        var identifiers = Set<UUID>()
+        for interval in state.completed {
+            guard identifiers.insert(interval.id).inserted,
+                  !interval.bundleIdentifier.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                  !interval.displayName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                  interval.endedAt > interval.startedAt else {
+                throw AppPersistenceError.invalidValue(
+                    name: "management history",
+                    detail: "a completed interval is inconsistent"
+                )
+            }
+        }
+        for interval in state.active {
+            guard identifiers.insert(interval.id).inserted,
+                  !interval.bundleIdentifier.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                  !interval.displayName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                  interval.lastObservedAt >= interval.startedAt else {
+                throw AppPersistenceError.invalidValue(
+                    name: "management history",
+                    detail: "an active interval is inconsistent"
+                )
+            }
+        }
     }
 
     private static func migrate(activityEvents: [ActivityEvent]) -> ManagementLedgerState {

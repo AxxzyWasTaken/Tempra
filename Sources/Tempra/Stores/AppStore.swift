@@ -10,7 +10,7 @@ private let monitoringLogger = Logger(
 
 @MainActor
 final class AppStore: ObservableObject {
-    static let shared = AppStore()
+    typealias PersistenceErrorHandler = @MainActor @Sendable (Error) -> Void
 
     @Published private(set) var apps: [ManagedApp] = []
     @Published private(set) var rules: [String: AppRule] = [:]
@@ -29,11 +29,9 @@ final class AppStore: ObservableObject {
     private let launchAtLoginController: any LaunchAtLoginControlling
     private let persistence: AppPersistence
     private let monitoringService: any MonitoringServicing
-    private lazy var historyStore = AppHistoryStore(persistence: persistence)
-    lazy var managementLedger = ManagementLedger(
-        defaults: persistence.defaults,
-        activityEvents: activityEvents
-    )
+    private let persistenceErrorHandler: PersistenceErrorHandler
+    private let historyStore: AppHistoryStore
+    let managementLedger: ManagementLedger
     private lazy var monitoringCoordinator = MonitoringCoordinator(
         service: monitoringService
     ) { [weak self] sample in self?.handleMonitoringSample(sample) }
@@ -43,14 +41,21 @@ final class AppStore: ObservableObject {
     private var isPresentationActive = false
     private var hasBegunShutdown = false
     private var hasShutDown = false
+    private var persistedEnabled: Bool
+    private var persistedRules: [String: AppRule]
+    private var persistedPreferences: AppPreferences
+    private var persistedSuspensions: [String: RuleSuspension]
 
-    convenience init() {
-        self.init(
+    convenience init(
+        persistenceErrorHandler: @escaping PersistenceErrorHandler
+    ) throws {
+        try self.init(
             persistence: AppPersistence(),
             managementCoordinator: ProcessManagementCoordinator(),
             monitoringService: MonitoringService(),
             launchAtLoginController: LaunchAtLoginController(),
-            startsMonitoring: true
+            startsMonitoring: true,
+            persistenceErrorHandler: persistenceErrorHandler
         )
     }
 
@@ -59,25 +64,51 @@ final class AppStore: ObservableObject {
         managementCoordinator: ProcessManagementCoordinator,
         monitoringService: any MonitoringServicing,
         launchAtLoginController: any LaunchAtLoginControlling,
-        startsMonitoring: Bool
-    ) {
+        startsMonitoring: Bool,
+        persistenceErrorHandler: @escaping PersistenceErrorHandler
+    ) throws {
+        let loadedEnabled = try persistence.loadEnabled()
+        let loadedRules = try persistence.loadRules()
+        var loadedPreferences = try persistence.loadPreferences()
+        let loadedSuspensions = try persistence.loadSuspensions()
+        let loadedActivity = try persistence.loadActivity()
+        let loadedCPUHistory = try persistence.loadCPUHistory()
+        let historyStore = AppHistoryStore(
+            persistence: persistence,
+            activityEvents: loadedActivity,
+            cpuHistorySamples: loadedCPUHistory
+        )
+        let managementLedger = try ManagementLedger(
+            defaults: persistence.defaults,
+            activityEvents: historyStore.activityEvents
+        )
+        try managementLedger.persistLoadedState()
+
         self.persistence = persistence
         self.managementCoordinator = managementCoordinator
         self.monitoringService = monitoringService
         self.launchAtLoginController = launchAtLoginController
-        isEnabled = persistence.loadEnabled()
-        loadRules()
-        loadPreferences()
-        loadSuspensions()
+        self.persistenceErrorHandler = persistenceErrorHandler
+        self.historyStore = historyStore
+        self.managementLedger = managementLedger
+        isEnabled = loadedEnabled
+        rules = loadedRules
+        loadedPreferences.launchAtLogin = launchAtLoginController.isEnabled
+        preferences = loadedPreferences
+        suspensions = loadedSuspensions
         activityEvents = historyStore.activityEvents
         cpuHistorySamples = historyStore.cpuHistorySamples
-        managementLedger.startHeartbeat()
+        persistedEnabled = loadedEnabled
+        persistedRules = loadedRules
+        persistedPreferences = loadedPreferences
+        persistedSuspensions = loadedSuspensions
+        managementLedger.startHeartbeat { [weak self] error in
+            self?.reportPersistenceError(error)
+        }
 
-        preferences.launchAtLogin = launchAtLoginController.isEnabled
         if launchAtLoginController.requiresApproval {
             launchAtLoginError = "Approve Tempra in System Settings › General › Login Items."
         }
-        persistPreferences()
         managementCoordinator.start(
             eventHandler: { [weak self] event in
                 self?.handleControllerEvent(event)
@@ -120,7 +151,7 @@ final class AppStore: ObservableObject {
         }
 
         rules[normalized.bundleIdentifier] = normalized
-        persistRules()
+        guard persistRules() else { return }
         recordActivity(
             bundleIdentifier: normalized.bundleIdentifier,
             kind: normalized.isEnabled ? .ruleSaved : .ruleDisabled,
@@ -185,15 +216,19 @@ final class AppStore: ObservableObject {
 
     func removeRule(bundleIdentifier: String) {
         guard rules[bundleIdentifier] != nil else { return }
+        let previousRules = rules
+        let previousSuspensions = suspensions
+        rules.removeValue(forKey: bundleIdentifier)
+        suspensions.removeValue(forKey: bundleIdentifier)
+        guard persistRulesAndSuspensions(
+            previousRules: previousRules,
+            previousSuspensions: previousSuspensions
+        ) else { return }
         recordActivity(
             bundleIdentifier: bundleIdentifier,
             kind: .ruleRemoved,
             detail: "Tempra will no longer manage this app."
         )
-        rules.removeValue(forKey: bundleIdentifier)
-        suspensions.removeValue(forKey: bundleIdentifier)
-        persistRules()
-        persistSuspensions()
         applyRulesToCurrentApps()
     }
 
@@ -203,7 +238,7 @@ final class AppStore: ObservableObject {
             bundleIdentifier: bundleIdentifier,
             until: until
         )
-        persistSuspensions()
+        guard persistSuspensions() else { return }
         recordActivity(
             bundleIdentifier: bundleIdentifier,
             kind: .snoozed,
@@ -214,23 +249,30 @@ final class AppStore: ObservableObject {
 
     func endSnooze(bundleIdentifier: String) {
         guard suspensions.removeValue(forKey: bundleIdentifier) != nil else { return }
-        persistSuspensions()
+        guard persistSuspensions() else { return }
         applyRulesToCurrentApps()
     }
 
     func setEnabled(_ enabled: Bool) {
         guard !hasBegunShutdown else { return }
         isEnabled = enabled
-        persistence.saveEnabled(enabled)
+        do {
+            try persistence.saveEnabled(enabled)
+            persistedEnabled = enabled
+        } catch {
+            isEnabled = persistedEnabled
+            reportPersistenceError(error)
+            return
+        }
         applyRulesToCurrentApps()
     }
 
     func setHighCPUAlertsEnabled(_ enabled: Bool) {
         preferences.highCPUAlertsEnabled = enabled
+        guard persistPreferences() else { return }
         if !enabled {
             pendingHighCPUAlert = nil
         }
-        persistPreferences()
     }
 
     func setHighCPUThreshold(_ threshold: Double) {
@@ -267,10 +309,10 @@ final class AppStore: ObservableObject {
 
     func ignoreHighCPUAlerts(for bundleIdentifier: String) {
         preferences.ignoredHighCPUAlertBundleIdentifiers.insert(bundleIdentifier)
+        guard persistPreferences() else { return }
         if pendingHighCPUAlert?.bundleIdentifier == bundleIdentifier {
             pendingHighCPUAlert = nil
         }
-        persistPreferences()
     }
 
     func clearIgnoredHighCPUAlerts() {
@@ -286,7 +328,7 @@ final class AppStore: ObservableObject {
         let profile = ManagementProfile(name: normalizedName)
         preferences.profiles.append(profile)
         preferences.activeProfileID = profile.id
-        persistPreferences()
+        guard persistPreferences() else { return nil }
         applyRulesToCurrentApps()
         return profile.id
     }
@@ -318,7 +360,7 @@ final class AppStore: ObservableObject {
             max(0, preferences.profiles[index].delaySeconds),
             5 * 60
         )
-        persistPreferences()
+        guard persistPreferences() else { return }
         if preferences.activeProfileID == id {
             applyRulesToCurrentApps()
         }
@@ -330,7 +372,7 @@ final class AppStore: ObservableObject {
         if preferences.activeProfileID == id {
             preferences.activeProfileID = nil
         }
-        persistPreferences()
+        guard persistPreferences() else { return }
         applyRulesToCurrentApps()
     }
 
@@ -339,7 +381,7 @@ final class AppStore: ObservableObject {
             return
         }
         preferences.activeProfileID = id
-        persistPreferences()
+        guard persistPreferences() else { return }
         applyRulesToCurrentApps()
     }
 
@@ -350,14 +392,14 @@ final class AppStore: ObservableObject {
 
     func setIncludesEssentialSystemProcesses(_ includes: Bool) {
         preferences.includesEssentialSystemProcesses = includes
-        persistPreferences()
+        guard persistPreferences() else { return }
         refresh()
     }
 
     func setContinuousMonitoringEnabled(_ enabled: Bool) {
         guard preferences.continuousMonitoringEnabled != enabled else { return }
         preferences.continuousMonitoringEnabled = enabled
-        persistPreferences()
+        guard persistPreferences() else { return }
         configureMonitoringDemand(refreshImmediately: true)
     }
 
@@ -374,7 +416,7 @@ final class AppStore: ObservableObject {
 
     func setShowsCPUUsageInMenuBar(_ isVisible: Bool) {
         preferences.showsCPUUsageInMenuBar = isVisible
-        persistPreferences()
+        guard persistPreferences() else { return }
         configureMonitoringDemand(refreshImmediately: true)
     }
 
@@ -395,7 +437,7 @@ final class AppStore: ObservableObject {
             preferences.launchAtLogin = launchAtLoginController.isEnabled
             launchAtLoginError = error.localizedDescription
         }
-        persistPreferences()
+        persistedPreferences.launchAtLogin = preferences.launchAtLogin
     }
 
     private var monitoringDemand: MonitoringDemand {
@@ -415,7 +457,11 @@ final class AppStore: ObservableObject {
             highCPUDetector.reset()
             attentionIdentifiers.removeAll()
             pendingHighCPUAlert = nil
-            historyStore.persistCPUHistory()
+            do {
+                try historyStore.persistCPUHistory()
+            } catch {
+                reportPersistenceError(error)
+            }
         }
         monitoringCoordinator.configure(
             demand: demand,
@@ -476,9 +522,17 @@ final class AppStore: ObservableObject {
         if !hasBegunShutdown {
             hasBegunShutdown = true
             isEnabled = false
-            managementLedger.shutdown()
+            do {
+                try managementLedger.shutdown()
+            } catch {
+                reportPersistenceError(error)
+            }
+            do {
+                try historyStore.persistCPUHistory()
+            } catch {
+                reportPersistenceError(error)
+            }
             workspaceEventMonitor.stop()
-            historyStore.persistCPUHistory()
             runtimeMetrics.clearPowerMetrics()
             await monitoringCoordinator.shutdown()
         }
@@ -580,12 +634,16 @@ final class AppStore: ObservableObject {
                 ?? identifier
             let applicationURL = apps.first { $0.bundleIdentifier == identifier }?.bundleURL
                 ?? rules[identifier]?.applicationURL
-            managementLedger.transition(
-                bundleIdentifier: identifier,
-                displayName: displayName,
-                applicationURL: applicationURL,
-                status: current
-            )
+            do {
+                try managementLedger.transition(
+                    bundleIdentifier: identifier,
+                    displayName: displayName,
+                    applicationURL: applicationURL,
+                    status: current
+                )
+            } catch {
+                reportPersistenceError(error)
+            }
             recordControllerTransition(
                 bundleIdentifier: identifier,
                 previous: previous,
@@ -660,47 +718,99 @@ final class AppStore: ObservableObject {
         let displayName = apps.first { $0.bundleIdentifier == bundleIdentifier }?.name
             ?? rules[bundleIdentifier]?.displayName
             ?? bundleIdentifier
-        activityEvents = historyStore.recordActivity(ActivityEvent(
-            bundleIdentifier: bundleIdentifier,
-            displayName: displayName,
-            kind: kind,
-            detail: detail
-        ))
-    }
-
-    private func recordCPUHistorySample() {
-        if let samples = historyStore.recordCPUHistory(
-            systemCPU: systemCPU,
-            estimatedSavedSystemPercent: estimatedSavedSystemPercent,
-            interventionCount: activeManagementCount
-        ) {
-            cpuHistorySamples = samples
+        do {
+            activityEvents = try historyStore.recordActivity(ActivityEvent(
+                bundleIdentifier: bundleIdentifier,
+                displayName: displayName,
+                kind: kind,
+                detail: detail
+            ))
+        } catch {
+            reportPersistenceError(error)
         }
     }
 
-    private func loadRules() {
-        rules = persistence.loadRules()
-        persistRules()
+    private func recordCPUHistorySample() {
+        do {
+            if let samples = try historyStore.recordCPUHistory(
+                systemCPU: systemCPU,
+                estimatedSavedSystemPercent: estimatedSavedSystemPercent,
+                interventionCount: activeManagementCount
+            ) {
+                cpuHistorySamples = samples
+            }
+        } catch {
+            reportPersistenceError(error)
+        }
     }
 
-    private func loadPreferences() {
-        preferences = persistence.loadPreferences()
+    @discardableResult
+    private func persistRules() -> Bool {
+        do {
+            try persistence.saveRules(rules)
+            persistedRules = rules
+            return true
+        } catch {
+            rules = persistedRules
+            reportPersistenceError(error)
+            return false
+        }
     }
 
-    private func loadSuspensions() {
-        suspensions = persistence.loadSuspensions()
+    @discardableResult
+    private func persistPreferences() -> Bool {
+        do {
+            try persistence.savePreferences(preferences)
+            persistedPreferences = preferences
+            return true
+        } catch {
+            preferences = persistedPreferences
+            reportPersistenceError(error)
+            return false
+        }
     }
 
-    private func persistRules() {
-        persistence.saveRules(rules)
+    @discardableResult
+    private func persistSuspensions() -> Bool {
+        do {
+            try persistence.saveSuspensions(suspensions)
+            persistedSuspensions = suspensions
+            return true
+        } catch {
+            suspensions = persistedSuspensions
+            reportPersistenceError(error)
+            return false
+        }
     }
 
-    private func persistPreferences() {
-        persistence.savePreferences(preferences)
+    private func persistRulesAndSuspensions(
+        previousRules: [String: AppRule],
+        previousSuspensions: [String: RuleSuspension]
+    ) -> Bool {
+        do {
+            try persistence.saveRules(rules)
+            try persistence.saveSuspensions(suspensions)
+            persistedRules = rules
+            persistedSuspensions = suspensions
+            return true
+        } catch let saveError {
+            rules = previousRules
+            suspensions = previousSuspensions
+            do {
+                try persistence.saveRules(previousRules)
+                try persistence.saveSuspensions(previousSuspensions)
+                persistedRules = previousRules
+                persistedSuspensions = previousSuspensions
+            } catch let rollbackError {
+                reportPersistenceError(rollbackError)
+            }
+            reportPersistenceError(saveError)
+            return false
+        }
     }
 
-    private func persistSuspensions() {
-        persistence.saveSuspensions(suspensions)
+    private func reportPersistenceError(_ error: Error) {
+        persistenceErrorHandler(error)
     }
 
 }

@@ -85,7 +85,17 @@ struct AppRule: Codable, Equatable, Identifiable, Sendable {
         displayName = try container.decode(String.self, forKey: .displayName)
         let storedAction = try container.decodeIfPresent(String.self, forKey: .action) ?? "none"
         let isLegacyEfficiencyRule = storedAction == "efficiency"
-        action = RuleAction(rawValue: storedAction) ?? .none
+        if isLegacyEfficiencyRule {
+            action = .none
+        } else if let decodedAction = RuleAction(rawValue: storedAction) {
+            action = decodedAction
+        } else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .action,
+                in: container,
+                debugDescription: "Unknown rule action \(storedAction)."
+            )
+        }
         runOnEfficiencyCores = try container.decodeIfPresent(
             Bool.self,
             forKey: .runOnEfficiencyCores

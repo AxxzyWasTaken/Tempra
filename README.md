@@ -58,6 +58,11 @@ and start time. The watchdog resumes only matching paused processes if Tempra
 exits unexpectedly. Tempra blocks a normal quit and shows an error if it cannot
 restore every managed process.
 
+Tempra validates saved rules, preferences, history, and management records
+before it starts process management. If saved data is invalid, Tempra preserves
+the stored bytes, shows an error, and stops startup. If a later save fails,
+Tempra shows an error and does not treat the failed write as successful.
+
 ## Requirements
 
 - macOS 14.2 or later

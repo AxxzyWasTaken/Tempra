@@ -25,13 +25,26 @@ struct AppPreferencesTests {
         preferences.includesEssentialSystemProcesses = true
         preferences.continuousMonitoringEnabled = true
 
-        #expect(AppPreferencesStorage.save(preferences, to: defaults, key: "preferences"))
-        let restored = try #require(
-            AppPreferencesStorage.load(from: defaults, key: "preferences")
-        )
+        try AppPreferencesStorage.save(preferences, to: defaults, key: "preferences")
+        let loaded = try AppPreferencesStorage.load(from: defaults, key: "preferences")
+        let restored = try #require(loaded)
 
         #expect(restored == preferences)
         #expect(restored.activeProfile == profile)
+    }
+
+    @Test("Preference encoding failures are reported")
+    func preferenceEncodingFailureThrows() throws {
+        let suiteName = "TempraTests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        var preferences = AppPreferences()
+        preferences.highCPUThreshold = .infinity
+
+        #expect(throws: AppPersistenceError.self) {
+            try AppPreferencesStorage.save(preferences, to: defaults, key: "preferences")
+        }
+        #expect(defaults.object(forKey: "preferences") == nil)
     }
 
     @Test("Continuous monitoring migrates to off")
@@ -64,6 +77,26 @@ struct AppPreferencesTests {
         #expect(restored.profiles.count == 1)
         #expect(restored.activeProfileID == nil)
         #expect(restored.activeProfile == nil)
+    }
+
+    @Test("Duplicate profile identifiers are rejected")
+    func duplicateProfilesFailDecoding() throws {
+        let profileID = UUID()
+        let profile: [String: Any] = [
+            "id": profileID.uuidString,
+            "name": "Quiet",
+            "limitPolicy": ProfileLimitPolicy.inherit.rawValue,
+            "limitPercent": 50,
+            "delayPolicy": ProfileDelayPolicy.inherit.rawValue,
+            "delaySeconds": 10
+        ]
+        let data = try JSONSerialization.data(withJSONObject: [
+            "profiles": [profile, profile]
+        ])
+
+        #expect(throws: DecodingError.self) {
+            _ = try JSONDecoder().decode(AppPreferences.self, from: data)
+        }
     }
 
     @Test("Profile policies adjust saved rules without replacing them")
