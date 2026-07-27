@@ -19,7 +19,7 @@ struct CPUHistorySample: Codable, Equatable, Identifiable {
         efficiencyCPUPercent: Double,
         estimatedSavedCPUPercent: Double,
         cpuTemperatureCelsius: Double? = nil,
-        thermalPressure: ThermalPressure = .nominal,
+        thermalPressure: ThermalPressure = .unknown,
         interventionCount: Int
     ) {
         self.date = date
@@ -60,7 +60,7 @@ struct CPUHistorySample: Codable, Equatable, Identifiable {
         thermalPressure = try container.decodeIfPresent(
             ThermalPressure.self,
             forKey: .thermalPressure
-        ) ?? .nominal
+        ) ?? .unknown
         interventionCount = try container.decode(Int.self, forKey: .interventionCount)
     }
 
@@ -78,6 +78,7 @@ struct CPUHistorySample: Codable, Equatable, Identifiable {
 }
 
 enum ThermalPressure: String, Codable, Equatable {
+    case unknown
     case nominal
     case fair
     case serious
@@ -85,6 +86,7 @@ enum ThermalPressure: String, Codable, Equatable {
 
     var title: String {
         switch self {
+        case .unknown: "Unavailable"
         case .nominal: "Nominal"
         case .fair: "Fair"
         case .serious: "Serious"
@@ -92,8 +94,9 @@ enum ThermalPressure: String, Codable, Equatable {
         }
     }
 
-    var chartValue: Double {
+    var chartValue: Double? {
         switch self {
+        case .unknown: nil
         case .nominal: 10
         case .fair: 30
         case .serious: 60
@@ -109,7 +112,7 @@ struct SystemCPUSnapshot: Equatable, Sendable {
     var performanceCoreCount: Int = 0
     var efficiencyCoreCount: Int = 0
     var cpuTemperatureCelsius: Double?
-    var thermalPressure: ThermalPressure = .nominal
+    var thermalPressure: ThermalPressure = .unknown
 }
 
 struct ManagementDurationSummary: Equatable, Identifiable {

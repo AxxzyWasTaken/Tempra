@@ -139,12 +139,18 @@ final class SystemMetricsMonitor {
     }
 
     private static var currentThermalPressure: ThermalPressure {
-        switch ProcessInfo.processInfo.thermalState {
+        thermalPressure(for: ProcessInfo.processInfo.thermalState)
+    }
+
+    static func thermalPressure(
+        for state: ProcessInfo.ThermalState
+    ) -> ThermalPressure {
+        switch state {
         case .nominal: .nominal
         case .fair: .fair
         case .serious: .serious
         case .critical: .critical
-        @unknown default: .nominal
+        @unknown default: .unknown
         }
     }
 }
