@@ -109,7 +109,7 @@ final class ProcessManagementCoordinator {
         }
     }
 
-    func shutdown() async {
+    func shutdown() async -> ProcessRestorationResult {
         updateTask?.cancel()
         updateTask = nil
         if let pauseActivationEventMonitor {
@@ -117,7 +117,12 @@ final class ProcessManagementCoordinator {
             self.pauseActivationEventMonitor = nil
         }
         await processWatcher.stop()
-        await controller.shutdown()
+        let result = await controller.shutdown()
+        if result.succeeded {
+            eventHandler = nil
+            stateHandler = nil
+        }
+        return result
     }
 
     private func handle(_ event: ProcessControllerEvent) {

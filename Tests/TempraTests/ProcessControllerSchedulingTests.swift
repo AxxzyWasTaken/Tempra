@@ -329,6 +329,7 @@ struct ProcessControllerSchedulingTests {
         })
         let controller = ProcessController(
             system: system,
+            crashWatchdog: RecordingProcessCrashWatchdog(),
             controlInterval: 0.5,
             minimumRunDuration: 0.005,
             clock: manualClock.clock
@@ -364,6 +365,7 @@ struct ProcessControllerSchedulingTests {
         ]
         let controller = ProcessController(
             system: system,
+            crashWatchdog: RecordingProcessCrashWatchdog(),
             controlInterval: 0.5,
             minimumRunDuration: 0.005,
             clock: manualClock.clock
@@ -410,6 +412,7 @@ struct ProcessControllerSchedulingTests {
         let controlledProcess = process(3)
         let controller = ProcessController(
             system: system,
+            crashWatchdog: RecordingProcessCrashWatchdog(),
             controlInterval: 0.5,
             minimumRunDuration: 0.005,
             clock: manualClock.clock
@@ -458,6 +461,7 @@ struct ProcessControllerSchedulingTests {
         )
         let controller = ProcessController(
             system: system,
+            crashWatchdog: RecordingProcessCrashWatchdog(),
             controlInterval: 0.5,
             minimumRunDuration: 0.005,
             clock: manualClock.clock
@@ -492,6 +496,7 @@ struct ProcessControllerSchedulingTests {
         let rule = limitRule(identifier)
         let controller = ProcessController(
             system: system,
+            crashWatchdog: RecordingProcessCrashWatchdog(),
             controlInterval: 0.5,
             minimumRunDuration: 0.005,
             clock: manualClock.clock
@@ -529,6 +534,7 @@ struct ProcessControllerSchedulingTests {
         let rule = limitRule(identifier)
         let controller = ProcessController(
             system: system,
+            crashWatchdog: RecordingProcessCrashWatchdog(),
             controlInterval: 0.5,
             minimumRunDuration: 0.005,
             clock: manualClock.clock
@@ -571,6 +577,7 @@ struct ProcessControllerSchedulingTests {
         let rule = limitRule(identifier)
         let controller = ProcessController(
             system: system,
+            crashWatchdog: RecordingProcessCrashWatchdog(),
             controlInterval: 0.5,
             minimumRunDuration: 0.005,
             clock: manualClock.clock
@@ -614,6 +621,7 @@ struct ProcessControllerSchedulingTests {
         let controlledProcess = process(9)
         let controller = ProcessController(
             system: system,
+            crashWatchdog: RecordingProcessCrashWatchdog(),
             controlInterval: 0.5,
             minimumRunDuration: 0.005,
             clock: manualClock.clock
@@ -638,6 +646,116 @@ struct ProcessControllerSchedulingTests {
         #expect(await eventually { manualClock.pendingSleepCount == 0 })
     }
 
+    @Test("An unavailable watchdog prevents Tempra from pausing a process")
+    func unavailableWatchdogPreventsPause() async {
+        let system = RecordingProcessSystem()
+        let watchdog = RecordingProcessCrashWatchdog()
+        watchdog.failPreparation()
+        let controlledProcess = process(13)
+        let controller = ProcessController(
+            system: system,
+            crashWatchdog: watchdog
+        )
+        let rule = AppRule(
+            bundleIdentifier: identifier,
+            displayName: "Example",
+            action: .pause
+        )
+
+        let snapshot = await controller.update(
+            targets: [target(
+                processIdentities: [controlledProcess],
+                launchedAt: oldLaunchDate
+            )],
+            rules: [identifier: rule],
+            isEnabled: true,
+            revision: 1
+        )
+
+        #expect(!system.didAttemptToStop(controlledProcess))
+        #expect(snapshot.statuses[identifier] == .unavailable)
+        #expect(!watchdog.isTracking(controlledProcess))
+        _ = await controller.shutdown()
+    }
+
+    @Test("Shutdown reports unresolved processes and succeeds after a retry")
+    func shutdownReportsRestorationFailure() async throws {
+        let system = RecordingProcessSystem()
+        let watchdog = RecordingProcessCrashWatchdog()
+        let controlledProcess = process(14)
+        let controller = ProcessController(
+            system: system,
+            crashWatchdog: watchdog
+        )
+        let rule = AppRule(
+            bundleIdentifier: identifier,
+            displayName: "Example",
+            action: .pause
+        )
+
+        _ = await controller.update(
+            targets: [target(
+                processIdentities: [controlledProcess],
+                launchedAt: oldLaunchDate
+            )],
+            rules: [identifier: rule],
+            isEnabled: true,
+            revision: 1
+        )
+        #expect(system.didAttemptToStop(controlledProcess))
+        #expect(watchdog.isTracking(controlledProcess))
+
+        system.failResume(for: controlledProcess, attempts: 3)
+        let failed = await controller.shutdown()
+        let failure = try #require(failed.failures.first)
+        #expect(!failed.succeeded)
+        #expect(failure.bundleIdentifier == identifier)
+        #expect(failure.stoppedProcesses == [controlledProcess])
+        #expect(watchdog.disarmCallCount == 0)
+        #expect(watchdog.isTracking(controlledProcess))
+
+        let succeeded = await controller.shutdown()
+        #expect(succeeded.succeeded)
+        #expect(watchdog.disarmCallCount == 1)
+        #expect(!watchdog.isTracking(controlledProcess))
+    }
+
+    @Test("Shutdown reports priority restoration failures")
+    func shutdownReportsPriorityFailure() async throws {
+        let system = RecordingProcessSystem()
+        let watchdog = RecordingProcessCrashWatchdog()
+        let controlledProcess = process(15)
+        let controller = ProcessController(
+            system: system,
+            crashWatchdog: watchdog
+        )
+        let rule = AppRule(
+            bundleIdentifier: identifier,
+            displayName: "Example",
+            runOnEfficiencyCores: true
+        )
+
+        _ = await controller.update(
+            targets: [target(
+                processIdentities: [controlledProcess],
+                launchedAt: oldLaunchDate
+            )],
+            rules: [identifier: rule],
+            isEnabled: true,
+            revision: 1
+        )
+        system.failPriorityRestore(for: controlledProcess, attempts: 3)
+
+        let failed = await controller.shutdown()
+        let failure = try #require(failed.failures.first)
+        #expect(!failed.succeeded)
+        #expect(failure.stoppedProcesses.isEmpty)
+        #expect(failure.backgroundPriorityProcesses == [controlledProcess])
+
+        let succeeded = await controller.shutdown()
+        #expect(succeeded.succeeded)
+    }
+
     @Test("Stale scheduler generations cannot stop a replacement process")
     func staleGenerationDoesNotStopReplacementProcess() async {
         let manualClock = ManualProcessControlClock()
@@ -650,6 +768,7 @@ struct ProcessControllerSchedulingTests {
         let rule = limitRule(identifier)
         let controller = ProcessController(
             system: system,
+            crashWatchdog: RecordingProcessCrashWatchdog(),
             controlInterval: 0.5,
             minimumRunDuration: 0.005,
             clock: manualClock.clock
@@ -705,6 +824,7 @@ struct ProcessControllerSchedulingTests {
         let controlledProcess = process(11)
         let controller = ProcessController(
             system: system,
+            crashWatchdog: RecordingProcessCrashWatchdog(),
             controlInterval: 0.5,
             minimumRunDuration: 0.005,
             clock: manualClock.clock
@@ -738,6 +858,7 @@ struct ProcessControllerSchedulingTests {
         let hiddenSnapshot = WindowVisibilitySnapshot(windowsFrontToBack: [], screenBounds: [])
         let controller = ProcessController(
             system: system,
+            crashWatchdog: RecordingProcessCrashWatchdog(),
             windowSnapshotProvider: { hiddenSnapshot },
             controlInterval: 0.5,
             minimumRunDuration: 0.005,
@@ -801,11 +922,67 @@ struct ProcessControllerSchedulingTests {
     }
 }
 
+private enum RecordingWatchdogError: Error {
+    case unavailable
+}
+
+private final class RecordingProcessCrashWatchdog: ProcessCrashWatchdogControlling,
+    @unchecked Sendable {
+    private let lock = NSLock()
+    private var trackedProcesses: Set<ProcessIdentity> = []
+    private var shouldFailPreparation = false
+    private var disarmCalls = 0
+
+    var disarmCallCount: Int {
+        withLock { disarmCalls }
+    }
+
+    func isTracking(_ process: ProcessIdentity) -> Bool {
+        withLock { trackedProcesses.contains(process) }
+    }
+
+    func failPreparation() {
+        withLock {
+            shouldFailPreparation = true
+        }
+    }
+
+    func prepareToStop(_ processes: Set<ProcessIdentity>) async throws {
+        try withLock {
+            guard !shouldFailPreparation else {
+                throw RecordingWatchdogError.unavailable
+            }
+            trackedProcesses.formUnion(processes)
+        }
+    }
+
+    func synchronize(_ processes: Set<ProcessIdentity>) async throws {
+        withLock {
+            trackedProcesses = processes
+        }
+    }
+
+    func disarm() async {
+        withLock {
+            trackedProcesses.removeAll()
+            disarmCalls += 1
+        }
+    }
+
+    private func withLock<Result>(_ operation: () throws -> Result) rethrows -> Result {
+        lock.lock()
+        defer { lock.unlock() }
+        return try operation()
+    }
+}
+
 private final class RecordingProcessSystem: ProcessSystemControlling, @unchecked Sendable {
     private let lock = NSLock()
     private var stopAttempts: [Set<ProcessIdentity>] = []
     private var resumeAttempts: [Set<ProcessIdentity>] = []
     private var stopFailuresRemaining: [ProcessIdentity: Int] = [:]
+    private var resumeFailuresRemaining: [ProcessIdentity: Int] = [:]
+    private var priorityRestoreFailuresRemaining: [ProcessIdentity: Int] = [:]
 
     var stopAttemptCount: Int {
         withLock { stopAttempts.count }
@@ -822,6 +999,18 @@ private final class RecordingProcessSystem: ProcessSystemControlling, @unchecked
     func failNextStop(for process: ProcessIdentity) {
         withLock {
             stopFailuresRemaining[process, default: 0] += 1
+        }
+    }
+
+    func failResume(for process: ProcessIdentity, attempts: Int) {
+        withLock {
+            resumeFailuresRemaining[process] = max(0, attempts)
+        }
+    }
+
+    func failPriorityRestore(for process: ProcessIdentity, attempts: Int) {
+        withLock {
+            priorityRestoreFailuresRemaining[process] = max(0, attempts)
         }
     }
 
@@ -849,7 +1038,17 @@ private final class RecordingProcessSystem: ProcessSystemControlling, @unchecked
     func resume(_ processes: Set<ProcessIdentity>) -> ProcessOperationResult {
         withLock {
             resumeAttempts.append(processes)
-            return ProcessOperationResult(applied: processes)
+            var result = ProcessOperationResult()
+            for process in processes {
+                let failures = resumeFailuresRemaining[process, default: 0]
+                if failures > 0 {
+                    resumeFailuresRemaining[process] = failures - 1
+                    result.failed.insert(process)
+                } else {
+                    result.applied.insert(process)
+                }
+            }
+            return result
         }
     }
 
@@ -858,7 +1057,19 @@ private final class RecordingProcessSystem: ProcessSystemControlling, @unchecked
     }
 
     func restorePriority(_ processes: Set<ProcessIdentity>) -> ProcessOperationResult {
-        ProcessOperationResult(applied: processes)
+        withLock {
+            var result = ProcessOperationResult()
+            for process in processes {
+                let failures = priorityRestoreFailuresRemaining[process, default: 0]
+                if failures > 0 {
+                    priorityRestoreFailuresRemaining[process] = failures - 1
+                    result.failed.insert(process)
+                } else {
+                    result.applied.insert(process)
+                }
+            }
+            return result
+        }
     }
 
     private func withLock<Result>(_ operation: () -> Result) -> Result {

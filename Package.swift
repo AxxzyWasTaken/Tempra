@@ -8,9 +8,11 @@ let package = Package(
         .macOS("14.2")
     ],
     products: [
-        .executable(name: "Tempra", targets: ["Tempra"])
+        .executable(name: "Tempra", targets: ["Tempra"]),
+        .executable(name: "TempraWatchdog", targets: ["TempraWatchdog"])
     ],
     targets: [
+        .target(name: "TempraSafety"),
         .target(
             name: "TempraSensors",
             publicHeadersPath: "include",
@@ -20,7 +22,7 @@ let package = Package(
         ),
         .executableTarget(
             name: "Tempra",
-            dependencies: ["TempraSensors"],
+            dependencies: ["TempraSafety", "TempraSensors"],
             linkerSettings: [
                 .linkedFramework("AppKit"),
                 .linkedFramework("CoreAudio"),
@@ -28,9 +30,13 @@ let package = Package(
                 .linkedFramework("ServiceManagement")
             ]
         ),
+        .executableTarget(
+            name: "TempraWatchdog",
+            dependencies: ["TempraSafety"]
+        ),
         .testTarget(
             name: "TempraTests",
-            dependencies: ["Tempra"]
+            dependencies: ["Tempra", "TempraSafety"]
         )
     ],
     cLanguageStandard: .c2x

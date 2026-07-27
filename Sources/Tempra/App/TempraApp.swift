@@ -29,16 +29,43 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             shutdown: {
                 await AppStore.shared.shutdown()
             },
+            presentFailure: { result in
+                Self.presentRestorationFailure(result)
+            },
             invalidate: { [weak self] in
                 self?.menuPanelCoordinator?.invalidate()
                 self?.menuPanelCoordinator = nil
             },
-            reply: {
-                sender.reply(toApplicationShouldTerminate: true)
+            reply: { shouldTerminate in
+                sender.reply(toApplicationShouldTerminate: shouldTerminate)
             }
         )
         return .terminateLater
     }
+
+    private static func presentRestorationFailure(
+        _ result: ProcessRestorationResult
+    ) -> TerminationFailureAction {
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.alertStyle = .critical
+        alert.messageText = "Tempra could not safely quit"
+        let details = result.failures.map { failure in
+            let processList = failure.processIdentifiers.map(String.init).joined(separator: ", ")
+            return "\(failure.bundleIdentifier) (processes: \(processList))"
+        }.joined(separator: "\n")
+        alert.informativeText = "Tempra could not restore every managed process. "
+            + "It will remain open so no application is silently left paused.\n\n"
+            + details
+        alert.addButton(withTitle: "Retry Restoration")
+        alert.addButton(withTitle: "Cancel Quit")
+        return alert.runModal() == .alertFirstButtonReturn ? .retry : .cancel
+    }
+}
+
+enum TerminationFailureAction: Sendable {
+    case retry
+    case cancel
 }
 
 @MainActor
@@ -46,16 +73,39 @@ final class ApplicationTerminationCoordinator {
     private var hasStarted = false
 
     func begin(
-        shutdown: @escaping @MainActor @Sendable () async -> Void,
+        shutdown: @escaping @MainActor @Sendable () async -> ProcessRestorationResult,
+        presentFailure: @escaping @MainActor @Sendable (
+            ProcessRestorationResult
+        ) -> TerminationFailureAction,
         invalidate: @escaping @MainActor @Sendable () -> Void,
-        reply: @escaping @MainActor @Sendable () -> Void
+        reply: @escaping @MainActor @Sendable (Bool) -> Void
     ) {
         guard !hasStarted else { return }
         hasStarted = true
         Task {
-            await shutdown()
-            invalidate()
-            reply()
+            let shouldTerminate = await resolve(
+                shutdown: shutdown,
+                presentFailure: presentFailure
+            )
+            if shouldTerminate {
+                invalidate()
+            } else {
+                hasStarted = false
+            }
+            reply(shouldTerminate)
+        }
+    }
+
+    func resolve(
+        shutdown: @escaping @MainActor @Sendable () async -> ProcessRestorationResult,
+        presentFailure: @escaping @MainActor @Sendable (
+            ProcessRestorationResult
+        ) -> TerminationFailureAction
+    ) async -> Bool {
+        while true {
+            let result = await shutdown()
+            if result.succeeded { return true }
+            if presentFailure(result) == .cancel { return false }
         }
     }
 }

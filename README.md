@@ -53,6 +53,11 @@ root-owned processes, daemons, background services, or protected macOS
 processes. You can show these processes in the menu, but they remain
 monitor-only.
 
+Before Tempra pauses a process, an independent watchdog records its process ID
+and start time. The watchdog resumes only matching paused processes if Tempra
+exits unexpectedly. Tempra blocks a normal quit and shows an error if it cannot
+restore every managed process.
+
 ## Requirements
 
 - macOS 14.2 or later

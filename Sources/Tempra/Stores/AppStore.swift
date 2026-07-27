@@ -41,6 +41,7 @@ final class AppStore: ObservableObject {
     private var highCPUDetector = HighCPUDetector()
     var runtimeMetrics = RuntimeMetrics()
     private var isPresentationActive = false
+    private var hasBegunShutdown = false
     private var hasShutDown = false
 
     convenience init() {
@@ -218,6 +219,7 @@ final class AppStore: ObservableObject {
     }
 
     func setEnabled(_ enabled: Bool) {
+        guard !hasBegunShutdown else { return }
         isEnabled = enabled
         persistence.saveEnabled(enabled)
         applyRulesToCurrentApps()
@@ -429,7 +431,7 @@ final class AppStore: ObservableObject {
     }
 
     func refresh() {
-        guard !hasShutDown else { return }
+        guard !hasBegunShutdown else { return }
         purgeExpiredSuspensions()
         monitoringCoordinator.requestEventRefresh(
             includesEssentialSystemProcesses: preferences.includesEssentialSystemProcesses
@@ -437,7 +439,7 @@ final class AppStore: ObservableObject {
     }
 
     private func handleMonitoringSample(_ sample: MonitoringSample) {
-        guard !hasShutDown else { return }
+        guard !hasBegunShutdown else { return }
         let demand = monitoringDemand
 
         if let systemCPU = sample.systemCPU {
@@ -469,19 +471,24 @@ final class AppStore: ObservableObject {
         }
     }
 
-    func shutdown() async {
-        guard !hasShutDown else { return }
-        hasShutDown = true
-        managementLedger.shutdown()
-
-        workspaceEventMonitor.stop()
-        historyStore.persistCPUHistory()
-        runtimeMetrics.clearPowerMetrics()
-        await monitoringCoordinator.shutdown()
-        await managementCoordinator.shutdown()
+    func shutdown() async -> ProcessRestorationResult {
+        guard !hasShutDown else { return .success }
+        if !hasBegunShutdown {
+            hasBegunShutdown = true
+            isEnabled = false
+            managementLedger.shutdown()
+            workspaceEventMonitor.stop()
+            historyStore.persistCPUHistory()
+            runtimeMetrics.clearPowerMetrics()
+            await monitoringCoordinator.shutdown()
+        }
+        let result = await managementCoordinator.shutdown()
+        hasShutDown = result.succeeded
+        return result
     }
 
     private func applyRulesToCurrentApps() {
+        guard !hasBegunShutdown else { return }
         managementCoordinator.update(
             apps: apps,
             rules: rules,
@@ -489,7 +496,7 @@ final class AppStore: ObservableObject {
             activeProfile: preferences.activeProfile,
             isEnabled: isEnabled
         ) { [weak self] processChange in
-            guard let self, !hasShutDown else { return }
+            guard let self, !hasBegunShutdown else { return }
             purgeExpiredSuspensions()
             monitoringCoordinator.requestEventRefresh(
                 includesEssentialSystemProcesses: preferences.includesEssentialSystemProcesses,

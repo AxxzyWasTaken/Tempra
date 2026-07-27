@@ -69,11 +69,17 @@ struct LiveProcessSystemController: ProcessSystemControlling {
     }
 
     static func currentIdentity(for pid: pid_t) -> ProcessIdentity? {
+        guard pid > 1 else { return nil }
         guard let info = bsdInfo(for: pid) else { return nil }
+        let seconds = UInt64(info.pbi_start_tvsec)
+        let microseconds = UInt64(info.pbi_start_tvusec)
+        let multiplied = seconds.multipliedReportingOverflow(by: 1_000_000)
+        guard !multiplied.overflow else { return nil }
+        let added = multiplied.partialValue.addingReportingOverflow(microseconds)
+        guard !added.overflow else { return nil }
         return ProcessIdentity(
             pid: pid,
-            startTimeMicroseconds: UInt64(info.pbi_start_tvsec) * 1_000_000
-                + UInt64(info.pbi_start_tvusec)
+            startTimeMicroseconds: added.partialValue
         )
     }
 

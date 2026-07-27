@@ -152,6 +152,7 @@ actor ProcessController {
     }
 
     private let system: any ProcessSystemControlling
+    private let crashWatchdog: any ProcessCrashWatchdogControlling
     private let frontmostProvider: FrontmostProvider
     private let hideApplication: ApplicationAction
     private let terminateApplication: ApplicationAction
@@ -190,6 +191,7 @@ actor ProcessController {
 
     init(
         system: any ProcessSystemControlling = LiveProcessSystemController(),
+        crashWatchdog: any ProcessCrashWatchdogControlling = ProcessCrashWatchdog(),
         frontmostProvider: @escaping FrontmostProvider = {
             NSWorkspace.shared.frontmostApplication?.bundleIdentifier
         },
@@ -213,6 +215,7 @@ actor ProcessController {
         clock: ProcessControlClock = .continuous
     ) {
         self.system = system
+        self.crashWatchdog = crashWatchdog
         self.frontmostProvider = frontmostProvider
         self.hideApplication = hideApplication
         self.terminateApplication = terminateApplication
@@ -272,7 +275,7 @@ actor ProcessController {
         if isEnabled {
             await tick(trigger: .stateUpdate)
         } else {
-            await restoreAll(attempts: 3)
+            _ = await restoreAll(attempts: 3)
         }
         return snapshot()
     }
@@ -292,7 +295,8 @@ actor ProcessController {
         return snapshot()
     }
 
-    func restoreAll(attempts: Int = 3) async {
+    @discardableResult
+    func restoreAll(attempts: Int = 3) async -> ProcessRestorationResult {
         tickTask?.cancel()
         tickTask = nil
         scheduledTickInterval = nil
@@ -311,6 +315,11 @@ actor ProcessController {
         }
         statuses = statuses.filter { $0.value == .unavailable }
         await updatePauseWakeMonitoring()
+        let result = restorationResult()
+        if result.succeeded {
+            await crashWatchdog.disarm()
+        }
+        return result
     }
 
     func wakePausedApplicationsForUserActivation() async {
@@ -319,7 +328,13 @@ actor ProcessController {
         for identifier in Array(stoppedByTempra.keys) where rules[identifier]?.action == .pause {
             let stopped = stoppedByTempra[identifier, default: []]
             let result = system.resume(stopped)
-            stoppedByTempra[identifier] = result.failed
+            let synchronized = await setStoppedProcesses(result.failed, for: identifier)
+            if !synchronized {
+                await markUnavailable(
+                    identifier,
+                    detail: "Tempra lost its process safety helper while resuming processes."
+                )
+            }
             if !result.applied.isEmpty {
                 pauseActivationProbeUntil[identifier] = until
             }
@@ -333,10 +348,14 @@ actor ProcessController {
         snapshot()
     }
 
-    func shutdown() async {
+    @discardableResult
+    func shutdown() async -> ProcessRestorationResult {
         isEnabled = false
-        await restoreAll(attempts: 3)
-        eventHandler = nil
+        let result = await restoreAll(attempts: 3)
+        if result.succeeded {
+            eventHandler = nil
+        }
+        return result
     }
 
     private var trackedIdentifiers: Set<String> {
@@ -626,10 +645,17 @@ actor ProcessController {
 
         let existing = stoppedByTempra[identifier, default: []]
             .intersection(app.processIdentities)
-        let result = system.stop(app.processIdentities.subtracting(existing))
+        let processesToStop = app.processIdentities.subtracting(existing)
+        guard await prepareWatchdogToStop(
+            existing.union(processesToStop),
+            for: identifier
+        ) else {
+            return false
+        }
+        let result = system.stop(processesToStop)
         guard result.failed.isEmpty else {
             let rollback = system.resume(existing.union(result.applied))
-            stoppedByTempra[identifier] = rollback.failed
+            _ = await setStoppedProcesses(rollback.failed, for: identifier)
             pausedBaselineCPU.removeValue(forKey: identifier)
             await markUnavailable(identifier, detail: "Tempra could not pause every process.")
             return false
@@ -637,13 +663,12 @@ actor ProcessController {
 
         let stopped = existing.union(result.applied)
         guard !stopped.isEmpty else {
-            stoppedByTempra.removeValue(forKey: identifier)
+            _ = await setStoppedProcesses([], for: identifier)
             pausedBaselineCPU.removeValue(forKey: identifier)
             await setStatus(.normal, for: identifier)
             return false
         }
-        stoppedByTempra[identifier] = stopped
-        return true
+        return await setStoppedProcesses(stopped, for: identifier)
     }
 
     private func applyBackgroundPriority(to app: ProcessControlTarget) async -> Bool {
@@ -788,10 +813,14 @@ actor ProcessController {
             return
         }
 
+        guard await prepareWatchdogToStop(app.processIdentities, for: identifier) else {
+            limitRuntimes.removeValue(forKey: identifier)
+            return
+        }
         let result = system.stop(app.processIdentities)
         guard result.failed.isEmpty else {
             let rollback = system.resume(result.applied)
-            stoppedByTempra[identifier] = rollback.failed
+            _ = await setStoppedProcesses(rollback.failed, for: identifier)
             let priorityRollback = system.restorePriority(
                 backgroundedByTempra[identifier, default: []]
             )
@@ -805,12 +834,15 @@ actor ProcessController {
             return
         }
         guard !result.applied.isEmpty else {
-            stoppedByTempra.removeValue(forKey: identifier)
+            _ = await setStoppedProcesses([], for: identifier)
             limitRuntimes.removeValue(forKey: identifier)
             await setStatus(.normal, for: identifier)
             return
         }
-        stoppedByTempra[identifier] = result.applied
+        guard await setStoppedProcesses(result.applied, for: identifier) else {
+            limitRuntimes.removeValue(forKey: identifier)
+            return
+        }
         await setStatus(.limited(limitPercent), for: identifier)
     }
 
@@ -840,10 +872,15 @@ actor ProcessController {
             return
         }
 
+        guard await prepareWatchdogToStop(processIdentities, for: identifier) else {
+            limitRuntimes.removeValue(forKey: identifier)
+            scheduleNextTick()
+            return
+        }
         let result = system.stop(processIdentities)
         guard result.failed.isEmpty else {
             let rollback = system.resume(result.applied)
-            stoppedByTempra[identifier] = rollback.failed
+            _ = await setStoppedProcesses(rollback.failed, for: identifier)
             let priorityRollback = system.restorePriority(
                 backgroundedByTempra[identifier, default: []]
             )
@@ -858,13 +895,17 @@ actor ProcessController {
             return
         }
         guard !result.applied.isEmpty else {
-            stoppedByTempra.removeValue(forKey: identifier)
+            _ = await setStoppedProcesses([], for: identifier)
             limitRuntimes.removeValue(forKey: identifier)
             await setStatus(.normal, for: identifier)
             scheduleNextTick()
             return
         }
-        stoppedByTempra[identifier] = result.applied
+        guard await setStoppedProcesses(result.applied, for: identifier) else {
+            limitRuntimes.removeValue(forKey: identifier)
+            scheduleNextTick()
+            return
+        }
         if var runtime = limitRuntimes[identifier], runtime.generation == generation {
             runtime.phase = .stopped
             runtime.processIdentities = currentApp.processIdentities
@@ -881,7 +922,9 @@ actor ProcessController {
             let retiredStopped = stoppedByTempra[identifier, default: []].subtracting(current)
             if !retiredStopped.isEmpty {
                 let result = system.resume(retiredStopped)
-                stoppedByTempra[identifier]?.subtract(result.applied.union(result.stale))
+                let remaining = stoppedByTempra[identifier, default: []]
+                    .subtracting(result.applied.union(result.stale))
+                _ = await setStoppedProcesses(remaining, for: identifier)
             }
 
             let retiredBackgrounded = backgroundedByTempra[identifier, default: []]
@@ -965,12 +1008,85 @@ actor ProcessController {
             attempts: attempts,
             operation: system.resume
         )
-        if unresolved.isEmpty {
-            stoppedByTempra.removeValue(forKey: identifier)
-            return true
+        let synchronized = await setStoppedProcesses(unresolved, for: identifier)
+        return unresolved.isEmpty && synchronized
+    }
+
+    private var allStoppedProcesses: Set<ProcessIdentity> {
+        stoppedByTempra.values.reduce(into: Set<ProcessIdentity>()) {
+            $0.formUnion($1)
         }
-        stoppedByTempra[identifier] = unresolved
-        return false
+    }
+
+    private func prepareWatchdogToStop(
+        _ processes: Set<ProcessIdentity>,
+        for identifier: String
+    ) async -> Bool {
+        guard !processes.isEmpty else { return true }
+        do {
+            try await crashWatchdog.prepareToStop(processes)
+            return true
+        } catch {
+            await markUnavailable(identifier, detail: error.localizedDescription)
+            return false
+        }
+    }
+
+    private func setStoppedProcesses(
+        _ processes: Set<ProcessIdentity>,
+        for identifier: String
+    ) async -> Bool {
+        if processes.isEmpty {
+            stoppedByTempra.removeValue(forKey: identifier)
+        } else {
+            stoppedByTempra[identifier] = processes
+        }
+
+        do {
+            try await crashWatchdog.synchronize(allStoppedProcesses)
+            return true
+        } catch {
+            let pending = allStoppedProcesses
+            let emergencyResult = system.resume(pending)
+            for trackedIdentifier in Array(stoppedByTempra.keys) {
+                let unresolved = stoppedByTempra[trackedIdentifier, default: []]
+                    .intersection(emergencyResult.failed)
+                if unresolved.isEmpty {
+                    stoppedByTempra.removeValue(forKey: trackedIdentifier)
+                } else {
+                    stoppedByTempra[trackedIdentifier] = unresolved
+                }
+            }
+            let affectedIdentifiers = stoppedByTempra.compactMap { trackedIdentifier, processes in
+                processes.isEmpty ? nil : trackedIdentifier
+            }
+            let identifiersToMark = affectedIdentifiers.isEmpty
+                ? [identifier]
+                : affectedIdentifiers.sorted()
+            for trackedIdentifier in identifiersToMark {
+                await markUnavailable(
+                    trackedIdentifier,
+                    detail: error.localizedDescription
+                        + " Tempra stopped management and attempted an immediate resume."
+                )
+            }
+            return false
+        }
+    }
+
+    private func restorationResult() -> ProcessRestorationResult {
+        let identifiers = Set(stoppedByTempra.keys).union(backgroundedByTempra.keys)
+        let failures = identifiers.compactMap { identifier -> ProcessRestorationFailure? in
+            let stopped = stoppedByTempra[identifier, default: []]
+            let backgrounded = backgroundedByTempra[identifier, default: []]
+            guard !stopped.isEmpty || !backgrounded.isEmpty else { return nil }
+            return ProcessRestorationFailure(
+                bundleIdentifier: identifier,
+                stoppedProcesses: stopped,
+                backgroundPriorityProcesses: backgrounded
+            )
+        }.sorted { $0.bundleIdentifier < $1.bundleIdentifier }
+        return ProcessRestorationResult(failures: failures)
     }
 
     private func restoreBackgroundPriority(for identifier: String, attempts: Int) async -> Bool {

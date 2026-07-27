@@ -3,6 +3,7 @@ set -euo pipefail
 
 MODE="${1:-run}"
 APP_NAME="Tempra"
+WATCHDOG_NAME="TempraWatchdog"
 LEGACY_APP_NAME="Temper"
 BUNDLE_ID="io.github.temperapp.Temper"
 MIN_SYSTEM_VERSION="14.2"
@@ -15,6 +16,7 @@ APP_CONTENTS="$APP_BUNDLE/Contents"
 APP_MACOS="$APP_CONTENTS/MacOS"
 APP_RESOURCES="$APP_CONTENTS/Resources"
 APP_BINARY="$APP_MACOS/$APP_NAME"
+WATCHDOG_BINARY="$APP_MACOS/$WATCHDOG_NAME"
 INFO_PLIST="$APP_CONTENTS/Info.plist"
 APP_ICON="$ROOT_DIR/Resources/AppIcon.icns"
 
@@ -56,13 +58,16 @@ if [[ "$MODE" == "--debug" || "$MODE" == "debug" ]]; then
 fi
 
 swift build -c "$BUILD_CONFIGURATION"
-BUILD_BINARY="$(swift build -c "$BUILD_CONFIGURATION" --show-bin-path)/$APP_NAME"
+BUILD_BIN_DIR="$(swift build -c "$BUILD_CONFIGURATION" --show-bin-path)"
+BUILD_BINARY="$BUILD_BIN_DIR/$APP_NAME"
+BUILD_WATCHDOG_BINARY="$BUILD_BIN_DIR/$WATCHDOG_NAME"
 
 rm -rf "$APP_BUNDLE"
 mkdir -p "$APP_MACOS" "$APP_RESOURCES"
 cp "$BUILD_BINARY" "$APP_BINARY"
+cp "$BUILD_WATCHDOG_BINARY" "$WATCHDOG_BINARY"
 cp "$APP_ICON" "$APP_RESOURCES/AppIcon.icns"
-chmod +x "$APP_BINARY"
+chmod +x "$APP_BINARY" "$WATCHDOG_BINARY"
 
 cat >"$INFO_PLIST" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -95,6 +100,8 @@ cat >"$INFO_PLIST" <<PLIST
 </plist>
 PLIST
 
+/usr/bin/codesign --force --sign - --timestamp=none "$APP_BINARY"
+/usr/bin/codesign --force --sign - --timestamp=none "$WATCHDOG_BINARY"
 /usr/bin/codesign --force --sign - --timestamp=none "$APP_BUNDLE"
 
 open_app() {
