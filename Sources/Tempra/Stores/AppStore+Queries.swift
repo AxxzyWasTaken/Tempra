@@ -1,0 +1,111 @@
+import Foundation
+
+@MainActor
+extension AppStore {
+    func rebuildDisplayItems() {
+        displayItems = DisplayItemProjection.project(
+            apps: apps,
+            rules: rules,
+            suspensions: suspensions,
+            isEnabled: isEnabled,
+            averageCPUByIdentifier: runtimeMetrics.averageCPUByIdentifier,
+            savedCPUByIdentifier: managementCoordinator.estimatedSavedCPUByIdentifier,
+            savedPowerByIdentifier: runtimeMetrics.savedPowerByIdentifier,
+            attentionIdentifiers: attentionIdentifiers
+        )
+    }
+
+    var activeManagementCount: Int {
+        displayItems.filter { $0.status.isActiveManagement }.count
+    }
+
+    var totalCPUPercent: Double {
+        apps.reduce(0) { $0 + $1.cpuPercent }
+    }
+
+    var managedCPUPercent: Double {
+        apps.reduce(0) { result, app in
+            guard let rule = rules[app.bundleIdentifier],
+                  rule.isEnabled,
+                  rule.hasBehavior else { return result }
+            return result + app.cpuPercent
+        }
+    }
+
+    var estimatedSavedCPUPercent: Double {
+        managementCoordinator.estimatedSavedCPUByIdentifier.values.reduce(0, +)
+    }
+
+    var estimatedSavedSystemPercent: Double {
+        estimatedSavedCPUPercent / Double(max(1, ProcessInfo.processInfo.activeProcessorCount))
+    }
+
+    var trackedAppCPUPowerWatts: Double? {
+        PowerMetricAggregation.trackedPower(
+            apps: apps,
+            isSupported: runtimeMetrics.isPowerSupported
+        )
+    }
+
+    var estimatedSavedCPUPowerWatts: Double? {
+        PowerMetricAggregation.estimatedSavedPower(
+            apps: apps,
+            savingsByIdentifier: runtimeMetrics.savedPowerByIdentifier,
+            isSupported: runtimeMetrics.isPowerSupported
+        )
+    }
+
+    var hasActivePowerManagement: Bool {
+        apps.contains { $0.status.isActivelySavingPower }
+    }
+
+    var pausedCount: Int {
+        apps.filter { $0.status == .paused }.count
+    }
+
+    var attentionCount: Int {
+        attentionIdentifiers.count
+    }
+
+    func item(bundleIdentifier: String) -> AppDisplayItem? {
+        displayItems.first { $0.bundleIdentifier == bundleIdentifier }
+    }
+
+    func rule(for item: AppDisplayItem) -> AppRule {
+        rules[item.bundleIdentifier] ?? AppRule(
+            bundleIdentifier: item.bundleIdentifier,
+            displayName: item.name,
+            applicationURL: item.applicationURL
+        )
+    }
+
+    func lastActivity(for bundleIdentifier: String) -> ActivityEvent? {
+        activityEvents.first { $0.bundleIdentifier == bundleIdentifier }
+    }
+
+    func managementDurations(
+        since startDate: Date,
+        now: Date = Date()
+    ) -> [ManagementDurationSummary] {
+        managementLedger.durations(since: startDate, now: now)
+    }
+
+    func managementInterventionCount(since startDate: Date, now: Date = Date()) -> Int {
+        managementLedger.interventionCount(since: startDate, now: now)
+    }
+
+    func suspensionUntil(for bundleIdentifier: String) -> Date? {
+        guard let suspension = suspensions[bundleIdentifier], suspension.isActive else {
+            return nil
+        }
+        return suspension.until
+    }
+
+    var maximumLimit: Double {
+        Double(max(1, ProcessInfo.processInfo.activeProcessorCount) * 100)
+    }
+
+    func profileName(from name: String) -> String {
+        String(name.trimmingCharacters(in: .whitespacesAndNewlines).prefix(60))
+    }
+}
