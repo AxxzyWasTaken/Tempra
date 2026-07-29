@@ -22,7 +22,7 @@ final class AppHistoryStore {
     ) {
         self.persistence = persistence
         self.activityEvents = activityEvents
-        self.cpuHistorySamples = cpuHistorySamples
+        self.cpuHistorySamples = cpuHistorySamples.sorted { $0.date < $1.date }
         trimActivity(now: now)
         trimCPUHistory(now: now)
         lastCPUHistorySampleDate = cpuHistorySamples.last?.date
@@ -52,10 +52,7 @@ final class AppHistoryStore {
             return nil
         }
 
-        let previousSamples = cpuHistorySamples
-        let previousSampleDate = lastCPUHistorySampleDate
-        let previousPersistDate = lastCPUHistoryPersistDate
-        cpuHistorySamples.append(CPUHistorySample(
+        let sample = CPUHistorySample(
             date: now,
             systemCPUPercent: systemCPU.totalPercent,
             performanceCPUPercent: systemCPU.performancePercent,
@@ -64,22 +61,25 @@ final class AppHistoryStore {
             cpuTemperatureCelsius: systemCPU.cpuTemperatureCelsius,
             thermalPressure: systemCPU.thermalPressure,
             interventionCount: interventionCount
-        ))
-        lastCPUHistorySampleDate = now
-        trimCPUHistory(now: now)
-
-        if lastCPUHistoryPersistDate.map({
+        )
+        let shouldPersist = lastCPUHistoryPersistDate.map {
             now.timeIntervalSince($0) >= cpuHistoryPersistInterval
-        }) ?? true {
+        } ?? true
+
+        if shouldPersist {
+            let previousSamples = cpuHistorySamples
+            let previousSampleDate = lastCPUHistorySampleDate
+            acceptCPUHistorySample(sample, now: now)
             do {
                 try persistence.saveCPUHistory(cpuHistorySamples)
                 lastCPUHistoryPersistDate = now
             } catch {
                 cpuHistorySamples = previousSamples
                 lastCPUHistorySampleDate = previousSampleDate
-                lastCPUHistoryPersistDate = previousPersistDate
                 throw error
             }
+        } else {
+            acceptCPUHistorySample(sample, now: now)
         }
         return cpuHistorySamples
     }
@@ -100,8 +100,33 @@ final class AppHistoryStore {
 
     private func trimCPUHistory(now: Date) {
         let cutoff = now.addingTimeInterval(-cpuHistoryRetention)
-        cpuHistorySamples = cpuHistorySamples
-            .filter { $0.date >= cutoff }
-            .sorted { $0.date < $1.date }
+        let expiredCount = insertionIndex(for: cutoff)
+        if expiredCount > 0 {
+            cpuHistorySamples.removeFirst(expiredCount)
+        }
+    }
+
+    private func acceptCPUHistorySample(_ sample: CPUHistorySample, now: Date) {
+        if cpuHistorySamples.last.map({ $0.date <= sample.date }) ?? true {
+            cpuHistorySamples.append(sample)
+        } else {
+            cpuHistorySamples.insert(sample, at: insertionIndex(for: sample.date))
+        }
+        lastCPUHistorySampleDate = sample.date
+        trimCPUHistory(now: now)
+    }
+
+    private func insertionIndex(for date: Date) -> Int {
+        var lowerBound = 0
+        var upperBound = cpuHistorySamples.count
+        while lowerBound < upperBound {
+            let midpoint = lowerBound + (upperBound - lowerBound) / 2
+            if cpuHistorySamples[midpoint].date < date {
+                lowerBound = midpoint + 1
+            } else {
+                upperBound = midpoint
+            }
+        }
+        return lowerBound
     }
 }

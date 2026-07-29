@@ -252,18 +252,11 @@ actor ProcessController {
 
         await reconcileControlledProcesses()
 
-        let activeIdentifiers = Set(groups.keys)
-        let inactiveIdentifiers = trackedIdentifiers.subtracting(activeIdentifiers)
-        for identifier in inactiveIdentifiers {
-            if await restore(identifier: identifier, resetDelay: true, attempts: restorationAttempts) {
-                await setStatus(.normal, for: identifier)
-                statuses.removeValue(forKey: identifier)
-            } else {
-                await markUnavailable(identifier, detail: "Tempra could not restore every process.")
-            }
+        let targetIdentifiers = Set(groups.keys)
+        let identifiersToRestore = trackedIdentifiers.filter {
+            !targetIdentifiers.contains($0) || rules[$0]?.hasBehavior != true
         }
-
-        for identifier in Array(statuses.keys) where rules[identifier] == nil {
+        for identifier in identifiersToRestore {
             if await restore(identifier: identifier, resetDelay: true, attempts: restorationAttempts) {
                 await setStatus(.normal, for: identifier)
                 statuses.removeValue(forKey: identifier)
@@ -382,19 +375,8 @@ actor ProcessController {
             refreshWindowVisibility()
         }
 
-        for app in groups.values {
-            let identifier = app.bundleIdentifier
-            guard let rule = rules[identifier], rule.hasBehavior else {
-                if await restore(identifier: identifier, resetDelay: true, attempts: restorationAttempts) {
-                    await setStatus(.normal, for: identifier)
-                } else {
-                    await markUnavailable(
-                        identifier,
-                        detail: "Tempra could not restore every process."
-                    )
-                }
-                continue
-            }
+        for (identifier, rule) in rules where rule.hasBehavior {
+            guard let app = groups[identifier] else { continue }
 
             if await isFrontmost(app) {
                 if await restore(identifier: identifier, resetDelay: true, attempts: restorationAttempts) {
@@ -1245,10 +1227,8 @@ actor ProcessController {
             nextInterval = min(nextInterval ?? normalized, normalized)
         }
 
-        for app in groups.values {
-            let identifier = app.bundleIdentifier
-            guard let rule = rules[identifier],
-                  rule.hasBehavior,
+        for (identifier, rule) in rules where rule.hasBehavior {
+            guard let app = groups[identifier],
                   !app.isFrontmost,
                   !app.isProtectedByMenuBarOverlay else {
                 continue
@@ -1330,12 +1310,20 @@ actor ProcessController {
 
     private func refreshWindowVisibility() {
         let snapshot = windowSnapshotProvider()
-        for identifier in groups.keys {
-            guard var app = groups[identifier] else { continue }
-            app.windowVisibility = snapshot?.visibility(
-                for: Set(app.processIdentities.map(\.pid)),
+        var identifiers: [String] = []
+        var requests: [WindowVisibilitySnapshot.Request] = []
+        for (identifier, rule) in rules where rule.hasBehavior {
+            guard let app = groups[identifier] else { continue }
+            identifiers.append(identifier)
+            requests.append(WindowVisibilitySnapshot.Request(
+                processIdentifiers: Set(app.processIdentities.map(\.pid)),
                 isHidden: false
-            ) ?? .unknown
+            ))
+        }
+        let visibilities = snapshot?.visibilities(for: requests)
+        for (index, identifier) in identifiers.enumerated() {
+            guard var app = groups[identifier] else { continue }
+            app.windowVisibility = visibilities?[index] ?? .unknown
             groups[identifier] = app
         }
     }

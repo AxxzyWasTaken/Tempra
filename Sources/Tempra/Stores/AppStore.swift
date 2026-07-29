@@ -12,7 +12,7 @@ private let monitoringLogger = Logger(
 final class AppStore: ObservableObject {
     typealias PersistenceErrorHandler = @MainActor @Sendable (Error) -> Void
 
-    @Published private(set) var apps: [ManagedApp] = []
+    private(set) var apps: [ManagedApp] = []
     @Published private(set) var rules: [String: AppRule] = [:]
     @Published private(set) var preferences = AppPreferences()
     @Published private(set) var suspensions: [String: RuleSuspension] = [:]
@@ -23,7 +23,7 @@ final class AppStore: ObservableObject {
     @Published private(set) var pendingHighCPUAlert: HighCPUAlert?
     @Published private(set) var isEnabled: Bool
     @Published private(set) var launchAtLoginError: String?
-    var displayItems: [AppDisplayItem] = []
+    @Published var displayItems: [AppDisplayItem] = []
 
     let managementCoordinator: ProcessManagementCoordinator
     private let launchAtLoginController: any LaunchAtLoginControlling
@@ -31,6 +31,7 @@ final class AppStore: ObservableObject {
     private let monitoringService: any MonitoringServicing
     private let persistenceErrorHandler: PersistenceErrorHandler
     private let historyStore: AppHistoryStore
+    let iconCache: AppIconCache
     let managementLedger: ManagementLedger
     private lazy var monitoringCoordinator = MonitoringCoordinator(
         service: monitoringService
@@ -65,6 +66,7 @@ final class AppStore: ObservableObject {
         monitoringService: any MonitoringServicing,
         launchAtLoginController: any LaunchAtLoginControlling,
         startsMonitoring: Bool,
+        iconCache: AppIconCache? = nil,
         persistenceErrorHandler: @escaping PersistenceErrorHandler
     ) throws {
         let loadedEnabled = try persistence.loadEnabled()
@@ -90,6 +92,7 @@ final class AppStore: ObservableObject {
         self.launchAtLoginController = launchAtLoginController
         self.persistenceErrorHandler = persistenceErrorHandler
         self.historyStore = historyStore
+        self.iconCache = iconCache ?? AppIconCache()
         self.managementLedger = managementLedger
         isEnabled = loadedEnabled
         rules = loadedRules
@@ -487,8 +490,15 @@ final class AppStore: ObservableObject {
     }
 
     private func handleMonitoringSample(_ sample: MonitoringSample) {
+        applyMonitoringSample(sample, demand: monitoringDemand)
+    }
+
+    func applyMonitoringSample(
+        _ sample: MonitoringSample,
+        demand: MonitoringDemand
+    ) {
         guard !hasBegunShutdown else { return }
-        let demand = monitoringDemand
+        var rebuildsDisplayItems = false
 
         if let systemCPU = sample.systemCPU {
             self.systemCPU = systemCPU
@@ -504,13 +514,19 @@ final class AppStore: ObservableObject {
             if demand.samplesApplications, sample.didRefreshApplications {
                 updateHighCPUState()
             }
-            applyRulesToCurrentApps()
+            applyRulesToCurrentApps(rebuildsDisplayItems: false)
+            rebuildsDisplayItems = true
         }
 
         if demand.samplesPower, sample.apps != nil {
             updatePowerMetrics(powerByIdentifier: sample.powerByIdentifier)
+            rebuildsDisplayItems = true
         } else if !demand.samplesPower, !runtimeMetrics.savedPowerByIdentifier.isEmpty {
             runtimeMetrics.clearPowerMetrics()
+            rebuildsDisplayItems = true
+        }
+
+        if rebuildsDisplayItems {
             rebuildDisplayItems()
         }
 
@@ -543,7 +559,7 @@ final class AppStore: ObservableObject {
         return result
     }
 
-    private func applyRulesToCurrentApps() {
+    private func applyRulesToCurrentApps(rebuildsDisplayItems: Bool = true) {
         guard !hasBegunShutdown else { return }
         managementCoordinator.update(
             apps: apps,
@@ -564,7 +580,9 @@ final class AppStore: ObservableObject {
             updated.status = managementCoordinator.statuses[app.bundleIdentifier] ?? .normal
             return updated
         }
-        rebuildDisplayItems()
+        if rebuildsDisplayItems {
+            rebuildDisplayItems()
+        }
     }
 
     private func updatePowerMetrics(
@@ -576,7 +594,6 @@ final class AppStore: ObservableObject {
             statuses: managementCoordinator.statuses,
             savedCPUByIdentifier: managementCoordinator.estimatedSavedCPUByIdentifier
         )
-        rebuildDisplayItems()
     }
 
     private func updateHighCPUState() {

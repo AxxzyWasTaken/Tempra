@@ -11,7 +11,8 @@ extension AppStore {
             averageCPUByIdentifier: runtimeMetrics.averageCPUByIdentifier,
             savedCPUByIdentifier: managementCoordinator.estimatedSavedCPUByIdentifier,
             savedPowerByIdentifier: runtimeMetrics.savedPowerByIdentifier,
-            attentionIdentifiers: attentionIdentifiers
+            attentionIdentifiers: attentionIdentifiers,
+            iconCache: iconCache
         )
     }
 

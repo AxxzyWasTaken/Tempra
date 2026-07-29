@@ -1,7 +1,7 @@
 import AppKit
 import SwiftUI
 
-private enum MenuScope: String, CaseIterable, Hashable, Identifiable {
+enum MenuScope: String, CaseIterable, Hashable, Identifiable {
     case running = "Running"
     case rules = "Rules"
     case alerts = "Alerts"
@@ -9,7 +9,7 @@ private enum MenuScope: String, CaseIterable, Hashable, Identifiable {
     var id: String { rawValue }
 }
 
-private enum ProcessSort: String, CaseIterable, Hashable, Identifiable {
+enum ProcessSort: String, CaseIterable, Hashable, Identifiable {
     case averageDescending = "Highest 1m Average"
     case averageAscending = "Lowest 1m Average"
     case currentDescending = "Highest Current CPU"
@@ -19,6 +19,117 @@ private enum ProcessSort: String, CaseIterable, Hashable, Identifiable {
     case name = "Name"
 
     var id: String { rawValue }
+}
+
+struct MenuBarItemLists {
+    let processItems: [AppDisplayItem]
+    let managedItems: [AppDisplayItem]
+    let visibleManagedItems: [AppDisplayItem]
+
+    init(
+        displayItems: [AppDisplayItem],
+        scope: MenuScope,
+        processSort: ProcessSort,
+        searchText: String,
+        showsAllRules: Bool,
+        collapsedRuleCount: Int
+    ) {
+        let scopedItems = displayItems.filter { item in
+            switch scope {
+            case .running: item.isRunning
+            case .rules: item.rule != nil
+            case .alerts: item.isAttention
+            }
+        }
+        let searchedItems: [AppDisplayItem]
+        if searchText.isEmpty {
+            searchedItems = scopedItems
+        } else {
+            searchedItems = scopedItems.filter {
+                Self.matchesSearch($0, searchText: searchText)
+            }
+        }
+        processItems = searchedItems.sorted {
+            Self.processOrder($0, $1, sort: processSort)
+        }
+
+        if scope == .running {
+            managedItems = displayItems
+                .filter { item in
+                    item.rule != nil && (searchText.isEmpty
+                        || Self.matchesSearch(item, searchText: searchText))
+                }
+                .sorted { lhs, rhs in
+                    if lhs.estimatedSavedCPUPercent != rhs.estimatedSavedCPUPercent {
+                        return lhs.estimatedSavedCPUPercent > rhs.estimatedSavedCPUPercent
+                    }
+                    return lhs.sortName < rhs.sortName
+                }
+        } else {
+            managedItems = []
+        }
+        visibleManagedItems = showsAllRules
+            ? managedItems
+            : Array(managedItems.prefix(collapsedRuleCount))
+    }
+
+    private static func matchesSearch(
+        _ item: AppDisplayItem,
+        searchText: String
+    ) -> Bool {
+        item.name.localizedCaseInsensitiveContains(searchText)
+            || item.bundleIdentifier.localizedCaseInsensitiveContains(searchText)
+    }
+
+    private static func processOrder(
+        _ lhs: AppDisplayItem,
+        _ rhs: AppDisplayItem,
+        sort: ProcessSort
+    ) -> Bool {
+        switch sort {
+        case .averageDescending:
+            if lhs.averageCPUPercent != rhs.averageCPUPercent {
+                return lhs.averageCPUPercent > rhs.averageCPUPercent
+            }
+        case .averageAscending:
+            if lhs.averageCPUPercent != rhs.averageCPUPercent {
+                return lhs.averageCPUPercent < rhs.averageCPUPercent
+            }
+        case .currentDescending:
+            if lhs.cpuPercent != rhs.cpuPercent {
+                return lhs.cpuPercent > rhs.cpuPercent
+            }
+        case .currentAscending:
+            if lhs.cpuPercent != rhs.cpuPercent {
+                return lhs.cpuPercent < rhs.cpuPercent
+            }
+        case .powerDescending:
+            switch (lhs.cpuPowerWatts, rhs.cpuPowerWatts) {
+            case let (left?, right?) where left != right:
+                return left > right
+            case (_?, nil):
+                return true
+            case (nil, _?):
+                return false
+            default:
+                break
+            }
+        case .powerAscending:
+            switch (lhs.cpuPowerWatts, rhs.cpuPowerWatts) {
+            case let (left?, right?) where left != right:
+                return left < right
+            case (_?, nil):
+                return true
+            case (nil, _?):
+                return false
+            default:
+                break
+            }
+        case .name:
+            break
+        }
+        return lhs.sortName < rhs.sortName
+    }
 }
 
 private struct HeaderActionsMenu: View, Equatable {
@@ -120,11 +231,19 @@ struct MenuBarView: View {
     private let coordinateSpaceName = "tempra.main.panel"
 
     var body: some View {
+        let itemLists = MenuBarItemLists(
+            displayItems: store.displayItems,
+            scope: scope,
+            processSort: processSort,
+            searchText: searchText,
+            showsAllRules: showsAllRules,
+            collapsedRuleCount: collapsedRuleCount
+        )
         VStack(spacing: 0) {
             Color.clear
                 .frame(height: TempraLayout.mainNotchHeight)
 
-            monitorPanel
+            monitorPanel(itemLists: itemLists)
         }
         .frame(
             width: TempraLayout.mainPanelSize.width,
@@ -136,7 +255,7 @@ struct MenuBarView: View {
         .tempraAppearance(store.preferences.appearance)
     }
 
-    private var monitorPanel: some View {
+    private func monitorPanel(itemLists: MenuBarItemLists) -> some View {
         VStack(spacing: 0) {
             header
 
@@ -157,14 +276,17 @@ struct MenuBarView: View {
                 .overlay(TempraPalette.separator)
 
             VStack(spacing: 0) {
-                processSection
+                processSection(items: itemLists.processItems)
                     .frame(height: scope == .running ? processSectionHeight : nil)
 
                 if scope == .running {
                     Divider()
                         .overlay(TempraPalette.separator)
                         .padding(.vertical, 7)
-                    managedSection
+                    managedSection(
+                        managedItems: itemLists.managedItems,
+                        visibleManagedItems: itemLists.visibleManagedItems
+                    )
                         .frame(maxHeight: .infinity, alignment: .top)
                 }
             }
@@ -330,18 +452,18 @@ struct MenuBarView: View {
         .accessibilityElement(children: .combine)
     }
 
-    private var processSection: some View {
+    private func processSection(items: [AppDisplayItem]) -> some View {
         VStack(spacing: 0) {
             processHeader
                 .padding(.top, 4)
                 .padding(.bottom, 1)
 
-            if filteredItems.isEmpty {
+            if items.isEmpty {
                 emptyState
             } else {
                 ScrollView(.vertical) {
                     LazyVStack(spacing: 0) {
-                        ForEach(filteredItems) { item in
+                        ForEach(items) { item in
                             processRow(item)
                         }
                     }
@@ -479,7 +601,10 @@ struct MenuBarView: View {
         .buttonStyle(.plain)
     }
 
-    private var managedSection: some View {
+    private func managedSection(
+        managedItems: [AppDisplayItem],
+        visibleManagedItems: [AppDisplayItem]
+    ) -> some View {
         VStack(spacing: 0) {
             HStack(spacing: TempraLayout.processColumnSpacing) {
                 Text(displayedManagementEnabled ? "TAMED PROCESSES" : "MANAGEMENT OFF")
@@ -734,98 +859,8 @@ struct MenuBarView: View {
         presentation.selection
     }
 
-    private var filteredItems: [AppDisplayItem] {
-        let scoped = store.displayItems.filter { item in
-            switch scope {
-            case .running: item.isRunning
-            case .rules: item.rule != nil
-            case .alerts: item.isAttention
-            }
-        }
-
-        let searched: [AppDisplayItem]
-        if searchText.isEmpty {
-            searched = scoped
-        } else {
-            searched = scoped.filter {
-                $0.name.localizedCaseInsensitiveContains(searchText)
-                    || $0.bundleIdentifier.localizedCaseInsensitiveContains(searchText)
-            }
-        }
-
-        return searched.sorted { lhs, rhs in
-            switch processSort {
-            case .averageDescending:
-                if lhs.averageCPUPercent != rhs.averageCPUPercent {
-                    return lhs.averageCPUPercent > rhs.averageCPUPercent
-                }
-            case .averageAscending:
-                if lhs.averageCPUPercent != rhs.averageCPUPercent {
-                    return lhs.averageCPUPercent < rhs.averageCPUPercent
-                }
-            case .currentDescending:
-                if lhs.cpuPercent != rhs.cpuPercent {
-                    return lhs.cpuPercent > rhs.cpuPercent
-                }
-            case .currentAscending:
-                if lhs.cpuPercent != rhs.cpuPercent {
-                    return lhs.cpuPercent < rhs.cpuPercent
-                }
-            case .powerDescending:
-                switch (lhs.cpuPowerWatts, rhs.cpuPowerWatts) {
-                case let (left?, right?) where left != right:
-                    return left > right
-                case (_?, nil):
-                    return true
-                case (nil, _?):
-                    return false
-                default:
-                    break
-                }
-            case .powerAscending:
-                switch (lhs.cpuPowerWatts, rhs.cpuPowerWatts) {
-                case let (left?, right?) where left != right:
-                    return left < right
-                case (_?, nil):
-                    return true
-                case (nil, _?):
-                    return false
-                default:
-                    break
-                }
-            case .name:
-                break
-            }
-            return lhs.sortName < rhs.sortName
-        }
-    }
-
     private var processSectionHeight: CGFloat {
         store.preferences.showsCPUHistoryGraph ? 255 : 399
-    }
-
-    private var managedItems: [AppDisplayItem] {
-        let actualItems = store.displayItems
-            .filter { item in
-                guard item.rule != nil else { return false }
-                return searchText.isEmpty
-                    || item.name.localizedCaseInsensitiveContains(searchText)
-                    || item.bundleIdentifier.localizedCaseInsensitiveContains(searchText)
-            }
-            .sorted { lhs, rhs in
-                if lhs.estimatedSavedCPUPercent != rhs.estimatedSavedCPUPercent {
-                    return lhs.estimatedSavedCPUPercent > rhs.estimatedSavedCPUPercent
-                }
-                return lhs.sortName < rhs.sortName
-            }
-
-        return actualItems
-    }
-
-    private var visibleManagedItems: [AppDisplayItem] {
-        showsAllRules
-            ? managedItems
-            : Array(managedItems.prefix(collapsedRuleCount))
     }
 
     private var processHeading: String {

@@ -86,7 +86,9 @@ actor ProcessCrashWatchdog: ProcessCrashWatchdogControlling {
         guard processes.count <= WatchdogCommandStream.maximumProcessCount else {
             throw ProcessCrashWatchdogError.tooManyProcesses
         }
+        let processesAreUnchanged = processes == trackedProcesses
         try ensureHelperIsRunning()
+        guard !processesAreUnchanged else { return }
         try write(Self.updateCommand(for: processes))
         trackedProcesses = processes
     }

@@ -45,6 +45,82 @@ struct ProcessControllerSchedulingTests {
         await controller.shutdown()
     }
 
+    @Test("Unmanaged apps do not resynchronize paused process state")
+    func unmanagedAppsDoNotResynchronizePausedProcesses() async {
+        let controlledProcess = process(101)
+        let unmanagedProcess = process(102)
+        let processSystem = RecordingProcessSystem()
+        let watchdog = RecordingProcessCrashWatchdog()
+        let controller = ProcessController(system: processSystem, crashWatchdog: watchdog)
+        let rule = AppRule(
+            bundleIdentifier: identifier,
+            displayName: "Example",
+            action: .pause
+        )
+
+        let snapshot = await controller.update(
+            targets: [
+                target(
+                    processIdentities: [controlledProcess],
+                    launchedAt: Date().addingTimeInterval(-61)
+                ),
+                target(
+                    identifier: "unmanaged.app",
+                    processIdentities: [unmanagedProcess],
+                    launchedAt: Date().addingTimeInterval(-61)
+                ),
+            ],
+            rules: [identifier: rule],
+            isEnabled: true,
+            revision: 1
+        )
+
+        #expect(snapshot.statuses[identifier] == .paused)
+        #expect(snapshot.statuses["unmanaged.app"] == nil)
+        #expect(watchdog.preparationCallCount == 1)
+        #expect(watchdog.synchronizationCallCount == 1)
+        #expect(!processSystem.didAttemptToResume(unmanagedProcess))
+        await controller.shutdown()
+    }
+
+    @Test("Removing a pause rule restores its stopped process")
+    func removingPauseRuleRestoresStoppedProcess() async {
+        let controlledProcess = process(103)
+        let processSystem = RecordingProcessSystem()
+        let watchdog = RecordingProcessCrashWatchdog()
+        let controller = ProcessController(system: processSystem, crashWatchdog: watchdog)
+        let rule = AppRule(
+            bundleIdentifier: identifier,
+            displayName: "Example",
+            action: .pause
+        )
+
+        _ = await controller.update(
+            targets: [target(
+                processIdentities: [controlledProcess],
+                launchedAt: Date().addingTimeInterval(-61)
+            )],
+            rules: [identifier: rule],
+            isEnabled: true,
+            revision: 1
+        )
+        let restored = await controller.update(
+            targets: [target(
+                processIdentities: [controlledProcess],
+                launchedAt: Date().addingTimeInterval(-61)
+            )],
+            rules: [:],
+            isEnabled: true,
+            revision: 2
+        )
+
+        #expect(processSystem.didAttemptToResume(controlledProcess))
+        #expect(!watchdog.isTracking(controlledProcess))
+        #expect(restored.statuses[identifier] == nil)
+        #expect(restored.scheduledTickInterval == nil)
+        await controller.shutdown()
+    }
+
     @Test("A delayed rule keeps the visibility watch active")
     func delayedRuleSchedulesDeadline() async {
         let controller = ProcessController()
@@ -931,7 +1007,17 @@ private final class RecordingProcessCrashWatchdog: ProcessCrashWatchdogControlli
     private let lock = NSLock()
     private var trackedProcesses: Set<ProcessIdentity> = []
     private var shouldFailPreparation = false
+    private var preparationCalls = 0
+    private var synchronizationCalls = 0
     private var disarmCalls = 0
+
+    var preparationCallCount: Int {
+        withLock { preparationCalls }
+    }
+
+    var synchronizationCallCount: Int {
+        withLock { synchronizationCalls }
+    }
 
     var disarmCallCount: Int {
         withLock { disarmCalls }
@@ -949,6 +1035,7 @@ private final class RecordingProcessCrashWatchdog: ProcessCrashWatchdogControlli
 
     func prepareToStop(_ processes: Set<ProcessIdentity>) async throws {
         try withLock {
+            preparationCalls += 1
             guard !shouldFailPreparation else {
                 throw RecordingWatchdogError.unavailable
             }
@@ -958,6 +1045,7 @@ private final class RecordingProcessCrashWatchdog: ProcessCrashWatchdogControlli
 
     func synchronize(_ processes: Set<ProcessIdentity>) async throws {
         withLock {
+            synchronizationCalls += 1
             trackedProcesses = processes
         }
     }

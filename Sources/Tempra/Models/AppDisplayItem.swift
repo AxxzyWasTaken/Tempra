@@ -20,6 +20,7 @@ struct AppDisplayItem: Identifiable {
     let status: ManagementStatus
     let rule: AppRule?
     let isAttention: Bool
+    private let iconCache: AppIconCache?
 
     init(
         bundleIdentifier: String,
@@ -38,7 +39,8 @@ struct AppDisplayItem: Identifiable {
         isSystemProcess: Bool = false,
         status: ManagementStatus,
         rule: AppRule?,
-        isAttention: Bool
+        isAttention: Bool,
+        iconCache: AppIconCache? = nil
     ) {
         self.bundleIdentifier = bundleIdentifier
         self.name = name
@@ -58,13 +60,22 @@ struct AppDisplayItem: Identifiable {
         self.status = status
         self.rule = rule
         self.isAttention = isAttention
+        self.iconCache = iconCache
     }
 
     var id: String { bundleIdentifier }
 
+    @MainActor
     var icon: NSImage {
         if let iconOverride {
             return iconOverride
+        }
+        if let iconCache {
+            return iconCache.icon(
+                bundleIdentifier: bundleIdentifier,
+                name: name,
+                applicationURL: applicationURL
+            )
         }
         if let applicationURL {
             return NSWorkspace.shared.icon(forFile: applicationURL.path)

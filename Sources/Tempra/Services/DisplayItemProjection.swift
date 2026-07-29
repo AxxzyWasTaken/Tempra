@@ -11,7 +11,8 @@ enum DisplayItemProjection {
         averageCPUByIdentifier: [String: Double],
         savedCPUByIdentifier: [String: Double],
         savedPowerByIdentifier: [String: Double],
-        attentionIdentifiers: Set<String>
+        attentionIdentifiers: Set<String>,
+        iconCache: AppIconCache
     ) -> [AppDisplayItem] {
         var items = apps.map { app in
             let rule = rules[app.bundleIdentifier]
@@ -40,7 +41,8 @@ enum DisplayItemProjection {
                 isSystemProcess: app.isSystemProcess,
                 status: status,
                 rule: rule,
-                isAttention: attentionIdentifiers.contains(app.bundleIdentifier)
+                isAttention: attentionIdentifiers.contains(app.bundleIdentifier),
+                iconCache: iconCache
             )
         }
         let runningIdentifiers = Set(apps.map(\.bundleIdentifier))
@@ -61,7 +63,8 @@ enum DisplayItemProjection {
                 isPlayingAudio: false,
                 status: .notRunning,
                 rule: rule,
-                isAttention: attentionIdentifiers.contains(rule.bundleIdentifier)
+                isAttention: attentionIdentifiers.contains(rule.bundleIdentifier),
+                iconCache: iconCache
             ))
         }
 

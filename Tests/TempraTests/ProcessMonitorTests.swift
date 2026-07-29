@@ -139,6 +139,54 @@ struct ProcessMonitorTests {
         #expect(afterFork.isPlayingAudio)
     }
 
+    @Test("Window visibility is applied to each app from one snapshot")
+    func batchedWindowVisibilityIsAppliedToApps() throws {
+        let firstIdentity = ProcessIdentity(pid: 100, startTimeMicroseconds: 1_000_000)
+        let secondIdentity = ProcessIdentity(pid: 101, startTimeMicroseconds: 1_000_000)
+        let reader = StubProcessSnapshotReader(
+            snapshots: [
+                100: snapshot(firstIdentity),
+                101: snapshot(secondIdentity),
+            ],
+            paths: [
+                100: appExecutable("First"),
+                101: appExecutable("Second"),
+            ]
+        )
+        let visibilitySnapshot = WindowVisibilitySnapshot(
+            windowsFrontToBack: [
+                WindowVisibilityRecord(
+                    ownerPID: 100,
+                    bounds: CGRect(x: 0, y: 0, width: 100, height: 100),
+                    layer: 0,
+                    alpha: 1
+                ),
+                WindowVisibilityRecord(
+                    ownerPID: 101,
+                    bounds: CGRect(x: 0, y: 0, width: 100, height: 100),
+                    layer: 0,
+                    alpha: 1
+                ),
+            ],
+            screenBounds: [CGRect(x: 0, y: 0, width: 100, height: 100)]
+        )
+        let monitor = makeMonitor(
+            reader: reader,
+            clock: StubUptime(value: 1),
+            windowVisibilitySnapshot: visibilitySnapshot
+        )
+
+        let apps = monitor.sample(inventory: inventory(
+            app("First", pid: 100),
+            app("Second", pid: 101)
+        ))
+        let first = try #require(apps.first { $0.bundleIdentifier == bundleIdentifier("First") })
+        let second = try #require(apps.first { $0.bundleIdentifier == bundleIdentifier("Second") })
+
+        #expect(first.windowVisibility == .visible)
+        #expect(second.windowVisibility == .covered)
+    }
+
     @Test("Exec and exit events invalidate metadata without stale-path fallback")
     @MainActor
     func execAndExitInvalidation() async throws {
@@ -225,14 +273,15 @@ struct ProcessMonitorTests {
     private func makeMonitor(
         reader: StubProcessSnapshotReader,
         clock: StubUptime,
-        audioPIDs: Set<pid_t> = []
+        audioPIDs: Set<pid_t> = [],
+        windowVisibilitySnapshot: WindowVisibilitySnapshot? = nil
     ) -> ProcessMonitor {
         ProcessMonitor(
             processReader: reader,
             currentUserID: 501,
             uptime: { clock.value },
             audioProcessIdentifiers: { audioPIDs },
-            windowSnapshot: { nil }
+            windowSnapshot: { windowVisibilitySnapshot }
         )
     }
 

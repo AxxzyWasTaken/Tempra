@@ -337,6 +337,151 @@ private struct ProcessMetadataCache {
     }
 }
 
+struct ProcessAssignmentResolver {
+    struct Process: Equatable {
+        let pid: pid_t
+        let parentPID: pid_t
+        let path: String
+    }
+
+    struct Bundle: Equatable {
+        let identifier: String
+        let path: String
+        let mainPIDs: Set<pid_t>
+    }
+
+    static func assignments(
+        processes: [Process],
+        bundles: [Bundle]
+    ) -> [String: [pid_t]] {
+        var mainPIDMap: [pid_t: String] = [:]
+        for bundle in bundles {
+            for pid in bundle.mainPIDs {
+                mainPIDMap[pid] = bundle.identifier
+            }
+        }
+
+        let bundleIdentifiers = Set(bundles.map(\.identifier))
+        let pathIndex = BundlePathPrefixIndex(bundles: bundles)
+        var ancestryResolver = MainAncestryResolver(
+            processes: processes,
+            mainPIDMap: mainPIDMap
+        )
+        var result: [String: [pid_t]] = [:]
+
+        for process in processes {
+            var identifier = mainPIDMap[process.pid]
+            if identifier == nil, !process.path.isEmpty {
+                identifier = pathIndex.longestPrefixIdentifier(for: process.path)
+            }
+            if identifier == nil {
+                identifier = ancestryResolver.identifier(forParent: process.parentPID)
+            }
+            if let identifier, bundleIdentifiers.contains(identifier) {
+                result[identifier, default: []].append(process.pid)
+            }
+        }
+        return result
+    }
+
+    private struct BundlePathPrefixIndex {
+        private struct Node {
+            var children: [Character: Int] = [:]
+            var identifier: String?
+        }
+
+        private var nodes: [Node] = [Node()]
+
+        init(bundles: [Bundle]) {
+            for bundle in bundles {
+                var nodeIndex = 0
+                for character in bundle.path + "/" {
+                    if let childIndex = nodes[nodeIndex].children[character] {
+                        nodeIndex = childIndex
+                    } else {
+                        let childIndex = nodes.count
+                        nodes.append(Node())
+                        nodes[nodeIndex].children[character] = childIndex
+                        nodeIndex = childIndex
+                    }
+                }
+                if nodes[nodeIndex].identifier == nil {
+                    nodes[nodeIndex].identifier = bundle.identifier
+                }
+            }
+        }
+
+        func longestPrefixIdentifier(for path: String) -> String? {
+            var nodeIndex = 0
+            var identifier: String?
+            for character in path {
+                guard let childIndex = nodes[nodeIndex].children[character] else {
+                    break
+                }
+                nodeIndex = childIndex
+                if let matchedIdentifier = nodes[nodeIndex].identifier {
+                    identifier = matchedIdentifier
+                }
+            }
+            return identifier
+        }
+    }
+
+    private struct MainAncestryResolver {
+        private enum Resolution {
+            case assigned(String)
+            case unassigned
+
+            var identifier: String? {
+                switch self {
+                case .assigned(let identifier): identifier
+                case .unassigned: nil
+                }
+            }
+        }
+
+        private let parentByPID: [pid_t: pid_t]
+        private let mainPIDMap: [pid_t: String]
+        private var cachedResolutions: [pid_t: Resolution] = [:]
+
+        init(processes: [Process], mainPIDMap: [pid_t: String]) {
+            var parents: [pid_t: pid_t] = [:]
+            for process in processes {
+                parents[process.pid] = process.parentPID
+            }
+            parentByPID = parents
+            self.mainPIDMap = mainPIDMap
+        }
+
+        mutating func identifier(forParent parentPID: pid_t) -> String? {
+            var currentPID = parentPID
+            var path: [pid_t] = []
+            var visited: Set<pid_t> = []
+            var resolution = Resolution.unassigned
+
+            while currentPID > 1 {
+                if let identifier = mainPIDMap[currentPID] {
+                    resolution = .assigned(identifier)
+                    break
+                }
+                if let cached = cachedResolutions[currentPID] {
+                    resolution = cached
+                    break
+                }
+                guard visited.insert(currentPID).inserted else { break }
+                path.append(currentPID)
+                guard let parentPID = parentByPID[currentPID] else { break }
+                currentPID = parentPID
+            }
+
+            for pid in path {
+                cachedResolutions[pid] = resolution
+            }
+            return resolution.identifier
+        }
+    }
+}
+
 final class ProcessMonitor {
     private(set) var didRefreshLastSample = true
 
@@ -446,7 +591,7 @@ final class ProcessMonitor {
             inventory: inventory,
             includesEssentialSystemProcesses: includingEssentialSystemProcesses
         )
-        let assignments = assignProcesses(rawProcesses, to: bundles, rawByPID: rawByPID)
+        let assignments = assignProcesses(rawProcesses, to: bundles)
         let playingAudioProcessIdentifiers = audioProcessIdentifiers()
 
         var currentCounters: [ProcessIdentity: CPUCounter] = [:]
@@ -548,21 +693,30 @@ final class ProcessMonitor {
             isMenuBarOverlay: frontmostIsMenuBarOverlay
         )
 
-        return apps.map { app in
+        var updatedApps = apps.map { app in
             guard !app.isSystemProcess else { return app }
             var updated = app
             if let applications = applicationsByIdentifier[app.bundleIdentifier] {
                 updated.isHidden = applications.allSatisfy(\.isHidden)
             }
             updated.isFrontmost = app.bundleIdentifier == inventory.frontmostBundleIdentifier
-            updated.windowVisibility = windowSnapshot?.visibility(
-                for: Set(app.processIdentifiers),
-                isHidden: updated.isHidden
-            ) ?? (updated.isHidden ? .hiddenOrMinimized : .unknown)
             updated.isProtectedByMenuBarOverlay = frontmostIsMenuBarOverlay
                 && app.bundleIdentifier == protectedIdentifier
             return updated
         }
+        let requestIndices = updatedApps.indices.filter { !updatedApps[$0].isSystemProcess }
+        let requests = requestIndices.map { index in
+            WindowVisibilitySnapshot.Request(
+                processIdentifiers: Set(updatedApps[index].processIdentifiers),
+                isHidden: updatedApps[index].isHidden
+            )
+        }
+        let visibilities = windowSnapshot?.visibilities(for: requests)
+        for (requestOffset, appIndex) in requestIndices.enumerated() {
+            updatedApps[appIndex].windowVisibility = visibilities?[requestOffset]
+                ?? (updatedApps[appIndex].isHidden ? .hiddenOrMinimized : .unknown)
+        }
+        return updatedApps
     }
 
     func resetSamplingBaseline() {
@@ -783,53 +937,24 @@ final class ProcessMonitor {
 
     private func assignProcesses(
         _ processes: [RawProcess],
-        to bundles: [String: RunningBundle],
-        rawByPID: [pid_t: RawProcess]
+        to bundles: [String: RunningBundle]
     ) -> [String: [pid_t]] {
-        var result: [String: [pid_t]] = [:]
-        var mainPIDMap: [pid_t: String] = [:]
-
-        for bundle in bundles.values {
-            for pid in bundle.mainPIDs {
-                mainPIDMap[pid] = bundle.identifier
+        ProcessAssignmentResolver.assignments(
+            processes: processes.map {
+                ProcessAssignmentResolver.Process(
+                    pid: $0.pid,
+                    parentPID: $0.parentPID,
+                    path: $0.path
+                )
+            },
+            bundles: bundles.values.map {
+                ProcessAssignmentResolver.Bundle(
+                    identifier: $0.identifier,
+                    path: $0.url.path,
+                    mainPIDs: $0.mainPIDs
+                )
             }
-        }
-
-        let bundlePathPrefixes = bundles.values.map {
-            (identifier: $0.identifier, prefix: $0.url.path + "/")
-        }.sorted {
-            $0.prefix.count > $1.prefix.count
-        }
-
-        for process in processes {
-            var identifier = mainPIDMap[process.pid]
-
-            if identifier == nil, !process.path.isEmpty {
-                identifier = bundlePathPrefixes.first(where: {
-                    process.path.hasPrefix($0.prefix)
-                })?.identifier
-            }
-
-            if identifier == nil {
-                var parent = process.parentPID
-                var visited = Set<pid_t>()
-
-                while parent > 1, visited.insert(parent).inserted {
-                    if let parentIdentifier = mainPIDMap[parent] {
-                        identifier = parentIdentifier
-                        break
-                    }
-                    guard let parentProcess = rawByPID[parent] else { break }
-                    parent = parentProcess.parentPID
-                }
-            }
-
-            if let identifier, bundles[identifier] != nil {
-                result[identifier, default: []].append(process.pid)
-            }
-        }
-
-        return result
+        )
     }
 
 }
