@@ -75,6 +75,34 @@ struct CPUHistoryChartDataTests {
         #expect(data.temperatureValue(forChartValue: 40) == 90)
     }
 
+    @Test("Missing supplemental measurements break their chart lines")
+    func supplementalMeasurementGaps() {
+        let data = CPUHistoryChartData(
+            samples: [
+                sample(
+                    at: endDate.addingTimeInterval(-30),
+                    savedCPUPercent: 2,
+                    temperature: 50
+                ),
+                sample(
+                    at: endDate.addingTimeInterval(-15),
+                    savedCPUPercent: nil,
+                    temperature: nil
+                ),
+                sample(
+                    at: endDate,
+                    savedCPUPercent: 3,
+                    temperature: 55
+                ),
+            ],
+            range: .fiveMinutes,
+            endDate: endDate
+        )
+
+        #expect(data.points.map(\.savedCPUSegment) == [1, nil, 2])
+        #expect(data.points.map(\.temperatureSegment) == [1, nil, 2])
+    }
+
     @Test("CPU ceilings retain their threshold boundaries")
     func chartCeilingBoundaries() {
         let cases: [(peak: Double, expectedCeiling: Double)] = [
@@ -127,6 +155,34 @@ struct CPUHistoryChartDataTests {
         #expect(data.points.allSatisfy { $0.segment == 0 })
     }
 
+    @Test("Day downsampling retains hidden supplemental measurement gaps")
+    func dayDownsamplingRetainsSupplementalGaps() {
+        var samples = (0..<641).map { index in
+            sample(
+                at: endDate.addingTimeInterval(TimeInterval(index - 640) * 15),
+                savedCPUPercent: 2,
+                temperature: 50
+            )
+        }
+        samples[1] = sample(
+            at: samples[1].date,
+            savedCPUPercent: nil,
+            temperature: nil
+        )
+
+        let data = CPUHistoryChartData(
+            samples: samples,
+            range: .day,
+            endDate: endDate
+        )
+
+        #expect(data.points.count == 321)
+        #expect(data.points.first?.savedCPUSegment == 1)
+        #expect(data.points.dropFirst().allSatisfy { $0.savedCPUSegment == 2 })
+        #expect(data.points.first?.temperatureSegment == 1)
+        #expect(data.points.dropFirst().allSatisfy { $0.temperatureSegment == 2 })
+    }
+
     @Test("A 5,760-sample render derivation benchmark")
     func fullHistoryBenchmark() {
         let samples = fullDaySamples(includesTemperature: true)
@@ -176,7 +232,7 @@ struct CPUHistoryChartDataTests {
         systemCPUPercent: Double = 0,
         performanceCPUPercent: Double = 0,
         efficiencyCPUPercent: Double = 0,
-        savedCPUPercent: Double = 0,
+        savedCPUPercent: Double? = 0,
         temperature: Double? = nil
     ) -> CPUHistorySample {
         CPUHistorySample(
@@ -184,7 +240,8 @@ struct CPUHistoryChartDataTests {
             systemCPUPercent: systemCPUPercent,
             performanceCPUPercent: performanceCPUPercent,
             efficiencyCPUPercent: efficiencyCPUPercent,
-            estimatedSavedCPUPercent: savedCPUPercent,
+            estimatedSavedCPUPercent: savedCPUPercent ?? 0,
+            hasEstimatedSavedCPUMeasurement: savedCPUPercent != nil,
             cpuTemperatureCelsius: temperature,
             interventionCount: 0
         )
@@ -269,7 +326,9 @@ struct CPUHistoryChartDataTests {
                 result,
                 sample.systemCPUPercent,
                 sample.efficiencyCPUPercent + sample.performanceCPUPercent,
-                sample.estimatedSavedCPUPercent
+                sample.hasEstimatedSavedCPUMeasurement
+                    ? sample.estimatedSavedCPUPercent
+                    : 0
             )
         }
         if peak <= 40 { return 40 }

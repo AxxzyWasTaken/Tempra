@@ -8,6 +8,11 @@ private let monitoringLogger = Logger(
     category: "Monitoring"
 )
 
+struct ApplicationActionFailurePresentation: Equatable {
+    let bundleIdentifier: String
+    let message: String
+}
+
 @MainActor
 final class AppStore: ObservableObject {
     typealias PersistenceErrorHandler = @MainActor @Sendable (Error) -> Void
@@ -21,6 +26,7 @@ final class AppStore: ObservableObject {
     @Published private(set) var systemCPU = SystemCPUSnapshot()
     @Published private(set) var attentionIdentifiers: Set<String> = []
     @Published private(set) var pendingHighCPUAlert: HighCPUAlert?
+    @Published private(set) var applicationActionFailure: ApplicationActionFailurePresentation?
     @Published private(set) var isEnabled: Bool
     @Published private(set) var launchAtLoginError: String?
     @Published var displayItems: [AppDisplayItem] = []
@@ -256,6 +262,73 @@ final class AppStore: ObservableObject {
         applyRulesToCurrentApps()
     }
 
+    func performApplicationCommand(
+        _ command: ApplicationCommand,
+        for item: AppDisplayItem
+    ) async -> Bool {
+        guard !hasBegunShutdown else { return false }
+        guard item.isRunning else {
+            setApplicationActionFailure(
+                for: item,
+                message: "\(item.name) is no longer running."
+            )
+            return false
+        }
+        guard !item.isSystemProcess else {
+            setApplicationActionFailure(
+                for: item,
+                message: "Tempra can monitor \(item.name), but it cannot control this protected system process."
+            )
+            return false
+        }
+
+        applicationActionFailure = nil
+        let outcome = await managementCoordinator.performApplicationCommand(
+            command,
+            bundleIdentifier: item.bundleIdentifier
+        )
+        switch outcome {
+        case .succeeded:
+            return true
+        case .failed(let failure):
+            setApplicationActionFailure(
+                for: item,
+                message: applicationCommandFailureMessage(
+                    command: command,
+                    failure: failure,
+                    appName: item.name
+                )
+            )
+            return false
+        }
+    }
+
+    func revealApplication(_ item: AppDisplayItem) -> Bool {
+        guard let applicationURL = item.applicationURL,
+              applicationURL.isFileURL,
+              FileManager.default.fileExists(atPath: applicationURL.path) else {
+            setApplicationActionFailure(
+                for: item,
+                message: "Tempra could not find \(item.name) in Finder."
+            )
+            return false
+        }
+        applicationActionFailure = nil
+        NSWorkspace.shared.activateFileViewerSelecting([applicationURL])
+        return true
+    }
+
+    func applicationActionFailureMessage(for bundleIdentifier: String) -> String? {
+        guard applicationActionFailure?.bundleIdentifier == bundleIdentifier else {
+            return nil
+        }
+        return applicationActionFailure?.message
+    }
+
+    func dismissApplicationActionFailure() {
+        applicationActionFailure = nil
+    }
+
     func setEnabled(_ enabled: Bool) {
         guard !hasBegunShutdown else { return }
         isEnabled = enabled
@@ -396,9 +469,10 @@ final class AppStore: ObservableObject {
     }
 
     func setIncludesEssentialSystemProcesses(_ includes: Bool) {
+        guard preferences.includesEssentialSystemProcesses != includes else { return }
         preferences.includesEssentialSystemProcesses = includes
         guard persistPreferences() else { return }
-        refresh()
+        configureMonitoringDemand(refreshImmediately: true)
     }
 
     func setContinuousMonitoringEnabled(_ enabled: Bool) {
@@ -530,8 +604,10 @@ final class AppStore: ObservableObject {
             rebuildDisplayItems()
         }
 
-        if demand.samplesApplications, sample.apps != nil {
-            recordCPUHistorySample()
+        if sample.systemCPU != nil {
+            recordCPUHistorySample(
+                includesApplicationMetrics: demand.samplesApplications && sample.apps != nil
+            )
         }
     }
 
@@ -749,11 +825,13 @@ final class AppStore: ObservableObject {
         }
     }
 
-    private func recordCPUHistorySample() {
+    private func recordCPUHistorySample(includesApplicationMetrics: Bool) {
         do {
             if let samples = try historyStore.recordCPUHistory(
                 systemCPU: systemCPU,
-                estimatedSavedSystemPercent: estimatedSavedSystemPercent,
+                estimatedSavedSystemPercent: includesApplicationMetrics
+                    ? estimatedSavedSystemPercent
+                    : nil,
                 interventionCount: activeManagementCount
             ) {
                 cpuHistorySamples = samples
@@ -825,6 +903,34 @@ final class AppStore: ObservableObject {
             }
             reportPersistenceError(saveError)
             return false
+        }
+    }
+
+    private func setApplicationActionFailure(for item: AppDisplayItem, message: String) {
+        applicationActionFailure = ApplicationActionFailurePresentation(
+            bundleIdentifier: item.bundleIdentifier,
+            message: message
+        )
+    }
+
+    private func applicationCommandFailureMessage(
+        command: ApplicationCommand,
+        failure: ApplicationCommandFailure,
+        appName: String
+    ) -> String {
+        switch failure {
+        case .notRunning:
+            return "\(appName) is no longer running."
+        case .restorationFailed:
+            return "Tempra could not safely resume every process for \(appName), "
+                + "so it did not send the command. Try again."
+        case .requestRejected:
+            let commandName = switch command {
+            case .bringToFront: "bring \(appName) to the front"
+            case .hide: "hide \(appName)"
+            case .quit: "quit \(appName)"
+            }
+            return "macOS did not accept the request to \(commandName)."
         }
     }
 

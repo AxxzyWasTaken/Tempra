@@ -26,6 +26,51 @@ struct AppPersistenceTests {
         }
     }
 
+    @Test("Menu-bar system samples record history without application data")
+    func menuBarSamplesRecordLightweightHistory() throws {
+        try withDefaults { defaults in
+            let persistence = AppPersistence(defaults: defaults)
+            let store = try AppStore(
+                persistence: persistence,
+                managementCoordinator: ProcessManagementCoordinator(),
+                monitoringService: MonitoringService(),
+                launchAtLoginController: TestLaunchAtLoginController(),
+                startsMonitoring: false,
+                persistenceErrorHandler: { _ in }
+            )
+            let systemCPU = SystemCPUSnapshot(
+                totalPercent: 24,
+                performancePercent: 15,
+                efficiencyPercent: 9,
+                performanceCoreCount: 4,
+                efficiencyCoreCount: 4,
+                cpuTemperatureCelsius: nil,
+                thermalPressure: .nominal
+            )
+
+            store.applyMonitoringSample(
+                MonitoringSample(
+                    generation: 1,
+                    systemCPU: systemCPU,
+                    apps: nil,
+                    didRefreshApplications: false,
+                    powerByIdentifier: [:],
+                    powerMetricsSupported: true
+                ),
+                demand: .menuBar
+            )
+
+            let sample = try #require(store.cpuHistorySamples.last)
+            #expect(sample.systemCPUPercent == 24)
+            #expect(sample.performanceCPUPercent == 15)
+            #expect(sample.efficiencyCPUPercent == 9)
+            #expect(sample.estimatedSavedCPUPercent == 0)
+            #expect(!sample.hasEstimatedSavedCPUMeasurement)
+            #expect(sample.cpuTemperatureCelsius == nil)
+            #expect(try persistence.loadCPUHistory() == store.cpuHistorySamples)
+        }
+    }
+
     @Test("Corrupt rules stop startup without changing the original bytes")
     func corruptRulesArePreserved() throws {
         try withDefaults { defaults in

@@ -31,6 +31,147 @@ struct ProcessControllerSchedulingTests {
         )
     }
 
+    @Test("Menu quit restores a paused app before requesting termination")
+    func menuQuitRestoresPausedApp() async {
+        let controlledProcess = process(100)
+        let processSystem = RecordingProcessSystem()
+        var terminatedIdentifier: String?
+        let controller = ProcessController(
+            system: processSystem,
+            crashWatchdog: RecordingProcessCrashWatchdog(),
+            terminateApplication: { identifier in
+                terminatedIdentifier = identifier
+                return true
+            }
+        )
+        let rule = AppRule(
+            bundleIdentifier: identifier,
+            displayName: "Example",
+            action: .pause
+        )
+
+        _ = await controller.update(
+            targets: [target(
+                processIdentities: [controlledProcess],
+                launchedAt: oldLaunchDate
+            )],
+            rules: [identifier: rule],
+            isEnabled: true,
+            revision: 1
+        )
+        let outcome = await controller.performApplicationCommand(
+            .quit,
+            bundleIdentifier: identifier
+        )
+
+        #expect(outcome == .succeeded)
+        #expect(processSystem.didAttemptToResume(controlledProcess))
+        #expect(terminatedIdentifier == identifier)
+        #expect(await controller.currentSnapshot().statuses[identifier] == .waiting)
+        await controller.shutdown()
+    }
+
+    @Test("A pending menu quit is not replaced by management when the app is frontmost")
+    func pendingMenuQuitRemainsWaitingWhileFrontmost() async {
+        var terminationCallCount = 0
+        let controller = ProcessController(terminateApplication: { _ in
+            terminationCallCount += 1
+            return true
+        })
+        let rule = AppRule(
+            bundleIdentifier: identifier,
+            displayName: "Example",
+            action: .pause
+        )
+        let frontmostTarget = target(
+            launchedAt: oldLaunchDate,
+            isFrontmost: true,
+            isHidden: false,
+            windowVisibility: .visible
+        )
+
+        _ = await controller.update(
+            targets: [frontmostTarget],
+            rules: [identifier: rule],
+            isEnabled: true,
+            revision: 1
+        )
+        let outcome = await controller.performApplicationCommand(
+            .quit,
+            bundleIdentifier: identifier
+        )
+        let snapshot = await controller.update(
+            targets: [frontmostTarget],
+            rules: [identifier: rule],
+            isEnabled: true,
+            revision: 2
+        )
+
+        #expect(outcome == .succeeded)
+        #expect(terminationCallCount == 1)
+        #expect(snapshot.statuses[identifier] == .waiting)
+        await controller.shutdown()
+    }
+
+    @Test("Menu quit stops when a paused app cannot be restored")
+    func menuQuitStopsOnRestorationFailure() async {
+        let controlledProcess = process(101)
+        let processSystem = RecordingProcessSystem()
+        var terminationCallCount = 0
+        let controller = ProcessController(
+            system: processSystem,
+            crashWatchdog: RecordingProcessCrashWatchdog(),
+            terminateApplication: { _ in
+                terminationCallCount += 1
+                return true
+            }
+        )
+        let rule = AppRule(
+            bundleIdentifier: identifier,
+            displayName: "Example",
+            action: .pause
+        )
+
+        _ = await controller.update(
+            targets: [target(
+                processIdentities: [controlledProcess],
+                launchedAt: oldLaunchDate
+            )],
+            rules: [identifier: rule],
+            isEnabled: true,
+            revision: 1
+        )
+        processSystem.failResume(for: controlledProcess, attempts: 3)
+        let outcome = await controller.performApplicationCommand(
+            .quit,
+            bundleIdentifier: identifier
+        )
+
+        #expect(outcome == .failed(.restorationFailed))
+        #expect(terminationCallCount == 0)
+        #expect(await controller.currentSnapshot().statuses[identifier] == .unavailable)
+        await controller.shutdown()
+    }
+
+    @Test("Rejected app commands report failure without inventing success")
+    func rejectedAppCommand() async {
+        let controller = ProcessController(activateApplication: { _ in false })
+        _ = await controller.update(
+            targets: [target()],
+            rules: [:],
+            isEnabled: true,
+            revision: 1
+        )
+
+        let outcome = await controller.performApplicationCommand(
+            .bringToFront,
+            bundleIdentifier: identifier
+        )
+
+        #expect(outcome == .failed(.requestRejected))
+        await controller.shutdown()
+    }
+
     @Test("No rules leave the control scheduler dormant")
     func noRulesAreDormant() async {
         let controller = ProcessController()
@@ -181,7 +322,7 @@ struct ProcessControllerSchedulingTests {
         )
 
         #expect(snapshot.statuses[identifier] == .limited(50))
-        #expect(snapshot.scheduledTickInterval == 0.5)
+        #expect(snapshot.scheduledTickInterval == 1)
         await controller.shutdown()
     }
 
@@ -285,7 +426,11 @@ struct ProcessControllerSchedulingTests {
 
     @Test("Visibility recheck releases active CPU control")
     func visibilityRecheckReleasesControl() async {
-        let controller = ProcessController(windowSnapshotProvider: { nil })
+        let manualClock = ManualProcessControlClock()
+        let controller = ProcessController(
+            windowSnapshotProvider: { nil },
+            clock: manualClock.clock
+        )
         let rule = AppRule(
             bundleIdentifier: identifier,
             displayName: "Example",
@@ -298,7 +443,14 @@ struct ProcessControllerSchedulingTests {
             isEnabled: true,
             revision: 1
         )
-        try? await Task.sleep(for: .milliseconds(700))
+        #expect(await eventually { manualClock.pendingSleepCount == 2 })
+        manualClock.advance(by: .seconds(1))
+        for _ in 0..<1_000 {
+            if await controller.currentSnapshot().statuses[identifier] == .waiting {
+                break
+            }
+            await Task.yield()
+        }
         let protected = await controller.currentSnapshot()
 
         #expect(limited.statuses[identifier] == .limited(50))
@@ -925,6 +1077,117 @@ struct ProcessControllerSchedulingTests {
         await controller.shutdown()
     }
 
+    @Test("The default control window stops a busy process after ten milliseconds")
+    func defaultControlWindowBoundsBurstDuration() async {
+        let manualClock = ManualProcessControlClock()
+        let system = RecordingProcessSystem()
+        let controlledProcess = process(16)
+        let controller = ProcessController(
+            system: system,
+            crashWatchdog: RecordingProcessCrashWatchdog(),
+            clock: manualClock.clock
+        )
+
+        _ = await controller.update(
+            targets: [target(
+                processIdentities: [controlledProcess],
+                launchedAt: oldLaunchDate,
+                cpuPercent: 100
+            )],
+            rules: [identifier: limitRule(identifier, limitPercent: 10)],
+            isEnabled: true,
+            revision: 1
+        )
+        #expect(await eventually { manualClock.pendingSleepCount == 2 })
+
+        system.setCPUTimeNanoseconds(10_000_000)
+        manualClock.advance(by: .milliseconds(9))
+        #expect(!system.didAttemptToStop(controlledProcess))
+        manualClock.advance(by: .milliseconds(1))
+        #expect(await eventually { system.didAttemptToStop(controlledProcess) })
+
+        manualClock.advance(by: .milliseconds(39))
+        #expect(!system.didAttemptToResume(controlledProcess))
+        manualClock.advance(by: .milliseconds(1))
+        #expect(await eventually { system.didAttemptToResume(controlledProcess) })
+        await controller.shutdown()
+    }
+
+    @Test("A measured CPU burst cannot starve app responsiveness")
+    func measuredCPUBurstHasBoundedRecovery() async {
+        let manualClock = ManualProcessControlClock()
+        let system = RecordingProcessSystem()
+        let controlledProcess = process(17)
+        let hiddenSnapshot = WindowVisibilitySnapshot(windowsFrontToBack: [], screenBounds: [])
+        let controller = ProcessController(
+            system: system,
+            crashWatchdog: RecordingProcessCrashWatchdog(),
+            windowSnapshotProvider: { hiddenSnapshot },
+            controlInterval: 0.1,
+            minimumRunDuration: 0.005,
+            clock: manualClock.clock
+        )
+
+        _ = await controller.update(
+            targets: [target(
+                processIdentities: [controlledProcess],
+                launchedAt: oldLaunchDate,
+                cpuPercent: 50
+            )],
+            rules: [identifier: limitRule(identifier, limitPercent: 50)],
+            isEnabled: true,
+            revision: 1
+        )
+        #expect(await eventually { manualClock.pendingSleepCount == 2 })
+
+        system.setCPUTimeNanoseconds(800_000_000)
+        manualClock.advance(by: .milliseconds(500))
+        #expect(await eventually { system.didAttemptToStop(controlledProcess) })
+
+        manualClock.advance(by: .milliseconds(999))
+        #expect(!system.didAttemptToResume(controlledProcess))
+
+        manualClock.advance(by: .milliseconds(1))
+        #expect(await eventually { system.didAttemptToResume(controlledProcess) })
+        await controller.shutdown()
+    }
+
+    @Test("A low CPU limit receives a responsiveness slice after one second")
+    func lowLimitReceivesResponsivenessSlice() async {
+        let manualClock = ManualProcessControlClock()
+        let system = RecordingProcessSystem()
+        let controlledProcess = process(18)
+        let hiddenSnapshot = WindowVisibilitySnapshot(windowsFrontToBack: [], screenBounds: [])
+        let controller = ProcessController(
+            system: system,
+            crashWatchdog: RecordingProcessCrashWatchdog(),
+            windowSnapshotProvider: { hiddenSnapshot },
+            clock: manualClock.clock
+        )
+
+        _ = await controller.update(
+            targets: [target(
+                processIdentities: [controlledProcess],
+                launchedAt: oldLaunchDate,
+                cpuPercent: 800
+            )],
+            rules: [identifier: limitRule(identifier, limitPercent: 1)],
+            isEnabled: true,
+            revision: 1
+        )
+        #expect(system.didAttemptToStop(controlledProcess))
+        #expect(await eventually { manualClock.pendingSleepCount == 2 })
+
+        manualClock.advance(by: .milliseconds(999))
+        #expect(!system.didAttemptToResume(controlledProcess))
+        #expect(manualClock.deadlineWakeCount == 0)
+
+        manualClock.advance(by: .milliseconds(1))
+        #expect(await eventually { system.didAttemptToResume(controlledProcess) })
+        #expect(manualClock.deadlineWakeCount <= 2)
+        await controller.shutdown()
+    }
+
     @Test("A failed stop is retried on the next control cadence")
     func failedStopRetriesOnControlCadence() async {
         let manualClock = ManualProcessControlClock()
@@ -957,8 +1220,8 @@ struct ProcessControllerSchedulingTests {
         let failed = await controller.currentSnapshot()
         #expect(failed.statuses[identifier] == .unavailable)
 
-        manualClock.advance(by: .milliseconds(450))
-        #expect(await eventually { manualClock.sleepRegistrationCount >= 4 })
+        manualClock.advance(by: .milliseconds(950))
+        #expect(await eventually { manualClock.pendingSleepCount == 2 })
         manualClock.advance(by: .milliseconds(50))
         #expect(await eventually { system.stopAttemptCount == 2 })
         let recovered = await controller.currentSnapshot()
@@ -1068,6 +1331,7 @@ private final class RecordingProcessSystem: ProcessSystemControlling, @unchecked
     private let lock = NSLock()
     private var stopAttempts: [Set<ProcessIdentity>] = []
     private var resumeAttempts: [Set<ProcessIdentity>] = []
+    private var cpuTimeNanoseconds: UInt64 = 0
     private var stopFailuresRemaining: [ProcessIdentity: Int] = [:]
     private var resumeFailuresRemaining: [ProcessIdentity: Int] = [:]
     private var priorityRestoreFailuresRemaining: [ProcessIdentity: Int] = [:]
@@ -1102,8 +1366,14 @@ private final class RecordingProcessSystem: ProcessSystemControlling, @unchecked
         }
     }
 
+    func setCPUTimeNanoseconds(_ value: UInt64) {
+        withLock {
+            cpuTimeNanoseconds = value
+        }
+    }
+
     func totalCPUTime(for processes: Set<ProcessIdentity>) -> UInt64 {
-        0
+        withLock { cpuTimeNanoseconds }
     }
 
     func stop(_ processes: Set<ProcessIdentity>) -> ProcessOperationResult {

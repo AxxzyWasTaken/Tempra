@@ -71,9 +71,11 @@ struct ManagedApp: Identifiable, Sendable {
     let processIdentities: [ProcessIdentity]
     let launchedAt: Date?
     let cpuPercent: Double
+    let residentMemoryBytes: UInt64?
     var isFrontmost: Bool
     var isHidden: Bool
     let isPlayingAudio: Bool
+    let isService: Bool
     let isSystemProcess: Bool
     var windowVisibility: AppWindowVisibility
     var isProtectedByMenuBarOverlay: Bool
@@ -89,9 +91,11 @@ struct ManagedApp: Identifiable, Sendable {
         processIdentities: [ProcessIdentity] = [],
         launchedAt: Date? = nil,
         cpuPercent: Double,
+        residentMemoryBytes: UInt64? = nil,
         isFrontmost: Bool,
         isHidden: Bool,
         isPlayingAudio: Bool,
+        isService: Bool = false,
         isSystemProcess: Bool,
         windowVisibility: AppWindowVisibility = .unknown,
         isProtectedByMenuBarOverlay: Bool = false,
@@ -106,9 +110,11 @@ struct ManagedApp: Identifiable, Sendable {
         self.processIdentities = processIdentities
         self.launchedAt = launchedAt
         self.cpuPercent = cpuPercent
+        self.residentMemoryBytes = residentMemoryBytes
         self.isFrontmost = isFrontmost
         self.isHidden = isHidden
         self.isPlayingAudio = isPlayingAudio
+        self.isService = isService
         self.isSystemProcess = isSystemProcess
         self.windowVisibility = windowVisibility
         self.isProtectedByMenuBarOverlay = isProtectedByMenuBarOverlay

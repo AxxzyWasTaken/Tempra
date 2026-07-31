@@ -5,6 +5,8 @@ struct CPUHistoryChartData {
     struct Point: Identifiable, Equatable {
         let sample: CPUHistorySample
         let segment: Int
+        let savedCPUSegment: Int?
+        let temperatureSegment: Int?
         let combinedCPUPercent: Double
         let temperatureChartValue: Double?
 
@@ -28,9 +30,11 @@ struct CPUHistoryChartData {
         chartStartDate = resolvedChartStartDate
 
         let filteredSamples = samples.filter { $0.date >= resolvedChartStartDate }
+        let downsamplingStep: Int?
         let visibleSamples: [CPUHistorySample]
         if range == .day, filteredSamples.count > 320 {
             let step = max(1, filteredSamples.count / 320)
+            downsamplingStep = step
             visibleSamples = filteredSamples.enumerated().compactMap { index, sample in
                 if index.isMultiple(of: step) || index == filteredSamples.count - 1 {
                     return sample
@@ -38,6 +42,7 @@ struct CPUHistoryChartData {
                 return nil
             }
         } else {
+            downsamplingStep = nil
             visibleSamples = filteredSamples
         }
 
@@ -46,7 +51,9 @@ struct CPUHistoryChartData {
                 result,
                 sample.systemCPUPercent,
                 sample.efficiencyCPUPercent + sample.performanceCPUPercent,
-                sample.estimatedSavedCPUPercent
+                sample.hasEstimatedSavedCPUMeasurement
+                    ? sample.estimatedSavedCPUPercent
+                    : 0
             )
         }
         let resolvedChartCeiling = Self.chartCeiling(for: cpuPeak)
@@ -62,13 +69,56 @@ struct CPUHistoryChartData {
 
         var segment = 0
         var previousDate: Date?
+        var savedCPUSegment = 0
+        var previousSavedCPUDate: Date?
+        var temperatureSegment = 0
+        var previousTemperatureDate: Date?
         let gapLimit = max(45, range.duration / 120)
-        points = visibleSamples.map { sample in
+        points = filteredSamples.enumerated().compactMap { index, sample in
             if let previousDate,
                sample.date.timeIntervalSince(previousDate) > gapLimit {
                 segment += 1
             }
             previousDate = sample.date
+
+            let resolvedSavedCPUSegment: Int?
+            if sample.hasEstimatedSavedCPUMeasurement {
+                if let previousSavedCPUDate {
+                    if sample.date.timeIntervalSince(previousSavedCPUDate) > gapLimit {
+                        savedCPUSegment += 1
+                    }
+                } else {
+                    savedCPUSegment += 1
+                }
+                previousSavedCPUDate = sample.date
+                resolvedSavedCPUSegment = savedCPUSegment
+            } else {
+                previousSavedCPUDate = nil
+                resolvedSavedCPUSegment = nil
+            }
+
+            let resolvedTemperatureSegment: Int?
+            if sample.cpuTemperatureCelsius != nil {
+                if let previousTemperatureDate {
+                    if sample.date.timeIntervalSince(previousTemperatureDate) > gapLimit {
+                        temperatureSegment += 1
+                    }
+                } else {
+                    temperatureSegment += 1
+                }
+                previousTemperatureDate = sample.date
+                resolvedTemperatureSegment = temperatureSegment
+            } else {
+                previousTemperatureDate = nil
+                resolvedTemperatureSegment = nil
+            }
+
+            if let downsamplingStep,
+               !index.isMultiple(of: downsamplingStep),
+               index != filteredSamples.count - 1 {
+                return nil
+            }
+
             let combinedCPUPercent = sample.efficiencyCPUPercent
                 + sample.performanceCPUPercent
             let temperatureChartValue = sample.cpuTemperatureCelsius.map { temperature in
@@ -81,6 +131,8 @@ struct CPUHistoryChartData {
             return Point(
                 sample: sample,
                 segment: segment,
+                savedCPUSegment: resolvedSavedCPUSegment,
+                temperatureSegment: resolvedTemperatureSegment,
                 combinedCPUPercent: combinedCPUPercent,
                 temperatureChartValue: temperatureChartValue
             )
@@ -155,18 +207,22 @@ struct CPUHistoryChartView: View {
                 }
 
                 ForEach(chartData.points) { point in
-                    LineMark(
-                        x: .value("Time", point.sample.date),
-                        y: .value("Saved", point.sample.estimatedSavedCPUPercent),
-                        series: .value("Series", "Saved-\(point.segment)")
-                    )
-                    .foregroundStyle(TempraPalette.saved)
-                    .lineStyle(StrokeStyle(lineWidth: 1.15, lineJoin: .round))
-                    .interpolationMethod(.linear)
+                    if point.sample.hasEstimatedSavedCPUMeasurement,
+                       let savedCPUSegment = point.savedCPUSegment {
+                        LineMark(
+                            x: .value("Time", point.sample.date),
+                            y: .value("Saved", point.sample.estimatedSavedCPUPercent),
+                            series: .value("Series", "Saved-\(savedCPUSegment)")
+                        )
+                        .foregroundStyle(TempraPalette.saved)
+                        .lineStyle(StrokeStyle(lineWidth: 1.15, lineJoin: .round))
+                        .interpolationMethod(.linear)
+                    }
                 }
 
                 ForEach(chartData.points) { point in
-                    if let temperatureChartValue = point.temperatureChartValue {
+                    if let temperatureChartValue = point.temperatureChartValue,
+                       let temperatureSegment = point.temperatureSegment {
                         LineMark(
                             x: .value("Time", point.sample.date),
                             y: .value(
@@ -175,7 +231,7 @@ struct CPUHistoryChartView: View {
                             ),
                             series: .value(
                                 "Series",
-                                "CPU Temperature-\(point.segment)"
+                                "CPU Temperature-\(temperatureSegment)"
                             )
                         )
                         .foregroundStyle(TempraPalette.thermal.opacity(0.94))
@@ -260,7 +316,7 @@ struct CPUHistoryChartView: View {
                 }
                 }
                 if chartData.points.count < 2 {
-                    Text("History builds while Tempra runs")
+                    Text("Collecting system CPU history")
                         .font(.system(size: 10))
                         .foregroundStyle(TempraPalette.secondaryText)
                 }

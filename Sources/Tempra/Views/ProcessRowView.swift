@@ -107,7 +107,7 @@ struct ProcessRowView: View {
         .buttonStyle(.plain)
         .opacity(item.isRunning ? 1 : 0.58)
         .help(isSystemProcess
-              ? "Background process · monitor only"
+              ? "Protected system process · monitor only"
               : "\(item.stateText) · Current \(item.cpuText) · 1-minute average \(item.averageCPUText)")
     }
 
@@ -132,9 +132,9 @@ struct ProcessRowView: View {
 
     private var ruleTag: String? {
         if isSystemProcess {
-            return "· service"
+            return "· system"
         }
-        guard let rule = item.rule else { return nil }
+        guard let rule = item.rule else { return item.isService ? "· service" : nil }
         guard rule.isEnabled, item.status != .disabled else { return "· off" }
         return switch rule.action {
         case .none: rule.runOnEfficiencyCores ? "· efficient" : nil

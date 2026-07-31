@@ -12,10 +12,14 @@ struct AppDisplayItem: Identifiable {
     let estimatedSavedCPUPercent: Double
     let cpuPowerWatts: Double?
     let estimatedSavedPowerWatts: Double?
+    let residentMemoryBytes: UInt64?
+    let processCount: Int
+    let launchedAt: Date?
     let isRunning: Bool
     let isFrontmost: Bool
     let isHidden: Bool
     let isPlayingAudio: Bool
+    let isService: Bool
     let isSystemProcess: Bool
     let status: ManagementStatus
     let rule: AppRule?
@@ -32,10 +36,14 @@ struct AppDisplayItem: Identifiable {
         estimatedSavedCPUPercent: Double,
         cpuPowerWatts: Double? = nil,
         estimatedSavedPowerWatts: Double? = nil,
+        residentMemoryBytes: UInt64? = nil,
+        processCount: Int = 0,
+        launchedAt: Date? = nil,
         isRunning: Bool,
         isFrontmost: Bool,
         isHidden: Bool,
         isPlayingAudio: Bool,
+        isService: Bool = false,
         isSystemProcess: Bool = false,
         status: ManagementStatus,
         rule: AppRule?,
@@ -52,10 +60,14 @@ struct AppDisplayItem: Identifiable {
         self.estimatedSavedCPUPercent = estimatedSavedCPUPercent
         self.cpuPowerWatts = cpuPowerWatts
         self.estimatedSavedPowerWatts = estimatedSavedPowerWatts
+        self.residentMemoryBytes = residentMemoryBytes
+        self.processCount = processCount
+        self.launchedAt = launchedAt
         self.isRunning = isRunning
         self.isFrontmost = isFrontmost
         self.isHidden = isHidden
         self.isPlayingAudio = isPlayingAudio
+        self.isService = isService
         self.isSystemProcess = isSystemProcess
         self.status = status
         self.rule = rule
@@ -108,6 +120,32 @@ struct AppDisplayItem: Identifiable {
     var savedPowerText: String {
         guard isRunning else { return "—" }
         return PowerMetricFormatter.text(watts: estimatedSavedPowerWatts)
+    }
+
+    var residentMemoryText: String {
+        guard isRunning,
+              let residentMemoryBytes,
+              let byteCount = Int64(exactly: residentMemoryBytes) else {
+            return "—"
+        }
+        return ByteCountFormatter.string(fromByteCount: byteCount, countStyle: .memory)
+    }
+
+    var runningTimeText: String {
+        guard isRunning, let launchedAt else { return "—" }
+        let interval = max(0, Date().timeIntervalSince(launchedAt))
+        guard interval.isFinite else { return "—" }
+        if interval < 60 { return "Less than a minute" }
+
+        let formatter = DateComponentsFormatter()
+        formatter.allowedUnits = interval >= 86_400 ? [.day, .hour] : [.hour, .minute]
+        formatter.maximumUnitCount = 2
+        formatter.unitsStyle = .abbreviated
+        return formatter.string(from: interval) ?? "—"
+    }
+
+    var canControlApplication: Bool {
+        isRunning && !isSystemProcess
     }
 
     var ruleSummary: String {

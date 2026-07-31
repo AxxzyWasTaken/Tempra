@@ -37,6 +37,39 @@ struct BackgroundProcessPolicyTests {
         ))
     }
 
+    @Test("User-owned service applications can be managed")
+    func userOwnedServiceManagement() {
+        let userID = getuid()
+
+        #expect(!BackgroundProcessPolicy.isMonitorOnlyApplication(
+            bundleIdentifier: "com.apple.WebKit.GPU",
+            userID: userID,
+            currentUserID: userID
+        ))
+        #expect(BackgroundProcessPolicy.isServiceApplication(
+            activationPolicy: .accessory
+        ))
+        #expect(BackgroundProcessPolicy.isServiceApplication(
+            activationPolicy: .prohibited
+        ))
+    }
+
+    @Test("Protected and foreign-user applications remain monitor-only")
+    func protectedApplicationManagement() {
+        let userID = getuid()
+
+        #expect(BackgroundProcessPolicy.isMonitorOnlyApplication(
+            bundleIdentifier: "com.apple.finder",
+            userID: userID,
+            currentUserID: userID
+        ))
+        #expect(BackgroundProcessPolicy.isMonitorOnlyApplication(
+            bundleIdentifier: "example.foreign-service",
+            userID: userID &+ 1,
+            currentUserID: userID
+        ))
+    }
+
     @Test("Background identities are stable and monitor-only")
     func backgroundIdentity() {
         let first = BackgroundProcessPolicy.identifier(command: "/usr/libexec/logd", pid: 10)

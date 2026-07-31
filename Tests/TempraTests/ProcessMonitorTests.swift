@@ -19,15 +19,21 @@ struct ProcessMonitorTests {
 
         let initial = try #require(monitor.sample(inventory: inventory).first)
         #expect(initial.cpuPercent == 0)
+        #expect(initial.residentMemoryBytes == 128 * 1_024 * 1_024)
         #expect(initial.launchedAt?.timeIntervalSince1970 == 2)
         #expect(reader.pathReads[100] == 1)
         #expect(monitor.cachedMetadataCount == 1)
 
-        reader.snapshots[100] = snapshot(identity, cpuNanoseconds: 1_500_000_000)
+        reader.snapshots[100] = snapshot(
+            identity,
+            cpuNanoseconds: 1_500_000_000,
+            residentMemoryBytes: 160 * 1_024 * 1_024
+        )
         clock.value = 11
         let updated = try #require(monitor.sample(inventory: inventory).first)
 
         #expect(abs(updated.cpuPercent - 50) < 0.000_000_1)
+        #expect(updated.residentMemoryBytes == 160 * 1_024 * 1_024)
         #expect(reader.pathReads[100] == 1)
         #expect(monitor.cachedMetadataCount == 1)
     }
@@ -135,8 +141,52 @@ struct ProcessMonitorTests {
 
         #expect(afterFork.processIdentifiers == [100, 101, 200, 201])
         #expect(Set(afterFork.processIdentities) == [firstMain, secondMain, helper, helperChild])
+        #expect(afterFork.residentMemoryBytes == 512 * 1_024 * 1_024)
         #expect(afterFork.launchedAt?.timeIntervalSince1970 == 2)
         #expect(afterFork.isPlayingAudio)
+    }
+
+    @Test("User-owned system extensions remain controllable services")
+    func userOwnedSystemExtension() throws {
+        let pid = getpid()
+        let identity = ProcessIdentity(pid: pid, startTimeMicroseconds: 1_000_000)
+        let extensionURL = URL(
+            fileURLWithPath:
+                "/System/Volumes/Preboot/Cryptexes/OS/System/Library/Frameworks/"
+                    + "WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.GPU.xpc"
+        )
+        let reader = StubProcessSnapshotReader(
+            snapshots: [pid: snapshot(
+                identity,
+                executableName: "com.apple.WebKit.GPU"
+            )],
+            paths: [
+                pid: extensionURL
+                    .appendingPathComponent("Contents/MacOS/com.apple.WebKit.GPU")
+                    .path,
+            ]
+        )
+        let monitor = makeMonitor(reader: reader, clock: StubUptime(value: 1))
+        let service = RunningApplicationDescriptor(
+            bundleIdentifier: "com.apple.WebKit.GPU",
+            localizedName: "WebThumbnailExtension Graphics and Media",
+            bundleURL: extensionURL,
+            processIdentifier: pid,
+            activationPolicyRawValue: NSApplication.ActivationPolicy.accessory.rawValue,
+            isHidden: false
+        )
+
+        let results = monitor.sample(
+            inventory: inventory(service),
+            includingEssentialSystemProcesses: true
+        )
+        let result = try #require(results.first {
+            $0.bundleIdentifier == service.bundleIdentifier
+        })
+
+        #expect(result.isService)
+        #expect(!result.isSystemProcess)
+        #expect(result.processIdentities == [identity])
     }
 
     @Test("Window visibility is applied to each app from one snapshot")
@@ -304,14 +354,16 @@ struct ProcessMonitorTests {
         _ identity: ProcessIdentity,
         parentPID: pid_t = 1,
         executableName: String = "Example",
-        cpuNanoseconds: UInt64 = 0
+        cpuNanoseconds: UInt64 = 0,
+        residentMemoryBytes: UInt64 = 128 * 1_024 * 1_024
     ) -> ProcessKernelSnapshot {
         ProcessKernelSnapshot(
             identity: identity,
             parentPID: parentPID,
             userID: 501,
             executableName: executableName,
-            totalCPUTimeNanoseconds: cpuNanoseconds
+            totalCPUTimeNanoseconds: cpuNanoseconds,
+            residentMemoryBytes: residentMemoryBytes
         )
     }
 

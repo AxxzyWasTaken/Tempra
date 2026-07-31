@@ -60,15 +60,17 @@ enum BackgroundProcessPolicy {
 
     static func isMonitorOnlyApplication(
         bundleIdentifier: String,
-        activationPolicy: NSApplication.ActivationPolicy,
         userID: uid_t,
-        currentUserID: uid_t,
-        bundlePath: String
+        currentUserID: uid_t
     ) -> Bool {
         systemApplicationBundleIdentifiers.contains(bundleIdentifier)
-            || activationPolicy == .prohibited
             || userID != currentUserID
-            || (activationPolicy != .regular && bundlePath.hasPrefix("/System/"))
+    }
+
+    static func isServiceApplication(
+        activationPolicy: NSApplication.ActivationPolicy
+    ) -> Bool {
+        activationPolicy != .regular
     }
 
     static func identifier(command: String, pid: pid_t) -> String {
@@ -167,6 +169,7 @@ struct ProcessKernelSnapshot: Equatable, Sendable {
     let userID: uid_t
     let executableName: String
     let totalCPUTimeNanoseconds: UInt64
+    let residentMemoryBytes: UInt64
 }
 
 protocol ProcessSnapshotReading {
@@ -226,7 +229,8 @@ struct LiveProcessSnapshotReader: ProcessSnapshotReading {
             parentPID: pid_t(info.pbsd.pbi_ppid),
             userID: info.pbsd.pbi_uid,
             executableName: executableName,
-            totalCPUTimeNanoseconds: totalCPUTimeNanoseconds
+            totalCPUTimeNanoseconds: totalCPUTimeNanoseconds,
+            residentMemoryBytes: info.ptinfo.pti_resident_size
         )
     }
 
@@ -498,6 +502,7 @@ final class ProcessMonitor {
         let path: String
         let counter: CPUCounter?
         let reportedCPUPercent: Double?
+        let residentMemoryBytes: UInt64?
     }
 
     private struct RunningBundle {
@@ -506,6 +511,7 @@ final class ProcessMonitor {
         let url: URL
         var mainPIDs: Set<pid_t>
         var isHidden: Bool
+        var isService: Bool
         var isSystemProcess: Bool
     }
 
@@ -515,6 +521,7 @@ final class ProcessMonitor {
         let url: URL?
         var pids: [pid_t]
         var cpuPercent: Double
+        var residentMemoryBytes: UInt64?
     }
 
     private var previousCounters: [ProcessIdentity: CPUCounter] = [:]
@@ -641,9 +648,14 @@ final class ProcessMonitor {
                     }
                     .min(),
                 cpuPercent: max(0, cpu),
+                residentMemoryBytes: residentMemoryBytes(
+                    for: pids,
+                    rawByPID: rawByPID
+                ),
                 isFrontmost: bundle.identifier == inventory.frontmostBundleIdentifier,
                 isHidden: bundle.isHidden,
                 isPlayingAudio: isPlayingAudio,
+                isService: bundle.isService,
                 isSystemProcess: bundle.isSystemProcess,
                 status: .normal
             )
@@ -774,7 +786,8 @@ final class ProcessMonitor {
                 ),
                 path: entry.command,
                 counter: nil,
-                reportedCPUPercent: entry.cpuPercent
+                reportedCPUPercent: entry.cpuPercent,
+                residentMemoryBytes: nil
             )
         }
     }
@@ -804,7 +817,8 @@ final class ProcessMonitor {
                 counter: CPUCounter(
                     totalNanoseconds: snapshot.totalCPUTimeNanoseconds
                 ),
-                reportedCPUPercent: nil
+                reportedCPUPercent: nil,
+                residentMemoryBytes: snapshot.residentMemoryBytes
             )
         }
     }
@@ -862,15 +876,17 @@ final class ProcessMonitor {
 
             let isSystemProcess = BackgroundProcessPolicy.isMonitorOnlyApplication(
                 bundleIdentifier: identifier,
-                activationPolicy: application.activationPolicy,
                 userID: raw.userID,
-                currentUserID: currentUserID,
-                bundlePath: application.bundleURL.path
+                currentUserID: currentUserID
+            )
+            let isService = BackgroundProcessPolicy.isServiceApplication(
+                activationPolicy: application.activationPolicy
             )
 
             if var existing = result[identifier] {
                 existing.mainPIDs.insert(application.processIdentifier)
                 existing.isHidden = existing.isHidden && application.isHidden
+                existing.isService = existing.isService || isService
                 existing.isSystemProcess = existing.isSystemProcess || isSystemProcess
                 result[identifier] = existing
             } else {
@@ -880,6 +896,7 @@ final class ProcessMonitor {
                     url: application.bundleURL,
                     mainPIDs: [application.processIdentifier],
                     isHidden: application.isHidden,
+                    isService: isService,
                     isSystemProcess: isSystemProcess
                 )
             }
@@ -904,6 +921,10 @@ final class ProcessMonitor {
             if var group = groups[identifier] {
                 group.pids.append(process.pid)
                 group.cpuPercent += cpuByPID[process.pid, default: 0]
+                group.residentMemoryBytes = Self.addingResidentMemory(
+                    group.residentMemoryBytes,
+                    process.residentMemoryBytes
+                )
                 groups[identifier] = group
             } else {
                 let url = process.path.hasPrefix("/")
@@ -914,7 +935,8 @@ final class ProcessMonitor {
                     name: process.name,
                     url: url,
                     pids: [process.pid],
-                    cpuPercent: cpuByPID[process.pid, default: 0]
+                    cpuPercent: cpuByPID[process.pid, default: 0],
+                    residentMemoryBytes: process.residentMemoryBytes
                 )
             }
         }
@@ -926,13 +948,37 @@ final class ProcessMonitor {
                 bundleURL: group.url,
                 processIdentifiers: group.pids.sorted(),
                 cpuPercent: max(0, group.cpuPercent),
+                residentMemoryBytes: group.residentMemoryBytes,
                 isFrontmost: false,
                 isHidden: true,
                 isPlayingAudio: false,
+                isService: true,
                 isSystemProcess: true,
                 status: .normal
             )
         }
+    }
+
+    private func residentMemoryBytes(
+        for processIdentifiers: [pid_t],
+        rawByPID: [pid_t: RawProcess]
+    ) -> UInt64? {
+        var total: UInt64 = 0
+        for processIdentifier in processIdentifiers {
+            guard let value = rawByPID[processIdentifier]?.residentMemoryBytes else {
+                return nil
+            }
+            let (sum, overflow) = total.addingReportingOverflow(value)
+            guard !overflow else { return nil }
+            total = sum
+        }
+        return total
+    }
+
+    private static func addingResidentMemory(_ lhs: UInt64?, _ rhs: UInt64?) -> UInt64? {
+        guard let lhs, let rhs else { return nil }
+        let (sum, overflow) = lhs.addingReportingOverflow(rhs)
+        return overflow ? nil : sum
     }
 
     private func assignProcesses(

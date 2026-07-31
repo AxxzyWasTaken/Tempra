@@ -31,9 +31,36 @@ enum AppWindowVisibility: Equatable, Sendable {
 
 struct WindowVisibilityRecord: Equatable, Sendable {
     let ownerPID: pid_t
+    let ownerName: String?
     let bounds: CGRect
     let layer: Int
     let alpha: Double
+
+    init(
+        ownerPID: pid_t,
+        ownerName: String? = nil,
+        bounds: CGRect,
+        layer: Int,
+        alpha: Double
+    ) {
+        self.ownerPID = ownerPID
+        self.ownerName = ownerName
+        self.bounds = bounds
+        self.layer = layer
+        self.alpha = alpha
+    }
+
+    func canOccludeWindowsBehind(screenBounds: [CGRect]) -> Bool {
+        guard ownerName == "Dock" else { return true }
+        let isDisplayControlWindow = screenBounds.contains { screen in
+            guard screen.area > 0,
+                  let intersection = bounds.intersectionOrNil(screen) else {
+                return false
+            }
+            return intersection.area >= screen.area * 0.99
+        }
+        return !isDisplayControlWindow
+    }
 }
 
 struct WindowVisibilitySnapshot: Sendable {
@@ -87,6 +114,7 @@ struct WindowVisibilitySnapshot: Sendable {
             let alpha = (info[kCGWindowAlpha as String] as? NSNumber)?.doubleValue ?? 1
             return WindowVisibilityRecord(
                 ownerPID: ownerPID,
+                ownerName: info[kCGWindowOwnerName as String] as? String,
                 bounds: bounds.standardized,
                 layer: layer,
                 alpha: alpha
@@ -147,7 +175,9 @@ struct WindowVisibilitySnapshot: Sendable {
                     }
                 }
             }
-            if window.layer >= 0, window.alpha > 0.01 {
+            if window.layer >= 0,
+               window.alpha > 0.01,
+               window.canOccludeWindowsBehind(screenBounds: screenBounds) {
                 occluders.append(window)
             }
         }
@@ -186,6 +216,7 @@ struct WindowVisibilitySnapshot: Sendable {
             !processIdentifiers.contains(window.ownerPID)
                 && window.layer >= 0
                 && window.alpha > 0.01
+                && window.canOccludeWindowsBehind(screenBounds: screenBounds)
         }
         let visibleArea = displayRegions.reduce(CGFloat.zero) { result, displayRegion in
             let coveredRects = occluders.compactMap {

@@ -22,6 +22,45 @@ struct WindowVisibilityMonitorTests {
         #expect(snapshot.visibility(for: [appPID], isHidden: false) == .visible)
     }
 
+    @Test("An ordinary floating window can still cover an app")
+    func ordinaryFloatingWindowOccludes() {
+        let snapshot = WindowVisibilitySnapshot(
+            windowsFrontToBack: [
+                window(
+                    pid: otherPID,
+                    x: 0,
+                    width: 1_000,
+                    height: 800,
+                    layer: 20,
+                    ownerName: "Overlay"
+                ),
+                window(pid: appPID, x: 0, width: 1_000, height: 800),
+            ],
+            screenBounds: [screen]
+        )
+
+        #expect(snapshot.visibility(for: [appPID], isHidden: false) == .covered)
+    }
+
+    @Test("A smaller Dock window can still cover an app")
+    func smallerDockWindowOccludes() {
+        let snapshot = WindowVisibilitySnapshot(
+            windowsFrontToBack: [
+                window(
+                    pid: otherPID,
+                    x: 0,
+                    width: 100,
+                    layer: 20,
+                    ownerName: "Dock"
+                ),
+                window(pid: appPID, x: 0, width: 100),
+            ],
+            screenBounds: [screen]
+        )
+
+        #expect(snapshot.visibility(for: [appPID], isHidden: false) == .covered)
+    }
+
     @Test("A sub-threshold sliver does not prevent management")
     func tinySliverIsCovered() {
         let snapshot = WindowVisibilitySnapshot(
@@ -46,6 +85,30 @@ struct WindowVisibilityMonitorTests {
         )
 
         #expect(snapshot.visibility(for: [appPID], isHidden: false) == .visible)
+    }
+
+    @Test("The Dock's transparent display window does not cover an app")
+    func dockDisplayWindowDoesNotOcclude() {
+        let snapshot = WindowVisibilitySnapshot(
+            windowsFrontToBack: [
+                window(
+                    pid: otherPID,
+                    x: 0,
+                    width: 1_000,
+                    height: 800,
+                    layer: 20,
+                    ownerName: "Dock"
+                ),
+                window(pid: appPID, x: 0, width: 1_000, height: 800),
+            ],
+            screenBounds: [screen]
+        )
+
+        #expect(snapshot.visibility(for: [appPID], isHidden: false) == .visible)
+        #expect(snapshot.visibilities(for: [WindowVisibilitySnapshot.Request(
+            processIdentifiers: [appPID],
+            isHidden: false
+        )]) == [.visible])
     }
 
     @Test("Batched requests preserve independent visibility and hidden state")
@@ -261,12 +324,15 @@ struct WindowVisibilityMonitorTests {
         pid: pid_t,
         x: CGFloat,
         width: CGFloat,
+        height: CGFloat = 100,
         layer: Int = 0,
-        alpha: Double = 1
+        alpha: Double = 1,
+        ownerName: String? = nil
     ) -> WindowVisibilityRecord {
         WindowVisibilityRecord(
             ownerPID: pid,
-            bounds: CGRect(x: x, y: 0, width: width, height: 100),
+            ownerName: ownerName,
+            bounds: CGRect(x: x, y: 0, width: width, height: height),
             layer: layer,
             alpha: alpha
         )

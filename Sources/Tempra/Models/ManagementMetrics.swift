@@ -6,6 +6,7 @@ struct CPUHistorySample: Codable, Equatable, Identifiable {
     let performanceCPUPercent: Double
     let efficiencyCPUPercent: Double
     let estimatedSavedCPUPercent: Double
+    let hasEstimatedSavedCPUMeasurement: Bool
     let cpuTemperatureCelsius: Double?
     let thermalPressure: ThermalPressure
     let interventionCount: Int
@@ -18,6 +19,7 @@ struct CPUHistorySample: Codable, Equatable, Identifiable {
         performanceCPUPercent: Double,
         efficiencyCPUPercent: Double,
         estimatedSavedCPUPercent: Double,
+        hasEstimatedSavedCPUMeasurement: Bool = true,
         cpuTemperatureCelsius: Double? = nil,
         thermalPressure: ThermalPressure = .unknown,
         interventionCount: Int
@@ -27,6 +29,7 @@ struct CPUHistorySample: Codable, Equatable, Identifiable {
         self.performanceCPUPercent = performanceCPUPercent
         self.efficiencyCPUPercent = efficiencyCPUPercent
         self.estimatedSavedCPUPercent = estimatedSavedCPUPercent
+        self.hasEstimatedSavedCPUMeasurement = hasEstimatedSavedCPUMeasurement
         self.cpuTemperatureCelsius = cpuTemperatureCelsius
         self.thermalPressure = thermalPressure
         self.interventionCount = interventionCount
@@ -38,6 +41,7 @@ struct CPUHistorySample: Codable, Equatable, Identifiable {
         case performanceCPUPercent
         case efficiencyCPUPercent
         case estimatedSavedCPUPercent
+        case hasEstimatedSavedCPUMeasurement
         case cpuTemperatureCelsius
         case thermalPressure
         case interventionCount
@@ -53,6 +57,10 @@ struct CPUHistorySample: Codable, Equatable, Identifiable {
             Double.self,
             forKey: .estimatedSavedCPUPercent
         )
+        hasEstimatedSavedCPUMeasurement = try container.decodeIfPresent(
+            Bool.self,
+            forKey: .hasEstimatedSavedCPUMeasurement
+        ) ?? true
         cpuTemperatureCelsius = try container.decodeIfPresent(
             Double.self,
             forKey: .cpuTemperatureCelsius
@@ -71,6 +79,9 @@ struct CPUHistorySample: Codable, Equatable, Identifiable {
         try container.encode(performanceCPUPercent, forKey: .performanceCPUPercent)
         try container.encode(efficiencyCPUPercent, forKey: .efficiencyCPUPercent)
         try container.encode(estimatedSavedCPUPercent, forKey: .estimatedSavedCPUPercent)
+        if !hasEstimatedSavedCPUMeasurement {
+            try container.encode(false, forKey: .hasEstimatedSavedCPUMeasurement)
+        }
         try container.encodeIfPresent(cpuTemperatureCelsius, forKey: .cpuTemperatureCelsius)
         try container.encode(thermalPressure, forKey: .thermalPressure)
         try container.encode(interventionCount, forKey: .interventionCount)

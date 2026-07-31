@@ -33,6 +33,7 @@ struct SystemMetricsMonitorTests {
         let sample = try JSONDecoder().decode(CPUHistorySample.self, from: data)
 
         #expect(sample.thermalPressure == .unknown)
+        #expect(sample.hasEstimatedSavedCPUMeasurement)
     }
 
     @Test("Unavailable thermal state survives history persistence")
@@ -53,4 +54,28 @@ struct SystemMetricsMonitorTests {
         #expect(restored == original)
         #expect(restored.thermalPressure == .unknown)
     }
+
+    @Test("Lightweight history remains readable by the previous record shape")
+    func lightweightHistoryRetainsLegacySavedCPUField() throws {
+        let lightweight = CPUHistorySample(
+            date: Date(timeIntervalSinceReferenceDate: 10),
+            systemCPUPercent: 20,
+            performanceCPUPercent: 15,
+            efficiencyCPUPercent: 5,
+            estimatedSavedCPUPercent: 0,
+            hasEstimatedSavedCPUMeasurement: false,
+            interventionCount: 1
+        )
+
+        let data = try JSONEncoder().encode(lightweight)
+        let restored = try JSONDecoder().decode(CPUHistorySample.self, from: data)
+        let legacy = try JSONDecoder().decode(LegacyCPUHistorySample.self, from: data)
+
+        #expect(!restored.hasEstimatedSavedCPUMeasurement)
+        #expect(legacy.estimatedSavedCPUPercent == 0)
+    }
+}
+
+private struct LegacyCPUHistorySample: Decodable {
+    let estimatedSavedCPUPercent: Double
 }

@@ -43,7 +43,7 @@ final class AppHistoryStore {
 
     func recordCPUHistory(
         systemCPU: SystemCPUSnapshot,
-        estimatedSavedSystemPercent: Double,
+        estimatedSavedSystemPercent: Double?,
         interventionCount: Int,
         now: Date = Date()
     ) throws -> [CPUHistorySample]? {
@@ -57,7 +57,8 @@ final class AppHistoryStore {
             systemCPUPercent: systemCPU.totalPercent,
             performanceCPUPercent: systemCPU.performancePercent,
             efficiencyCPUPercent: systemCPU.efficiencyPercent,
-            estimatedSavedCPUPercent: estimatedSavedSystemPercent,
+            estimatedSavedCPUPercent: estimatedSavedSystemPercent ?? 0,
+            hasEstimatedSavedCPUMeasurement: estimatedSavedSystemPercent != nil,
             cpuTemperatureCelsius: systemCPU.cpuTemperatureCelsius,
             thermalPressure: systemCPU.thermalPressure,
             interventionCount: interventionCount

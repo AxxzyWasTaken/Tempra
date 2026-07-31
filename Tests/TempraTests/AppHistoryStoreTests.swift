@@ -52,6 +52,35 @@ struct AppHistoryStoreTests {
         }
     }
 
+    @Test("Lightweight samples preserve absent application metrics")
+    func lightweightSampleRoundTrips() throws {
+        try withDefaults { defaults in
+            let persistence = AppPersistence(defaults: defaults)
+            let store = AppHistoryStore(
+                persistence: persistence,
+                activityEvents: [],
+                cpuHistorySamples: [],
+                now: referenceDate
+            )
+            var lightweightCPU = systemCPU
+            lightweightCPU.cpuTemperatureCelsius = nil
+
+            let samples = try #require(try store.recordCPUHistory(
+                systemCPU: lightweightCPU,
+                estimatedSavedSystemPercent: nil,
+                interventionCount: 5,
+                now: referenceDate
+            ))
+            let sample = try #require(samples.first)
+
+            #expect(sample.systemCPUPercent == lightweightCPU.totalPercent)
+            #expect(sample.estimatedSavedCPUPercent == 0)
+            #expect(!sample.hasEstimatedSavedCPUMeasurement)
+            #expect(sample.cpuTemperatureCelsius == nil)
+            #expect(try persistence.loadCPUHistory() == samples)
+        }
+    }
+
     @Test("Backward clock movement does not accept a sample")
     func backwardClockMovementIsRejected() throws {
         try withDefaults { defaults in

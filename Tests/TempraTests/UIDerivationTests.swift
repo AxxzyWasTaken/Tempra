@@ -53,6 +53,17 @@ struct UIDerivationTests {
         #expect(alerts.processItems.map(\.bundleIdentifier) == ["beta"])
     }
 
+    @Test("Menu presentation retains the selected process sort")
+    func processSortSelectionPersistence() {
+        let presentation = MenuPanelPresentation()
+
+        #expect(presentation.processSort == .averageDescending)
+        presentation.processSort = .currentDescending
+        presentation.closeInspector()
+
+        #expect(presentation.processSort == .currentDescending)
+    }
+
     @Test("Managed items are derived once with saved-CPU ordering and collapse limits")
     func managedItemOrdering() {
         let collapsed = MenuBarItemLists(
@@ -150,8 +161,10 @@ struct UIDerivationTests {
                 bundleIdentifier: "example.live",
                 name: "Live",
                 bundleURL: URL(fileURLWithPath: "/Applications/Live.app"),
-                processIdentifiers: [],
+                processIdentifiers: [11, 12],
+                launchedAt: Date(timeIntervalSince1970: 1_000),
                 cpuPercent: 25,
+                residentMemoryBytes: 512 * 1_024 * 1_024,
                 isFrontmost: false,
                 isHidden: false,
                 isPlayingAudio: false,
@@ -185,12 +198,98 @@ struct UIDerivationTests {
             #expect(projected.cpuPercent == 25)
             #expect(projected.averageCPUPercent == 25)
             #expect(projected.cpuPowerWatts == 3.5)
+            #expect(projected.residentMemoryBytes == 512 * 1_024 * 1_024)
+            #expect(projected.processCount == 2)
+            #expect(projected.launchedAt == Date(timeIntervalSince1970: 1_000))
+            #expect(store.cpuHistorySamples.last?.estimatedSavedCPUPercent == 0)
+            #expect(store.cpuHistorySamples.last?.hasEstimatedSavedCPUMeasurement == true)
             #expect(iconProviderCallCount == 0)
             _ = projected.icon
             _ = projected.icon
             #expect(iconProviderCallCount == 1)
             print("UI projection measurement: 1 display snapshot for 1 live monitoring sample")
             withExtendedLifetime(displayItemsObservation) {}
+
+            _ = await store.shutdown()
+        }
+    }
+
+    @Test("Activity inspector selection stays separate from the rule editor")
+    func activityInspectorSelection() {
+        let presentation = MenuPanelPresentation()
+
+        presentation.showActivity(
+            bundleIdentifier: "example.app",
+            anchorKey: "process:example.app",
+            localMidY: 120
+        )
+        #expect(presentation.selection?.inspector == .activity)
+
+        presentation.select(
+            bundleIdentifier: "example.app",
+            anchorKey: "process:example.app",
+            localMidY: 120
+        )
+        #expect(presentation.selection?.inspector == .rule)
+
+        presentation.select(
+            bundleIdentifier: "example.app",
+            anchorKey: "process:example.app",
+            localMidY: 120
+        )
+        #expect(presentation.selection == nil)
+    }
+
+    @Test("Only ordinary running apps expose process controls")
+    func processControlAvailability() {
+        let ordinary = item(identifier: "ordinary", name: "Ordinary")
+        let protected = item(
+            identifier: "protected",
+            name: "Protected",
+            isSystemProcess: true
+        )
+        let stopped = item(
+            identifier: "stopped",
+            name: "Stopped",
+            isRunning: false
+        )
+
+        #expect(ordinary.canControlApplication)
+        #expect(!protected.canControlApplication)
+        #expect(!stopped.canControlApplication)
+        #expect(ordinary.residentMemoryText == "—")
+    }
+
+    @Test("Essential system process inclusion persists across recurring UI samples")
+    func essentialSystemProcessInclusionPersists() async throws {
+        try await withDefaults { defaults in
+            let monitoringService = UIDerivationMonitoringService()
+            let store = try AppStore(
+                persistence: AppPersistence(defaults: defaults),
+                managementCoordinator: ProcessManagementCoordinator(),
+                monitoringService: monitoringService,
+                launchAtLoginController: UIDerivationLaunchAtLoginController(),
+                startsMonitoring: false,
+                persistenceErrorHandler: { _ in }
+            )
+
+            store.setPresentationActive(true)
+            var requests = try await waitForInclusionRequests(
+                1,
+                from: monitoringService
+            )
+            #expect(requests.last == false)
+
+            store.setIncludesEssentialSystemProcesses(true)
+            requests = try await waitForInclusionRequests(
+                3,
+                from: monitoringService
+            )
+
+            #expect(Array(requests.suffix(2)) == [true, true])
+            #expect(store.preferences.includesEssentialSystemProcesses)
+            #expect(try AppPersistence(defaults: defaults)
+                .loadPreferences().includesEssentialSystemProcesses)
 
             _ = await store.shutdown()
         }
@@ -300,6 +399,7 @@ struct UIDerivationTests {
         power: Double? = nil,
         savedCPU: Double = 0,
         isRunning: Bool = true,
+        isSystemProcess: Bool = false,
         rule: AppRule? = nil,
         isAttention: Bool = false,
         iconCache: AppIconCache? = nil
@@ -317,6 +417,7 @@ struct UIDerivationTests {
             isFrontmost: false,
             isHidden: false,
             isPlayingAudio: false,
+            isSystemProcess: isSystemProcess,
             status: isRunning ? .normal : .notRunning,
             rule: rule,
             isAttention: isAttention,
@@ -341,11 +442,30 @@ struct UIDerivationTests {
         defer { defaults.removePersistentDomain(forName: suiteName) }
         try await operation(defaults)
     }
+
+    private func waitForInclusionRequests(
+        _ expectedCount: Int,
+        from service: UIDerivationMonitoringService
+    ) async throws -> [Bool] {
+        for _ in 0..<150 {
+            let requests = await service.inclusionRequests()
+            if requests.count >= expectedCount {
+                return requests
+            }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        throw InclusionRequestTimeout()
+    }
 }
 
+private struct InclusionRequestTimeout: Error {}
+
 private actor UIDerivationMonitoringService: MonitoringServicing {
+    private var recordedInclusionRequests: [Bool] = []
+
     func sample(_ request: MonitoringRequest) -> MonitoringSample {
-        MonitoringSample(
+        recordedInclusionRequests.append(request.includesEssentialSystemProcesses)
+        return MonitoringSample(
             generation: request.generation,
             systemCPU: nil,
             apps: nil,
@@ -359,6 +479,10 @@ private actor UIDerivationMonitoringService: MonitoringServicing {
     func resetPowerMetrics() {}
     func setTemperatureSamplingInterval(_ interval: TimeInterval?) {}
     func shutdown() {}
+
+    func inclusionRequests() -> [Bool] {
+        recordedInclusionRequests
+    }
 }
 
 @MainActor

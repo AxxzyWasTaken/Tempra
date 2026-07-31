@@ -222,7 +222,6 @@ struct MenuBarView: View {
     @ObservedObject var presentation: MenuPanelPresentation
 
     @State private var scope: MenuScope = .running
-    @State private var processSort: ProcessSort = .averageDescending
     @State private var searchText = ""
     @State private var showsAllRules = false
     @State private var rowFrames: [String: CGRect] = [:]
@@ -234,7 +233,7 @@ struct MenuBarView: View {
         let itemLists = MenuBarItemLists(
             displayItems: store.displayItems,
             scope: scope,
-            processSort: processSort,
+            processSort: presentation.processSort,
             searchText: searchText,
             showsAllRules: showsAllRules,
             collapsedRuleCount: collapsedRuleCount
@@ -525,16 +524,14 @@ struct MenuBarView: View {
             }
         }
         .contextMenu {
-            if !item.isSystemProcess {
-                contextMenu(for: item)
-            }
+            contextMenu(for: item, anchorKey: anchorKey)
         }
     }
 
     private var processHeader: some View {
         HStack(spacing: TempraLayout.processColumnSpacing) {
             Menu {
-                Picker("Sort", selection: $processSort) {
+                Picker("Sort", selection: $presentation.processSort) {
                     ForEach(ProcessSort.allCases) { sort in
                         Text(sort.rawValue).tag(sort)
                     }
@@ -556,7 +553,7 @@ struct MenuBarView: View {
                 width: TempraLayout.currentCPUColumnWidth,
                 isSelected: isCurrentSort
             ) {
-                processSort = processSort == .currentDescending
+                presentation.processSort = presentation.processSort == .currentDescending
                     ? .currentAscending
                     : .currentDescending
             }
@@ -566,7 +563,7 @@ struct MenuBarView: View {
                 width: TempraLayout.averageCPUColumnWidth,
                 isSelected: isAverageSort
             ) {
-                processSort = processSort == .averageDescending
+                presentation.processSort = presentation.processSort == .averageDescending
                     ? .averageAscending
                     : .averageDescending
             }
@@ -576,7 +573,7 @@ struct MenuBarView: View {
                 width: TempraLayout.powerColumnWidth,
                 isSelected: isPowerSort
             ) {
-                processSort = processSort == .powerDescending
+                presentation.processSort = presentation.processSort == .powerDescending
                     ? .powerAscending
                     : .powerDescending
             }
@@ -671,7 +668,7 @@ struct MenuBarView: View {
             }
         }
         .contextMenu {
-            contextMenu(for: item)
+            contextMenu(for: item, anchorKey: anchorKey)
         }
     }
 
@@ -705,66 +702,117 @@ struct MenuBarView: View {
     }
 
     @ViewBuilder
-    private func contextMenu(for item: AppDisplayItem) -> some View {
-        Button("Limit to 50%") {
-            store.applyQuickRule(
-                bundleIdentifier: item.bundleIdentifier,
-                displayName: item.name,
-                applicationURL: item.applicationURL,
-                action: .limit,
-                limitPercent: 50,
-                delaySeconds: 0
-            )
+    private func contextMenu(for item: AppDisplayItem, anchorKey: String) -> some View {
+        Button("View Activity Details…") {
+            showActivity(item: item, anchorKey: anchorKey)
         }
 
-        Button(item.rule?.runOnEfficiencyCores == true
-               ? "Stop Using Power-Saving Cores"
-               : "Run on Power-Saving Cores") {
-            store.setEfficiencyCoreScheduling(
-                bundleIdentifier: item.bundleIdentifier,
-                displayName: item.name,
-                applicationURL: item.applicationURL,
-                enabled: item.rule?.runOnEfficiencyCores != true,
-                delaySeconds: 0
-            )
-        }
-
-        Button("Pause after 30 seconds") {
-            store.applyQuickRule(
-                bundleIdentifier: item.bundleIdentifier,
-                displayName: item.name,
-                applicationURL: item.applicationURL,
-                action: .pause,
-                delaySeconds: 30
-            )
-        }
-
-        if let rule = item.rule {
+        if item.canControlApplication || item.applicationURL != nil {
             Divider()
+        }
 
-            Button(rule.isEnabled ? "Disable Rule" : "Enable Rule") {
-                store.setRuleEnabled(
-                    bundleIdentifier: item.bundleIdentifier,
-                    enabled: !rule.isEnabled
+        if item.canControlApplication {
+            Button("Bring to Front") {
+                performApplicationCommand(
+                    .bringToFront,
+                    item: item,
+                    anchorKey: anchorKey
                 )
             }
 
-            if store.suspensionUntil(for: item.bundleIdentifier) != nil {
-                Button("End Snooze") {
-                    store.endSnooze(bundleIdentifier: item.bundleIdentifier)
-                }
-            } else {
-                Button("Snooze for 15 Minutes") {
-                    store.snooze(bundleIdentifier: item.bundleIdentifier, for: 15 * 60)
-                }
-                Button("Snooze for 1 Hour") {
-                    store.snooze(bundleIdentifier: item.bundleIdentifier, for: 60 * 60)
+            if !item.isHidden {
+                Button("Hide") {
+                    performApplicationCommand(
+                        .hide,
+                        item: item,
+                        anchorKey: anchorKey
+                    )
                 }
             }
+        }
 
+        if item.applicationURL != nil {
+            Button("Show in Finder") {
+                guard store.revealApplication(item) else {
+                    showActivity(item: item, anchorKey: anchorKey)
+                    return
+                }
+            }
+        }
+
+        if item.canControlApplication {
+            Button("Quit") {
+                performApplicationCommand(
+                    .quit,
+                    item: item,
+                    anchorKey: anchorKey
+                )
+            }
+        }
+
+        if !item.isSystemProcess {
             Divider()
-            Button("Remove Rule", role: .destructive) {
-                store.removeRule(bundleIdentifier: item.bundleIdentifier)
+
+            Button("Limit to 50%") {
+                store.applyQuickRule(
+                    bundleIdentifier: item.bundleIdentifier,
+                    displayName: item.name,
+                    applicationURL: item.applicationURL,
+                    action: .limit,
+                    limitPercent: 50,
+                    delaySeconds: 0
+                )
+            }
+
+            Button(item.rule?.runOnEfficiencyCores == true
+                   ? "Stop Using Power-Saving Cores"
+                   : "Run on Power-Saving Cores") {
+                store.setEfficiencyCoreScheduling(
+                    bundleIdentifier: item.bundleIdentifier,
+                    displayName: item.name,
+                    applicationURL: item.applicationURL,
+                    enabled: item.rule?.runOnEfficiencyCores != true,
+                    delaySeconds: 0
+                )
+            }
+
+            Button("Pause after 30 seconds") {
+                store.applyQuickRule(
+                    bundleIdentifier: item.bundleIdentifier,
+                    displayName: item.name,
+                    applicationURL: item.applicationURL,
+                    action: .pause,
+                    delaySeconds: 30
+                )
+            }
+
+            if let rule = item.rule {
+                Divider()
+
+                Button(rule.isEnabled ? "Disable Rule" : "Enable Rule") {
+                    store.setRuleEnabled(
+                        bundleIdentifier: item.bundleIdentifier,
+                        enabled: !rule.isEnabled
+                    )
+                }
+
+                if store.suspensionUntil(for: item.bundleIdentifier) != nil {
+                    Button("End Snooze") {
+                        store.endSnooze(bundleIdentifier: item.bundleIdentifier)
+                    }
+                } else {
+                    Button("Snooze for 15 Minutes") {
+                        store.snooze(bundleIdentifier: item.bundleIdentifier, for: 15 * 60)
+                    }
+                    Button("Snooze for 1 Hour") {
+                        store.snooze(bundleIdentifier: item.bundleIdentifier, for: 60 * 60)
+                    }
+                }
+
+                Divider()
+                Button("Remove Rule", role: .destructive) {
+                    store.removeRule(bundleIdentifier: item.bundleIdentifier)
+                }
             }
         }
     }
@@ -834,6 +882,28 @@ struct MenuBarView: View {
         }
     }
 
+    private func showActivity(item: AppDisplayItem, anchorKey: String) {
+        presentation.showActivity(
+            bundleIdentifier: item.bundleIdentifier,
+            anchorKey: anchorKey,
+            localMidY: rowFrames[anchorKey]?.midY
+                ?? TempraLayout.mainPanelSize.height * 0.57
+        )
+    }
+
+    private func performApplicationCommand(
+        _ command: ApplicationCommand,
+        item: AppDisplayItem,
+        anchorKey: String
+    ) {
+        Task {
+            guard await store.performApplicationCommand(command, for: item) else {
+                showActivity(item: item, anchorKey: anchorKey)
+                return
+            }
+        }
+    }
+
     private func select(item: AppDisplayItem, anchorKey: String) {
         presentation.select(
             bundleIdentifier: item.bundleIdentifier,
@@ -868,7 +938,7 @@ struct MenuBarView: View {
         case .rules: return "Saved Rules"
         case .alerts: return "Needs Attention"
         case .running:
-            return switch processSort {
+            return switch presentation.processSort {
             case .averageDescending, .currentDescending: "Highest CPU Processes"
             case .averageAscending, .currentAscending: "Lowest CPU Processes"
             case .powerDescending: "Highest Power Processes"
@@ -879,15 +949,18 @@ struct MenuBarView: View {
     }
 
     private var isCurrentSort: Bool {
-        processSort == .currentDescending || processSort == .currentAscending
+        presentation.processSort == .currentDescending
+            || presentation.processSort == .currentAscending
     }
 
     private var isAverageSort: Bool {
-        processSort == .averageDescending || processSort == .averageAscending
+        presentation.processSort == .averageDescending
+            || presentation.processSort == .averageAscending
     }
 
     private var isPowerSort: Bool {
-        processSort == .powerDescending || processSort == .powerAscending
+        presentation.processSort == .powerDescending
+            || presentation.processSort == .powerAscending
     }
 
     private func badge(for scope: MenuScope) -> String {

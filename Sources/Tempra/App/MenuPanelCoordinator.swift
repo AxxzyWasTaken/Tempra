@@ -2,10 +2,16 @@ import AppKit
 import Combine
 import SwiftUI
 
+enum MenuPanelInspector: Equatable {
+    case rule
+    case activity
+}
+
 struct MenuPanelSelection: Equatable {
     let bundleIdentifier: String
     let anchorKey: String
     let localMidY: CGFloat
+    let inspector: MenuPanelInspector
 }
 
 struct MenuDismissalGate {
@@ -59,19 +65,31 @@ struct StatusItemState: Equatable {
 final class MenuPanelPresentation: ObservableObject {
     @Published var selection: MenuPanelSelection?
     @Published var settingsSection: TempraSettingsSection = .general
+    @Published var processSort: ProcessSort = .averageDescending
     var onShowSettings: (() -> Void)?
 
     func select(bundleIdentifier: String, anchorKey: String, localMidY: CGFloat) {
         if selection?.bundleIdentifier == bundleIdentifier,
-           selection?.anchorKey == anchorKey {
+           selection?.anchorKey == anchorKey,
+           selection?.inspector == .rule {
             selection = nil
         } else {
             selection = MenuPanelSelection(
                 bundleIdentifier: bundleIdentifier,
                 anchorKey: anchorKey,
-                localMidY: localMidY
+                localMidY: localMidY,
+                inspector: .rule
             )
         }
+    }
+
+    func showActivity(bundleIdentifier: String, anchorKey: String, localMidY: CGFloat) {
+        selection = MenuPanelSelection(
+            bundleIdentifier: bundleIdentifier,
+            anchorKey: anchorKey,
+            localMidY: localMidY,
+            inspector: .activity
+        )
     }
 
     func updateSelectionAnchor(anchorKey: String, localMidY: CGFloat) {
@@ -79,7 +97,8 @@ final class MenuPanelPresentation: ObservableObject {
         self.selection = MenuPanelSelection(
             bundleIdentifier: selection.bundleIdentifier,
             anchorKey: anchorKey,
-            localMidY: localMidY
+            localMidY: localMidY,
+            inspector: selection.inspector
         )
     }
 
@@ -298,6 +317,19 @@ final class MenuPanelCoordinator: NSObject, NSWindowDelegate {
         presentation.$selection
             .sink { [weak self] selection in
                 self?.updateInspector(for: selection)
+            }
+            .store(in: &cancellables)
+
+        store.$displayItems
+            .sink { [weak self] items in
+                guard let self,
+                      let selection = presentation.selection,
+                      !items.contains(where: {
+                          $0.bundleIdentifier == selection.bundleIdentifier
+                      }) else {
+                    return
+                }
+                presentation.closeInspector()
             }
             .store(in: &cancellables)
 
@@ -569,12 +601,23 @@ private struct InspectorPanelRoot: View {
             Group {
                 if let selection = presentation.selection,
                    let item = store.item(bundleIdentifier: selection.bundleIdentifier) {
-                    RuleEditorView(
-                        item: item,
-                        store: store,
-                        onClose: presentation.closeInspector
-                    )
-                    .id(selection.bundleIdentifier)
+                    Group {
+                        switch selection.inspector {
+                        case .rule:
+                            RuleEditorView(
+                                item: item,
+                                store: store,
+                                onClose: presentation.closeInspector
+                            )
+                        case .activity:
+                            ActivityInspectorView(
+                                item: item,
+                                store: store,
+                                onClose: presentation.closeInspector
+                            )
+                        }
+                    }
+                    .id("\(selection.bundleIdentifier):\(selection.inspector)")
                 } else {
                     Color.clear
                 }

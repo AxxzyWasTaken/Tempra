@@ -125,6 +125,16 @@ final class ProcessManagementCoordinator {
         return result
     }
 
+    func performApplicationCommand(
+        _ command: ApplicationCommand,
+        bundleIdentifier: String
+    ) async -> ApplicationCommandOutcome {
+        await controller.performApplicationCommand(
+            command,
+            bundleIdentifier: bundleIdentifier
+        )
+    }
+
     private func handle(_ event: ProcessControllerEvent) {
         switch event {
         case .statusTransition(let identifier, _, let current):
