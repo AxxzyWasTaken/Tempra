@@ -11,6 +11,7 @@ final class MonitoringCoordinator {
     private var samplingTask: Task<Void, Never>?
     private var pendingRequest: MonitoringRequest?
     private var deferredProcessChange: ProcessChangeNotification?
+    private var applicationBaselineGeneration: UInt64?
     private var generation: UInt64 = 0
     private(set) var demand: MonitoringDemand = .dormant
     private var isStopped = false
@@ -32,6 +33,11 @@ final class MonitoringCoordinator {
         let previousDemand = self.demand
         self.demand = demand
         generation &+= 1
+        if !previousDemand.samplesApplications, demand.samplesApplications {
+            applicationBaselineGeneration = generation
+        } else if !demand.samplesApplications {
+            applicationBaselineGeneration = nil
+        }
 
         timer?.invalidate()
         timer = nil
@@ -94,6 +100,7 @@ final class MonitoringCoordinator {
         timer = nil
         pendingRequest = nil
         deferredProcessChange = nil
+        applicationBaselineGeneration = nil
         samplingTask?.cancel()
         samplingTask = nil
         await configurationTask?.value
@@ -170,7 +177,13 @@ final class MonitoringCoordinator {
             let sample = await service.sample(request)
             guard !Task.isCancelled, let self else { return }
             if sample.generation == generation {
-                onSample(sample)
+                if request.samplesApplications,
+                   applicationBaselineGeneration == request.generation {
+                    applicationBaselineGeneration = nil
+                    onSample(sample.withoutApplicationData())
+                } else {
+                    onSample(sample)
+                }
             }
             samplingTask = nil
             if let pendingRequest {

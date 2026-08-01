@@ -586,6 +586,7 @@ final class ProcessMonitor {
     }
 
     private var previousCounters: [ProcessIdentity: CPUCounter] = [:]
+    private var hasSamplingBaseline = false
     private var previousSampleTime: TimeInterval
     private var metadataCache = ProcessMetadataCache()
     private var cachedProcessTableEntries: [ProcessTableEntry] = []
@@ -665,6 +666,7 @@ final class ProcessMonitor {
             return cachedBackgroundSample
         }
         didRefreshLastSample = true
+        let hadSamplingBaseline = hasSamplingBaseline
         let elapsed = max(now - previousSampleTime, 0.001)
         let rawProcesses = await readProcesses(
             includingBackgroundProcesses: includingEssentialSystemProcesses
@@ -705,6 +707,7 @@ final class ProcessMonitor {
         }
 
         previousCounters = currentCounters
+        hasSamplingBaseline = true
         previousSampleTime = now
 
         let bundledApps = bundles.values.compactMap { bundle -> ManagedApp? in
@@ -759,7 +762,7 @@ final class ProcessMonitor {
             to: bundledApps + backgroundApps,
             inventory: inventory
         )
-        if includingEssentialSystemProcesses {
+        if includingEssentialSystemProcesses, hadSamplingBaseline, !inclusionChanged {
             cachedBackgroundSample = result
             backgroundSampleTime = now
         }
@@ -817,7 +820,10 @@ final class ProcessMonitor {
 
     func resetSamplingBaseline() {
         previousCounters.removeAll()
+        hasSamplingBaseline = false
         previousSampleTime = uptime()
+        cachedBackgroundSample.removeAll()
+        backgroundSampleTime = 0
         didRefreshLastSample = true
     }
 

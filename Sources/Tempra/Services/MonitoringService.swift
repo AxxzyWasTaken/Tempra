@@ -53,6 +53,19 @@ struct MonitoringSample: Sendable {
         self.batteryPower = batteryPower
         self.privilegedAccessError = privilegedAccessError
     }
+
+    func withoutApplicationData() -> MonitoringSample {
+        MonitoringSample(
+            generation: generation,
+            systemCPU: systemCPU,
+            apps: nil,
+            didRefreshApplications: false,
+            powerByIdentifier: [:],
+            powerMetricsSupported: powerMetricsSupported,
+            batteryPower: batteryPower,
+            privilegedAccessError: privilegedAccessError
+        )
+    }
 }
 
 protocol MonitoringServicing: Sendable {

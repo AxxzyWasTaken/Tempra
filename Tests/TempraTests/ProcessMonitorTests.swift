@@ -38,6 +38,66 @@ struct ProcessMonitorTests {
         #expect(monitor.cachedMetadataCount == 1)
     }
 
+    @Test("A reset baseline is measured again instead of caching zero CPU")
+    func resetBaselineIsNotCached() async throws {
+        let identity = ProcessIdentity(pid: 100, startTimeMicroseconds: 2_000_000)
+        let reader = StubProcessSnapshotReader(
+            snapshots: [100: snapshot(identity, cpuNanoseconds: 1_000_000_000)],
+            paths: [100: appExecutable("Example")]
+        )
+        let clock = StubUptime(value: 1)
+        let monitor = ProcessMonitor(
+            processReader: reader,
+            currentUserID: 501,
+            uptime: { clock.value },
+            audioProcessIdentifiers: { [] },
+            windowSnapshot: { nil },
+            processTableReader: {
+                (
+                    entries: [ProcessTableEntry(
+                        pid: 100,
+                        parentPID: 1,
+                        userID: 501,
+                        cpuPercent: 0,
+                        command: "/Applications/Example.app/Contents/MacOS/Example"
+                    )],
+                    samplerPID: 999
+                )
+            },
+            privilegedSnapshotReader: { _ in [:] }
+        )
+        let appInventory = inventory(app("Example", pid: 100))
+
+        _ = await monitor.sample(
+            inventory: appInventory,
+            includingEssentialSystemProcesses: true
+        )
+        reader.snapshots[100] = snapshot(identity, cpuNanoseconds: 2_000_000_000)
+        clock.value = 2
+        let measured = try #require(await monitor.sample(
+            inventory: appInventory,
+            includingEssentialSystemProcesses: true
+        ).first)
+        #expect(abs(measured.cpuPercent - 100) < 0.000_000_1)
+
+        monitor.resetSamplingBaseline()
+        reader.snapshots[100] = snapshot(identity, cpuNanoseconds: 3_000_000_000)
+        clock.value = 6
+        let baseline = try #require(await monitor.sample(
+            inventory: appInventory,
+            includingEssentialSystemProcesses: true
+        ).first)
+        #expect(baseline.cpuPercent == 0)
+
+        reader.snapshots[100] = snapshot(identity, cpuNanoseconds: 4_000_000_000)
+        clock.value = 7
+        let refreshed = try #require(await monitor.sample(
+            inventory: appInventory,
+            includingEssentialSystemProcesses: true
+        ).first)
+        #expect(abs(refreshed.cpuPercent - 100) < 0.000_000_1)
+    }
+
     @Test("New processes are cached and exited processes are removed")
     func newAndExitedProcesses() async {
         let mainIdentity = ProcessIdentity(pid: 100, startTimeMicroseconds: 1_000_000)
