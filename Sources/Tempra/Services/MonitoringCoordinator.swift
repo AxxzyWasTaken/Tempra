@@ -81,8 +81,7 @@ final class MonitoringCoordinator {
         enqueue(makeRequest(
             samplesSystemCPU: demand != .dormant,
             samplesApplications: true,
-            includesEssentialSystemProcesses: demand == .liveUI
-                && includesEssentialSystemProcesses,
+            includesEssentialSystemProcesses: includesEssentialSystemProcesses,
             samplesPower: demand.samplesPower,
             processChange: processChange
         ))
@@ -118,8 +117,7 @@ final class MonitoringCoordinator {
             enqueue(makeRequest(
                 samplesSystemCPU: true,
                 samplesApplications: true,
-                includesEssentialSystemProcesses: demand == .liveUI
-                    && includesEssentialSystemProcesses,
+                includesEssentialSystemProcesses: includesEssentialSystemProcesses,
                 samplesPower: demand.samplesPower,
                 processChange: nil
             ))

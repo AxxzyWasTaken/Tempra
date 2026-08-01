@@ -4,8 +4,13 @@ struct RuntimeMetrics {
     private let cpuAverageWindow: TimeInterval = 60
     private var cpuAverageSamples: [String: TimedAverage] = [:]
     private var powerSavingsEstimator = PowerSavingsEstimator()
+    private var batteryPowerSavingsTracker = BatteryPowerSavingsTracker()
     private(set) var savedPowerByIdentifier: [String: Double] = [:]
     private(set) var isPowerSupported = false
+
+    var batteryPowerComparison: BatteryPowerComparison {
+        batteryPowerSavingsTracker.comparison
+    }
 
     var averageCPUByIdentifier: [String: Double] {
         cpuAverageSamples.mapValues(\.value)
@@ -23,6 +28,16 @@ struct RuntimeMetrics {
 
     mutating func setPowerSupported(_ isSupported: Bool) {
         isPowerSupported = isSupported
+    }
+
+    mutating func updateBatteryPower(
+        state: BatteryPowerState?,
+        activeLimitIdentifiers: Set<String>
+    ) {
+        batteryPowerSavingsTracker.update(
+            state: state,
+            activeLimitIdentifiers: activeLimitIdentifiers
+        )
     }
 
     mutating func updateCPUAverages(apps: [ManagedApp], now: Date = Date()) {

@@ -61,6 +61,16 @@ enum ManagementStatus: Equatable, Sendable {
             false
         }
     }
+
+    var isActivelyLimitingCPU: Bool {
+        switch self {
+        case .limited, .paused:
+            true
+        case .normal, .waiting, .energyEfficient, .audioProtected, .snoozed,
+                .disabled, .notRunning, .unavailable:
+            false
+        }
+    }
 }
 
 struct ManagedApp: Identifiable, Sendable {
@@ -76,7 +86,9 @@ struct ManagedApp: Identifiable, Sendable {
     var isHidden: Bool
     let isPlayingAudio: Bool
     let isService: Bool
+    let isBackgroundProcess: Bool
     let isSystemProcess: Bool
+    let requiresPrivilegedControl: Bool
     var windowVisibility: AppWindowVisibility
     var isProtectedByMenuBarOverlay: Bool
     var cpuPowerWatts: Double? = nil
@@ -96,7 +108,9 @@ struct ManagedApp: Identifiable, Sendable {
         isHidden: Bool,
         isPlayingAudio: Bool,
         isService: Bool = false,
+        isBackgroundProcess: Bool = false,
         isSystemProcess: Bool,
+        requiresPrivilegedControl: Bool? = nil,
         windowVisibility: AppWindowVisibility = .unknown,
         isProtectedByMenuBarOverlay: Bool = false,
         cpuPowerWatts: Double? = nil,
@@ -115,7 +129,11 @@ struct ManagedApp: Identifiable, Sendable {
         self.isHidden = isHidden
         self.isPlayingAudio = isPlayingAudio
         self.isService = isService
+        self.isBackgroundProcess = isBackgroundProcess
         self.isSystemProcess = isSystemProcess
+        self.requiresPrivilegedControl = requiresPrivilegedControl
+            ?? (processIdentities.contains(where: \.requiresPrivilegedControl)
+                || (isSystemProcess && processIdentities.isEmpty))
         self.windowVisibility = windowVisibility
         self.isProtectedByMenuBarOverlay = isProtectedByMenuBarOverlay
         self.cpuPowerWatts = cpuPowerWatts

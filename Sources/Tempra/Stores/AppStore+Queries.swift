@@ -56,6 +56,10 @@ extension AppStore {
         )
     }
 
+    var batteryPowerComparison: BatteryPowerComparison {
+        runtimeMetrics.batteryPowerComparison
+    }
+
     var hasActivePowerManagement: Bool {
         apps.contains { $0.status.isActivelySavingPower }
     }

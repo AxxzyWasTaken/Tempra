@@ -56,22 +56,17 @@ final class ProcessManagementCoordinator {
         isEnabled: Bool,
         onProcessChange: @escaping ChangeHandler
     ) {
-        let monitorOnlyIdentifiers = Set(
-            apps.lazy.filter(\.isSystemProcess).map(\.bundleIdentifier)
-        )
         let effectiveRules = rules.compactMapValues { rule -> AppRule? in
             guard rule.hasBehavior,
                   rule.isEnabled,
-                  !BackgroundProcessPolicy.isMonitorOnlyIdentifier(rule.bundleIdentifier),
-                  !monitorOnlyIdentifiers.contains(rule.bundleIdentifier),
                   suspensions[rule.bundleIdentifier]?.isActive != true else {
                 return nil
             }
-            return activeProfile?.applying(to: rule) ?? rule
+            return SystemProcessRulePolicy.normalized(
+                activeProfile?.applying(to: rule) ?? rule
+            )
         }
-        let managedApps = apps.filter {
-            !$0.isSystemProcess && effectiveRules[$0.bundleIdentifier] != nil
-        }
+        let managedApps = apps.filter { effectiveRules[$0.bundleIdentifier] != nil }
         processWatcher.watch(
             processIdentities: Set(managedApps.flatMap(\.processIdentities)),
             audioProcessIdentifiers: Set(managedApps.lazy.filter {
@@ -82,10 +77,12 @@ final class ProcessManagementCoordinator {
 
         revision &+= 1
         let requestRevision = revision
-        let targets = apps.lazy.filter { !$0.isSystemProcess }.map {
+        let targets = apps.lazy.map {
             ProcessControlTarget(
                 bundleIdentifier: $0.bundleIdentifier,
                 processIdentities: Set($0.processIdentities),
+                usesApplicationCommands: !$0.requiresPrivilegedControl
+                    && !BackgroundProcessPolicy.isBackgroundIdentifier($0.bundleIdentifier),
                 launchedAt: $0.launchedAt,
                 cpuPercent: $0.cpuPercent,
                 isFrontmost: $0.isFrontmost,

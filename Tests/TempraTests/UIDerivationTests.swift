@@ -1,12 +1,94 @@
 import AppKit
 import Combine
 import Foundation
+import ServiceManagement
 import Testing
 @testable import Tempra
 
 @Suite("UI derivation")
 @MainActor
 struct UIDerivationTests {
+    @Test("Bundled privileged helper can register from the initial not-found state")
+    func privilegedHelperInitialRegistration() async {
+        var currentStatus = SMAppService.Status.notFound
+        var registrationCount = 0
+        var settingsOpenCount = 0
+        let manager = PrivilegedHelperManager(
+            serviceStatus: { currentStatus },
+            bundledServiceIsPresent: { true },
+            registerService: {
+                registrationCount += 1
+                currentStatus = .requiresApproval
+            },
+            openApprovalSettings: { settingsOpenCount += 1 },
+            pingService: {}
+        )
+
+        #expect(manager.status == .notRegistered)
+        #expect(await manager.requestEnable() == .requiresApproval)
+        #expect(registrationCount == 1)
+        #expect(settingsOpenCount == 1)
+    }
+
+    @Test("Missing privileged helper remains unavailable")
+    func missingPrivilegedHelperDoesNotRegister() async {
+        var registrationCount = 0
+        let manager = PrivilegedHelperManager(
+            serviceStatus: { .notFound },
+            bundledServiceIsPresent: { false },
+            registerService: { registrationCount += 1 },
+            openApprovalSettings: {},
+            pingService: {}
+        )
+
+        #expect(manager.status == .unavailable(
+            "Tempra’s privileged helper is missing from this app bundle."
+        ))
+        #expect(await manager.requestEnable() == manager.status)
+        #expect(registrationCount == 0)
+    }
+
+    @Test("Denied helper launch opens administrator approval settings")
+    func privilegedHelperApprovalRequest() async {
+        var settingsOpenCount = 0
+        let manager = PrivilegedHelperManager(
+            serviceStatus: { .notFound },
+            bundledServiceIsPresent: { true },
+            registerService: {
+                throw NSError(
+                    domain: "SMAppServiceErrorDomain",
+                    code: Int(kSMErrorLaunchDeniedByUser)
+                )
+            },
+            openApprovalSettings: { settingsOpenCount += 1 },
+            pingService: {}
+        )
+
+        #expect(await manager.requestEnable() == .requiresApproval)
+        #expect(settingsOpenCount == 1)
+    }
+
+    @Test("Approved helper failures offer a connection retry")
+    func privilegedHelperConnectionFailure() async {
+        let manager = PrivilegedHelperManager(
+            serviceStatus: { .enabled },
+            bundledServiceIsPresent: { true },
+            registerService: {},
+            openApprovalSettings: {},
+            pingService: {
+                throw PrivilegedProcessClientError.connectionFailed("The helper exited.")
+            }
+        )
+
+        let status = await manager.requestEnable()
+        #expect(status == .helperUnavailable(
+            "Tempra could not connect to its privileged helper: The helper exited."
+        ))
+        #expect(status.actionTitle == "Retry Connection")
+        #expect(status.message?.hasPrefix("Administrator access is enabled") == true)
+        #expect(PrivilegedControlStatus.unavailable("Missing").actionTitle == nil)
+    }
+
     @Test("Process scopes preserve search and every sort order")
     func processScopesAndSorting() {
         let items = menuFixtures()
@@ -23,6 +105,7 @@ struct UIDerivationTests {
         for (sort, expectedIdentifiers) in expectedOrders {
             let lists = MenuBarItemLists(
                 displayItems: items,
+                includesBackgroundAndSystemProcesses: true,
                 scope: .running,
                 processSort: sort,
                 searchText: "",
@@ -34,6 +117,7 @@ struct UIDerivationTests {
 
         let searched = MenuBarItemLists(
             displayItems: items,
+            includesBackgroundAndSystemProcesses: true,
             scope: .rules,
             processSort: .name,
             searchText: "GAMMA",
@@ -44,6 +128,7 @@ struct UIDerivationTests {
 
         let alerts = MenuBarItemLists(
             displayItems: items,
+            includesBackgroundAndSystemProcesses: true,
             scope: .alerts,
             processSort: .name,
             searchText: "",
@@ -68,6 +153,7 @@ struct UIDerivationTests {
     func managedItemOrdering() {
         let collapsed = MenuBarItemLists(
             displayItems: menuFixtures(),
+            includesBackgroundAndSystemProcesses: true,
             scope: .running,
             processSort: .name,
             searchText: "",
@@ -80,6 +166,7 @@ struct UIDerivationTests {
 
         let expanded = MenuBarItemLists(
             displayItems: menuFixtures(),
+            includesBackgroundAndSystemProcesses: true,
             scope: .running,
             processSort: .name,
             searchText: "",
@@ -88,6 +175,73 @@ struct UIDerivationTests {
         )
         #expect(expanded.visibleManagedItems.map(\.bundleIdentifier) == [
             "gamma", "beta", "delta",
+        ])
+    }
+
+    @Test("Background and system processes stay hidden from Running when disabled")
+    func backgroundAndSystemProcessVisibility() {
+        let backgroundIdentifier = BackgroundProcessPolicy.userOwnedIdentifier(
+            command: "/Users/example/wine64-preloader",
+            pid: 10
+        )
+        let items = [
+            item(identifier: "ordinary", name: "Ordinary"),
+            item(
+                identifier: "com.apple.dock",
+                name: "Dock",
+                isSystemProcess: true,
+                rule: rule("com.apple.dock")
+            ),
+            item(
+                identifier: backgroundIdentifier,
+                name: "Game.exe",
+                rule: rule(backgroundIdentifier)
+            ),
+            item(
+                identifier: "background-agent",
+                name: "Background Agent",
+                isBackgroundProcess: true
+            ),
+        ]
+
+        let hidden = MenuBarItemLists(
+            displayItems: items,
+            includesBackgroundAndSystemProcesses: false,
+            scope: .running,
+            processSort: .name,
+            searchText: "",
+            showsAllRules: true,
+            collapsedRuleCount: 5
+        )
+        #expect(hidden.processItems.map(\.bundleIdentifier) == ["ordinary"])
+        #expect(Set(hidden.managedItems.map(\.bundleIdentifier)) == [
+            "com.apple.dock", backgroundIdentifier,
+        ])
+
+        let visible = MenuBarItemLists(
+            displayItems: items,
+            includesBackgroundAndSystemProcesses: true,
+            scope: .running,
+            processSort: .name,
+            searchText: "",
+            showsAllRules: true,
+            collapsedRuleCount: 5
+        )
+        #expect(visible.processItems.map(\.bundleIdentifier) == [
+            "background-agent", "com.apple.dock", backgroundIdentifier, "ordinary",
+        ])
+
+        let rules = MenuBarItemLists(
+            displayItems: items,
+            includesBackgroundAndSystemProcesses: false,
+            scope: .rules,
+            processSort: .name,
+            searchText: "",
+            showsAllRules: true,
+            collapsedRuleCount: 5
+        )
+        #expect(Set(rules.processItems.map(\.bundleIdentifier)) == [
+            "com.apple.dock", backgroundIdentifier,
         ])
     }
 
@@ -240,9 +394,16 @@ struct UIDerivationTests {
         #expect(presentation.selection == nil)
     }
 
-    @Test("Only ordinary running apps expose process controls")
+    @Test("Only ordinary running apps expose macOS application commands")
     func processControlAvailability() {
         let ordinary = item(identifier: "ordinary", name: "Ordinary")
+        let standalone = item(
+            identifier: BackgroundProcessPolicy.userOwnedIdentifier(
+                command: "/Users/example/wine64-preloader",
+                pid: 10
+            ),
+            name: "Game.exe"
+        )
         let protected = item(
             identifier: "protected",
             name: "Protected",
@@ -253,10 +414,22 @@ struct UIDerivationTests {
             name: "Stopped",
             isRunning: false
         )
+        let windowServer = item(
+            identifier: BackgroundProcessPolicy.identifier(
+                command: "/System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer",
+                pid: 100
+            ),
+            name: "WindowServer",
+            isSystemProcess: true
+        )
 
         #expect(ordinary.canControlApplication)
+        #expect(standalone.isStandaloneProcess)
+        #expect(!standalone.canControlApplication)
         #expect(!protected.canControlApplication)
         #expect(!stopped.canControlApplication)
+        #expect(!windowServer.canLimitCPU)
+        #expect(windowServer.canQuitProcess)
         #expect(ordinary.residentMemoryText == "—")
     }
 
@@ -319,6 +492,7 @@ struct UIDerivationTests {
         for _ in 0..<4 {
             repeatedLists = MenuBarItemLists(
                 displayItems: items,
+                includesBackgroundAndSystemProcesses: true,
                 scope: .running,
                 processSort: .averageDescending,
                 searchText: "process",
@@ -331,6 +505,7 @@ struct UIDerivationTests {
         let snapshotStart = clock.now
         let snapshot = MenuBarItemLists(
             displayItems: items,
+            includesBackgroundAndSystemProcesses: true,
             scope: .running,
             processSort: .averageDescending,
             searchText: "process",
@@ -399,6 +574,7 @@ struct UIDerivationTests {
         power: Double? = nil,
         savedCPU: Double = 0,
         isRunning: Bool = true,
+        isBackgroundProcess: Bool = false,
         isSystemProcess: Bool = false,
         rule: AppRule? = nil,
         isAttention: Bool = false,
@@ -417,6 +593,7 @@ struct UIDerivationTests {
             isFrontmost: false,
             isHidden: false,
             isPlayingAudio: false,
+            isBackgroundProcess: isBackgroundProcess,
             isSystemProcess: isSystemProcess,
             status: isRunning ? .normal : .notRunning,
             rule: rule,

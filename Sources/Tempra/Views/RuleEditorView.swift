@@ -23,7 +23,9 @@ struct RuleEditorView: View {
         self.item = item
         self.store = store
         self.onClose = onClose
-        let initial = initialRule ?? store.rule(for: item)
+        let initial = SystemProcessRulePolicy.normalized(
+            initialRule ?? store.rule(for: item)
+        )
         _original = State(initialValue: initial)
         _draft = State(initialValue: initial)
         _allowsMultipleCPUCores = State(
@@ -52,6 +54,13 @@ struct RuleEditorView: View {
                         .overlay(TempraPalette.separator)
 
                     idleControls
+
+                    if item.isStandaloneProcess || item.requiresPrivilegedControl {
+                        Divider()
+                            .overlay(TempraPalette.separator)
+
+                        processControlNotice
+                    }
                 }
                 .padding(.leading, 17)
                 .padding(.trailing, 13)
@@ -95,13 +104,17 @@ struct RuleEditorView: View {
                     Toggle("Rule Enabled", isOn: $draft.isEnabled)
 
                     Divider()
-                    Button("Gentle · 50%") {
-                        draft.action = .limit
-                        draft.limitPercent = 50
-                    }
-                    Button("Strict · 20%") {
-                        draft.action = .limit
-                        draft.limitPercent = 20
+                    if item.canLimitCPU {
+                        Button("Gentle · 50%") {
+                            draft.action = .limit
+                            draft.runOnEfficiencyCores = true
+                            draft.limitPercent = 50
+                        }
+                        Button("Strict · 20%") {
+                            draft.action = .limit
+                            draft.runOnEfficiencyCores = true
+                            draft.limitPercent = 20
+                        }
                     }
                     Button("Pause") {
                         draft.action = .pause
@@ -181,7 +194,9 @@ struct RuleEditorView: View {
 
             pauseToggle
             efficiencyToggle
-            limitToggle
+            if item.canLimitCPU {
+                limitToggle
+            }
 
             if draft.action == .limit {
                 HStack(spacing: 9) {
@@ -242,13 +257,15 @@ struct RuleEditorView: View {
                 .toggleStyle(TempraCheckboxToggleStyle())
                 .controlSize(.small)
 
-            Toggle(isOn: $draft.onlyWhenHidden) {
-                Text("Only stop or slow when app is hidden")
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.88)
+            if item.canControlApplication {
+                Toggle(isOn: $draft.onlyWhenHidden) {
+                    Text("Only stop or slow when app is hidden")
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.88)
+                }
+                    .toggleStyle(TempraCheckboxToggleStyle())
+                    .controlSize(.small)
             }
-                .toggleStyle(TempraCheckboxToggleStyle())
-                .controlSize(.small)
         }
     }
 
@@ -258,16 +275,66 @@ struct RuleEditorView: View {
                 .font(TempraTypography.bodyEmphasized)
 
             idleControl(
-                title: "Quit after:",
+                title: "Force quit after:",
                 isEnabled: quitEnabled,
                 minutes: quitMinutes
             )
 
-            idleControl(
-                title: "Hide after:",
-                isEnabled: hideEnabled,
-                minutes: hideMinutes
+            if item.canControlApplication {
+                idleControl(
+                    title: "Hide after:",
+                    isEnabled: hideEnabled,
+                    minutes: hideMinutes
+                )
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var processControlNotice: some View {
+        if !item.canLimitCPU {
+            VStack(alignment: .leading, spacing: 7) {
+                Label(
+                    "WindowServer can use power-saving cores. CPU limits are unavailable because they can freeze the desktop.",
+                    systemImage: "exclamationmark.shield"
+                )
+                .font(TempraTypography.ruleTag)
+                .foregroundStyle(TempraPalette.secondaryText)
+
+                privilegedAccessNotice
+            }
+            .fixedSize(horizontal: false, vertical: true)
+        } else if item.requiresPrivilegedControl {
+            privilegedAccessNotice
+        } else {
+            Text("CPU limit, pause, priority, and force-quit rules work for this process. Hide requires a macOS application.")
+                .font(TempraTypography.ruleTag)
+                .foregroundStyle(TempraPalette.secondaryText)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private var privilegedAccessNotice: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            Label(
+                store.privilegedControlStatus.message
+                    ?? "Administrator access is enabled for this process.",
+                systemImage: store.privilegedControlStatus.isEnabled
+                    ? "checkmark.shield"
+                    : "lock.shield"
             )
+            .font(TempraTypography.ruleTag)
+            .foregroundStyle(TempraPalette.secondaryText)
+
+            if let actionTitle = store.privilegedControlStatus.actionTitle {
+                Button(actionTitle) {
+                    Task {
+                        _ = await store.requestPrivilegedControl()
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+            }
         }
     }
 
@@ -301,6 +368,7 @@ struct RuleEditorView: View {
         }
         .toggleStyle(TempraCheckboxToggleStyle())
         .controlSize(.small)
+        .disabled(draft.action == .limit)
     }
 
     private var limitToggle: some View {
@@ -308,6 +376,9 @@ struct RuleEditorView: View {
             get: { draft.action == .limit },
             set: { enabled in
                 draft.action = enabled ? .limit : .none
+                if enabled {
+                    draft.runOnEfficiencyCores = true
+                }
             }
         ))
         .toggleStyle(TempraCheckboxToggleStyle())

@@ -9,10 +9,19 @@ let package = Package(
     ],
     products: [
         .executable(name: "Tempra", targets: ["Tempra"]),
-        .executable(name: "TempraWatchdog", targets: ["TempraWatchdog"])
+        .executable(name: "TempraWatchdog", targets: ["TempraWatchdog"]),
+        .executable(
+            name: "TempraPrivilegedHelper",
+            targets: ["TempraPrivilegedHelper"]
+        )
     ],
     targets: [
-        .target(name: "TempraSafety"),
+        .target(
+            name: "TempraSafety",
+            linkerSettings: [
+                .linkedFramework("Security")
+            ]
+        ),
         .target(
             name: "TempraSensors",
             publicHeadersPath: "include",
@@ -32,6 +41,10 @@ let package = Package(
         ),
         .executableTarget(
             name: "TempraWatchdog",
+            dependencies: ["TempraSafety"]
+        ),
+        .executableTarget(
+            name: "TempraPrivilegedHelper",
             dependencies: ["TempraSafety"]
         ),
         .testTarget(

@@ -43,6 +43,7 @@ enum BackgroundProcessPolicy {
         "com.apple.loginwindow"
     ]
     static let identifierPrefix = "tempra.background:"
+    static let userOwnedIdentifierPrefix = "tempra.user-background:"
 
     static func shouldIncludeApplication(
         bundleIdentifier: String,
@@ -74,8 +75,33 @@ enum BackgroundProcessPolicy {
     }
 
     static func identifier(command: String, pid: pid_t) -> String {
+        identifier(command: command, pid: pid, prefix: identifierPrefix)
+    }
+
+    static func userOwnedIdentifier(command: String, pid: pid_t) -> String {
+        identifier(command: command, pid: pid, prefix: userOwnedIdentifierPrefix)
+    }
+
+    static func isMonitorOnlyBackgroundProcess(
+        userID: uid_t,
+        currentUserID: uid_t,
+        hasProcessIdentity: Bool
+    ) -> Bool {
+        userID != currentUserID || !hasProcessIdentity
+    }
+
+    static func isUserOwnedIdentifier(_ identifier: String) -> Bool {
+        identifier.hasPrefix(userOwnedIdentifierPrefix)
+    }
+
+    static func isBackgroundIdentifier(_ identifier: String) -> Bool {
+        identifier.hasPrefix(identifierPrefix)
+            || isUserOwnedIdentifier(identifier)
+    }
+
+    private static func identifier(command: String, pid: pid_t, prefix: String) -> String {
         let identity = command.isEmpty ? "pid:\(pid)" : "command:\(command)"
-        return identifierPrefix + identity
+        return prefix + identity
     }
 
     static func displayName(command: String, pid: pid_t) -> String {
@@ -168,8 +194,27 @@ struct ProcessKernelSnapshot: Equatable, Sendable {
     let parentPID: pid_t
     let userID: uid_t
     let executableName: String
+    let executablePath: String
     let totalCPUTimeNanoseconds: UInt64
     let residentMemoryBytes: UInt64
+
+    init(
+        identity: ProcessIdentity,
+        parentPID: pid_t,
+        userID: uid_t,
+        executableName: String,
+        executablePath: String = "",
+        totalCPUTimeNanoseconds: UInt64,
+        residentMemoryBytes: UInt64
+    ) {
+        self.identity = identity
+        self.parentPID = parentPID
+        self.userID = userID
+        self.executableName = executableName
+        self.executablePath = executablePath
+        self.totalCPUTimeNanoseconds = totalCPUTimeNanoseconds
+        self.residentMemoryBytes = residentMemoryBytes
+    }
 }
 
 protocol ProcessSnapshotReading {
@@ -179,9 +224,10 @@ protocol ProcessSnapshotReading {
 }
 
 struct LiveProcessSnapshotReader: ProcessSnapshotReading {
-    private static let machTimebase: mach_timebase_info_data_t = {
+    private static let machTimebase: mach_timebase_info_data_t? = {
         var info = mach_timebase_info_data_t()
-        _ = mach_timebase_info(&info)
+        guard mach_timebase_info(&info) == KERN_SUCCESS,
+              info.denom > 0 else { return nil }
         return info
     }()
 
@@ -229,6 +275,7 @@ struct LiveProcessSnapshotReader: ProcessSnapshotReading {
             parentPID: pid_t(info.pbsd.pbi_ppid),
             userID: info.pbsd.pbi_uid,
             executableName: executableName,
+            executablePath: executablePath(for: pid) ?? "",
             totalCPUTimeNanoseconds: totalCPUTimeNanoseconds,
             residentMemoryBytes: info.ptinfo.pti_resident_size
         )
@@ -242,9 +289,9 @@ struct LiveProcessSnapshotReader: ProcessSnapshotReading {
     }
 
     private static func nanoseconds(fromMachTicks ticks: UInt64) -> UInt64? {
+        guard let machTimebase else { return nil }
         let numerator = UInt64(machTimebase.numer)
         let denominator = UInt64(machTimebase.denom)
-        guard denominator > 0 else { return ticks }
 
         let whole = ticks / denominator
         let remainder = ticks % denominator
@@ -331,7 +378,9 @@ private struct ProcessMetadataCache {
             userID: snapshot.userID,
             executableName: snapshot.executableName,
             name: BackgroundProcessPolicy.displayName(
-                command: path,
+                command: snapshot.executableName.isEmpty
+                    ? path
+                    : snapshot.executableName,
                 pid: snapshot.identity.pid
             ),
             path: path
@@ -487,7 +536,16 @@ struct ProcessAssignmentResolver {
 }
 
 final class ProcessMonitor {
+    typealias ProcessTableReader = () -> (
+        entries: [ProcessTableEntry],
+        samplerPID: pid_t
+    )?
+    typealias PrivilegedSnapshotReader = @Sendable ([pid_t]) async throws -> [
+        pid_t: ProcessKernelSnapshot
+    ]
+
     private(set) var didRefreshLastSample = true
+    private(set) var privilegedAccessError: String?
 
     private struct CPUCounter {
         let totalNanoseconds: UInt64
@@ -512,6 +570,7 @@ final class ProcessMonitor {
         var mainPIDs: Set<pid_t>
         var isHidden: Bool
         var isService: Bool
+        var isBackgroundProcess: Bool
         var isSystemProcess: Bool
     }
 
@@ -520,8 +579,10 @@ final class ProcessMonitor {
         let name: String
         let url: URL?
         var pids: [pid_t]
+        var processIdentities: [ProcessIdentity]
         var cpuPercent: Double
         var residentMemoryBytes: UInt64?
+        let isSystemProcess: Bool
     }
 
     private var previousCounters: [ProcessIdentity: CPUCounter] = [:]
@@ -539,6 +600,10 @@ final class ProcessMonitor {
     private let uptime: () -> TimeInterval
     private let audioProcessIdentifiers: () -> Set<pid_t>
     private let windowSnapshot: () -> WindowVisibilitySnapshot?
+    private let processTableReader: ProcessTableReader
+    private let privilegedSnapshotReader: PrivilegedSnapshotReader
+    private let excludedExecutablePaths: Set<String>
+    private var cachedAudioProcessIdentifiers: Set<pid_t>?
 
     var cachedMetadataCount: Int { metadataCache.count }
 
@@ -551,19 +616,30 @@ final class ProcessMonitor {
         },
         windowSnapshot: @escaping () -> WindowVisibilitySnapshot? = {
             WindowVisibilitySnapshot.capture()
-        }
+        },
+        processTableReader: @escaping ProcessTableReader = {
+            ProcessMonitor.readProcessTable()
+        },
+        privilegedSnapshotReader: @escaping PrivilegedSnapshotReader = { processIdentifiers in
+            try await PrivilegedProcessClient.shared.snapshots(for: processIdentifiers)
+        },
+        excludedExecutablePaths: Set<String>? = nil
     ) {
         self.processReader = processReader
         self.currentUserID = currentUserID
         self.uptime = uptime
         self.audioProcessIdentifiers = audioProcessIdentifiers
         self.windowSnapshot = windowSnapshot
+        self.processTableReader = processTableReader
+        self.privilegedSnapshotReader = privilegedSnapshotReader
+        self.excludedExecutablePaths = excludedExecutablePaths
+            ?? Self.bundledHelperExecutablePaths()
         previousSampleTime = uptime()
     }
 
     @MainActor
-    func sample(includingEssentialSystemProcesses: Bool = false) -> [ManagedApp] {
-        sample(
+    func sample(includingEssentialSystemProcesses: Bool = false) async -> [ManagedApp] {
+        await sample(
             inventory: .capture(),
             includingEssentialSystemProcesses: includingEssentialSystemProcesses
         )
@@ -571,8 +647,9 @@ final class ProcessMonitor {
 
     func sample(
         inventory: ApplicationInventory,
-        includingEssentialSystemProcesses: Bool = false
-    ) -> [ManagedApp] {
+        includingEssentialSystemProcesses: Bool = false,
+        refreshesAudioActivity: Bool = true
+    ) async -> [ManagedApp] {
         let now = uptime()
         let inclusionChanged = includingEssentialSystemProcesses != lastIncludedBackgroundProcesses
         lastIncludedBackgroundProcesses = includingEssentialSystemProcesses
@@ -589,7 +666,7 @@ final class ProcessMonitor {
         }
         didRefreshLastSample = true
         let elapsed = max(now - previousSampleTime, 0.001)
-        let rawProcesses = readProcesses(
+        let rawProcesses = await readProcesses(
             includingBackgroundProcesses: includingEssentialSystemProcesses
         )
         let rawByPID = Dictionary(uniqueKeysWithValues: rawProcesses.map { ($0.pid, $0) })
@@ -599,7 +676,13 @@ final class ProcessMonitor {
             includesEssentialSystemProcesses: includingEssentialSystemProcesses
         )
         let assignments = assignProcesses(rawProcesses, to: bundles)
-        let playingAudioProcessIdentifiers = audioProcessIdentifiers()
+        let playingAudioProcessIdentifiers: Set<pid_t>
+        if refreshesAudioActivity || cachedAudioProcessIdentifiers == nil {
+            playingAudioProcessIdentifiers = audioProcessIdentifiers()
+            cachedAudioProcessIdentifiers = playingAudioProcessIdentifiers
+        } else {
+            playingAudioProcessIdentifiers = cachedAudioProcessIdentifiers ?? []
+        }
 
         var currentCounters: [ProcessIdentity: CPUCounter] = [:]
         var cpuByPID: [pid_t: Double] = [:]
@@ -629,9 +712,7 @@ final class ProcessMonitor {
             guard !pids.isEmpty else { return nil }
 
             let cpu = pids.reduce(0) { $0 + cpuByPID[$1, default: 0] }
-            let isPlayingAudio = bundle.isSystemProcess
-                ? false
-                : pids.contains(where: playingAudioProcessIdentifiers.contains)
+            let isPlayingAudio = pids.contains(where: playingAudioProcessIdentifiers.contains)
 
             return ManagedApp(
                 bundleIdentifier: bundle.identifier,
@@ -656,6 +737,7 @@ final class ProcessMonitor {
                 isHidden: bundle.isHidden,
                 isPlayingAudio: isPlayingAudio,
                 isService: bundle.isService,
+                isBackgroundProcess: bundle.isBackgroundProcess,
                 isSystemProcess: bundle.isSystemProcess,
                 status: .normal
             )
@@ -706,7 +788,7 @@ final class ProcessMonitor {
         )
 
         var updatedApps = apps.map { app in
-            guard !app.isSystemProcess else { return app }
+            guard Self.canUseApplicationCommands(app) else { return app }
             var updated = app
             if let applications = applicationsByIdentifier[app.bundleIdentifier] {
                 updated.isHidden = applications.allSatisfy(\.isHidden)
@@ -716,7 +798,9 @@ final class ProcessMonitor {
                 && app.bundleIdentifier == protectedIdentifier
             return updated
         }
-        let requestIndices = updatedApps.indices.filter { !updatedApps[$0].isSystemProcess }
+        let requestIndices = updatedApps.indices.filter {
+            Self.canUseApplicationCommands(updatedApps[$0])
+        }
         let requests = requestIndices.map { index in
             WindowVisibilitySnapshot.Request(
                 processIdentifiers: Set(updatedApps[index].processIdentifiers),
@@ -747,12 +831,13 @@ final class ProcessMonitor {
         }
     }
 
-    private func readProcesses(includingBackgroundProcesses: Bool) -> [RawProcess] {
+    private func readProcesses(includingBackgroundProcesses: Bool) async -> [RawProcess] {
         guard includingBackgroundProcesses else {
-            return readAccessibleProcesses()
+            privilegedAccessError = nil
+            return readAccessibleProcesses().filter(isIncludedProcess)
         }
 
-        let accessibleProcesses = readAccessibleProcesses()
+        let accessibleProcesses = readAccessibleProcesses().filter(isIncludedProcess)
         let accessibleByPID = Dictionary(
             uniqueKeysWithValues: accessibleProcesses.map { ($0.pid, $0) }
         )
@@ -760,7 +845,7 @@ final class ProcessMonitor {
         let now = uptime()
         if cachedProcessTableEntries.isEmpty
             || now - processTableRefreshTime >= processTableRefreshInterval {
-            guard let processTable = readProcessTable() else {
+            guard let processTable = processTableReader() else {
                 cachedProcessTableEntries.removeAll()
                 processTableRefreshTime = now
                 return accessibleProcesses
@@ -771,11 +856,32 @@ final class ProcessMonitor {
             processTableRefreshTime = now
         }
 
-        return cachedProcessTableEntries.map { entry in
-            if let accessible = accessibleByPID[entry.pid] {
-                return accessible
+        let inaccessiblePIDs = cachedProcessTableEntries.compactMap { entry in
+            accessibleByPID[entry.pid] == nil ? entry.pid : nil
+        }
+        let privilegedSnapshots: [pid_t: ProcessKernelSnapshot]
+        if inaccessiblePIDs.isEmpty {
+            privilegedSnapshots = [:]
+            privilegedAccessError = nil
+        } else {
+            do {
+                privilegedSnapshots = try await privilegedSnapshotReader(inaccessiblePIDs)
+                privilegedAccessError = nil
+            } catch {
+                privilegedSnapshots = [:]
+                privilegedAccessError = error.localizedDescription
             }
-            return RawProcess(
+        }
+
+        return cachedProcessTableEntries.compactMap { entry in
+            if let accessible = accessibleByPID[entry.pid] {
+                return isIncludedProcess(accessible) ? accessible : nil
+            }
+            if let snapshot = privilegedSnapshots[entry.pid] {
+                let process = rawProcess(from: snapshot)
+                return isIncludedProcess(process) ? process : nil
+            }
+            let process = RawProcess(
                 pid: entry.pid,
                 identity: nil,
                 parentPID: entry.parentPID,
@@ -789,6 +895,7 @@ final class ProcessMonitor {
                 reportedCPUPercent: entry.cpuPercent,
                 residentMemoryBytes: nil
             )
+            return isIncludedProcess(process) ? process : nil
         }
     }
 
@@ -802,28 +909,63 @@ final class ProcessMonitor {
         }
         metadataCache.retain(Set(snapshots.map(\.identity)))
 
-        return snapshots.map { snapshot in
-            let metadata = metadataCache.metadata(
-                for: snapshot,
-                pathReader: processReader.executablePath
-            )
-            return RawProcess(
-                pid: snapshot.identity.pid,
-                identity: snapshot.identity,
-                parentPID: metadata.parentPID,
-                userID: metadata.userID,
-                name: metadata.name,
-                path: metadata.path,
-                counter: CPUCounter(
-                    totalNanoseconds: snapshot.totalCPUTimeNanoseconds
-                ),
-                reportedCPUPercent: nil,
-                residentMemoryBytes: snapshot.residentMemoryBytes
-            )
-        }
+        return snapshots.map(rawProcess)
     }
 
-    private func readProcessTable() -> (entries: [ProcessTableEntry], samplerPID: pid_t)? {
+    private func rawProcess(from snapshot: ProcessKernelSnapshot) -> RawProcess {
+        let metadata = metadataCache.metadata(
+            for: snapshot,
+            pathReader: { pid in
+                snapshot.executablePath.isEmpty
+                    ? processReader.executablePath(for: pid)
+                    : snapshot.executablePath
+            }
+        )
+        return RawProcess(
+            pid: snapshot.identity.pid,
+            identity: snapshot.identity,
+            parentPID: metadata.parentPID,
+            userID: metadata.userID,
+            name: metadata.name,
+            path: metadata.path,
+            counter: CPUCounter(
+                totalNanoseconds: snapshot.totalCPUTimeNanoseconds
+            ),
+            reportedCPUPercent: nil,
+            residentMemoryBytes: snapshot.residentMemoryBytes
+        )
+    }
+
+    private func isIncludedProcess(_ process: RawProcess) -> Bool {
+        !excludedExecutablePaths.contains(process.path)
+    }
+
+    private static func bundledHelperExecutablePaths() -> Set<String> {
+        let contentsURL = Bundle.main.bundleURL.appendingPathComponent(
+            "Contents",
+            isDirectory: true
+        )
+        return [
+            contentsURL
+                .appendingPathComponent("MacOS", isDirectory: true)
+                .appendingPathComponent("TempraWatchdog", isDirectory: false)
+                .standardizedFileURL.path,
+            contentsURL
+                .appendingPathComponent("Library/HelperTools", isDirectory: true)
+                .appendingPathComponent("TempraPrivilegedHelper", isDirectory: false)
+                .standardizedFileURL.path,
+        ]
+    }
+
+    private static func canUseApplicationCommands(_ app: ManagedApp) -> Bool {
+        !app.requiresPrivilegedControl
+            && !BackgroundProcessPolicy.isBackgroundIdentifier(app.bundleIdentifier)
+    }
+
+    private static func readProcessTable() -> (
+        entries: [ProcessTableEntry],
+        samplerPID: pid_t
+    )? {
         let process = Process()
         let outputPipe = Pipe()
         process.executableURL = URL(fileURLWithPath: "/bin/ps")
@@ -882,11 +1024,14 @@ final class ProcessMonitor {
             let isService = BackgroundProcessPolicy.isServiceApplication(
                 activationPolicy: application.activationPolicy
             )
+            let isBackgroundProcess = application.activationPolicy == .prohibited
 
             if var existing = result[identifier] {
                 existing.mainPIDs.insert(application.processIdentifier)
                 existing.isHidden = existing.isHidden && application.isHidden
                 existing.isService = existing.isService || isService
+                existing.isBackgroundProcess = existing.isBackgroundProcess
+                    || isBackgroundProcess
                 existing.isSystemProcess = existing.isSystemProcess || isSystemProcess
                 result[identifier] = existing
             } else {
@@ -897,6 +1042,7 @@ final class ProcessMonitor {
                     mainPIDs: [application.processIdentifier],
                     isHidden: application.isHidden,
                     isService: isService,
+                    isBackgroundProcess: isBackgroundProcess,
                     isSystemProcess: isSystemProcess
                 )
             }
@@ -914,12 +1060,26 @@ final class ProcessMonitor {
         let ownPID = getpid()
 
         for process in processes where process.pid != ownPID && !assignedPIDs.contains(process.pid) {
-            let identifier = BackgroundProcessPolicy.identifier(
-                command: process.path,
-                pid: process.pid
+            let identityCommand = process.path.isEmpty ? process.name : process.path
+            let isSystemProcess = BackgroundProcessPolicy.isMonitorOnlyBackgroundProcess(
+                userID: process.userID,
+                currentUserID: currentUserID,
+                hasProcessIdentity: process.identity != nil
             )
+            let identifier = isSystemProcess
+                ? BackgroundProcessPolicy.identifier(
+                    command: identityCommand,
+                    pid: process.pid
+                )
+                : BackgroundProcessPolicy.userOwnedIdentifier(
+                    command: identityCommand,
+                    pid: process.pid
+                )
             if var group = groups[identifier] {
                 group.pids.append(process.pid)
+                if let identity = process.identity {
+                    group.processIdentities.append(identity)
+                }
                 group.cpuPercent += cpuByPID[process.pid, default: 0]
                 group.residentMemoryBytes = Self.addingResidentMemory(
                     group.residentMemoryBytes,
@@ -935,8 +1095,10 @@ final class ProcessMonitor {
                     name: process.name,
                     url: url,
                     pids: [process.pid],
+                    processIdentities: process.identity.map { [$0] } ?? [],
                     cpuPercent: cpuByPID[process.pid, default: 0],
-                    residentMemoryBytes: process.residentMemoryBytes
+                    residentMemoryBytes: process.residentMemoryBytes,
+                    isSystemProcess: isSystemProcess
                 )
             }
         }
@@ -947,13 +1109,20 @@ final class ProcessMonitor {
                 name: group.name,
                 bundleURL: group.url,
                 processIdentifiers: group.pids.sorted(),
+                processIdentities: group.processIdentities.sorted { $0.pid < $1.pid },
+                launchedAt: group.processIdentities.map {
+                    Date(
+                        timeIntervalSince1970: Double($0.startTimeMicroseconds) / 1_000_000
+                    )
+                }.min(),
                 cpuPercent: max(0, group.cpuPercent),
                 residentMemoryBytes: group.residentMemoryBytes,
                 isFrontmost: false,
                 isHidden: true,
                 isPlayingAudio: false,
                 isService: true,
-                isSystemProcess: true,
+                isBackgroundProcess: true,
+                isSystemProcess: group.isSystemProcess,
                 status: .normal
             )
         }

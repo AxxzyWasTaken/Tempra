@@ -156,7 +156,6 @@ final class ManagementLedger {
                     state.active[activeIndex].lastObservedAt,
                     date
                 )
-                try persist()
                 return
             }
             closeActive(at: activeIndex, endedAt: date)

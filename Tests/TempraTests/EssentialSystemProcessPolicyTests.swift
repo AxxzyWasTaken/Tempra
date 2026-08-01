@@ -87,6 +87,57 @@ struct BackgroundProcessPolicyTests {
         ) == "logd")
     }
 
+    @Test("WindowServer is recognized across executable path variants")
+    func windowServerIdentity() {
+        let direct = BackgroundProcessPolicy.identifier(
+            command: "/System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer",
+            pid: 100
+        )
+        let versioned = BackgroundProcessPolicy.identifier(
+            command: "/System/Library/PrivateFrameworks/SkyLight.framework/Versions/A/Resources/WindowServer",
+            pid: 100
+        )
+
+        #expect(SystemProcessRulePolicy.isWindowServer(bundleIdentifier: direct))
+        #expect(SystemProcessRulePolicy.isWindowServer(bundleIdentifier: versioned))
+        #expect(SystemProcessRulePolicy.isWindowServer(
+            bundleIdentifier: "com.apple.WindowServer"
+        ))
+        #expect(!SystemProcessRulePolicy.isWindowServer(
+            bundleIdentifier: BackgroundProcessPolicy.identifier(
+                command: "/usr/libexec/logd",
+                pid: 101
+            )
+        ))
+    }
+
+    @Test("User-owned background identities are stable and editable")
+    func userOwnedBackgroundIdentity() {
+        let command = "/Users/example/Library/Application Support/CrossOver/wine64-preloader"
+        let first = BackgroundProcessPolicy.userOwnedIdentifier(command: command, pid: 10)
+        let second = BackgroundProcessPolicy.userOwnedIdentifier(command: command, pid: 20)
+
+        #expect(first == second)
+        #expect(BackgroundProcessPolicy.isUserOwnedIdentifier(first))
+        #expect(BackgroundProcessPolicy.isBackgroundIdentifier(first))
+        #expect(!BackgroundProcessPolicy.isMonitorOnlyIdentifier(first))
+        #expect(!BackgroundProcessPolicy.isMonitorOnlyBackgroundProcess(
+            userID: 501,
+            currentUserID: 501,
+            hasProcessIdentity: true
+        ))
+        #expect(BackgroundProcessPolicy.isMonitorOnlyBackgroundProcess(
+            userID: 501,
+            currentUserID: 501,
+            hasProcessIdentity: false
+        ))
+        #expect(BackgroundProcessPolicy.isMonitorOnlyBackgroundProcess(
+            userID: 0,
+            currentUserID: 501,
+            hasProcessIdentity: true
+        ))
+    }
+
     @Test("Process-table parsing preserves commands containing spaces")
     func processTableParsing() throws {
         let entries = ProcessTableEntry.parse(
@@ -108,8 +159,8 @@ struct BackgroundProcessPolicyTests {
 
     @Test("Live sampler includes root-owned launchd as monitor-only")
     @MainActor
-    func liveRootDaemonVisibility() {
-        let apps = ProcessMonitor().sample(includingEssentialSystemProcesses: true)
+    func liveRootDaemonVisibility() async {
+        let apps = await ProcessMonitor().sample(includingEssentialSystemProcesses: true)
         let launchdIdentifier = BackgroundProcessPolicy.identifier(
             command: "/sbin/launchd",
             pid: 1

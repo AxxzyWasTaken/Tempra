@@ -28,6 +28,7 @@ struct MenuBarItemLists {
 
     init(
         displayItems: [AppDisplayItem],
+        includesBackgroundAndSystemProcesses: Bool,
         scope: MenuScope,
         processSort: ProcessSort,
         searchText: String,
@@ -36,7 +37,12 @@ struct MenuBarItemLists {
     ) {
         let scopedItems = displayItems.filter { item in
             switch scope {
-            case .running: item.isRunning
+            case .running:
+                item.isRunning && (
+                    includesBackgroundAndSystemProcesses
+                        || (!item.isSystemProcess && !item.isBackgroundProcess
+                            && !item.isStandaloneProcess)
+                )
             case .rules: item.rule != nil
             case .alerts: item.isAttention
             }
@@ -232,6 +238,8 @@ struct MenuBarView: View {
     var body: some View {
         let itemLists = MenuBarItemLists(
             displayItems: store.displayItems,
+            includesBackgroundAndSystemProcesses: store.preferences
+                .includesEssentialSystemProcesses,
             scope: scope,
             processSort: presentation.processSort,
             searchText: searchText,
@@ -259,6 +267,7 @@ struct MenuBarView: View {
             header
 
             summaryMetrics
+                .fixedSize(horizontal: false, vertical: true)
 
             if store.preferences.showsCPUHistoryGraph {
                 CPUHistoryChartView(
@@ -269,6 +278,7 @@ struct MenuBarView: View {
                 )
                 .padding(.horizontal, 11)
                 .padding(.bottom, 7)
+                .fixedSize(horizontal: false, vertical: true)
             }
 
             Divider()
@@ -276,7 +286,8 @@ struct MenuBarView: View {
 
             VStack(spacing: 0) {
                 processSection(items: itemLists.processItems)
-                    .frame(height: scope == .running ? processSectionHeight : nil)
+                    .frame(minHeight: 64, maxHeight: .infinity)
+                    .layoutPriority(1)
 
                 if scope == .running {
                     Divider()
@@ -286,7 +297,7 @@ struct MenuBarView: View {
                         managedItems: itemLists.managedItems,
                         visibleManagedItems: itemLists.visibleManagedItems
                     )
-                        .frame(maxHeight: .infinity, alignment: .top)
+                    .fixedSize(horizontal: false, vertical: true)
                 }
             }
             .padding(.horizontal, 11)
@@ -296,6 +307,7 @@ struct MenuBarView: View {
             Divider()
                 .overlay(TempraPalette.separator)
             footer
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 
@@ -368,7 +380,12 @@ struct MenuBarView: View {
     }
 
     private var summaryMetrics: some View {
-        VStack(spacing: 2) {
+        let batteryComparison = store.batteryPowerComparison
+        let batteryResultColor = batteryComparison.savedWatts.map {
+            $0 >= 0 ? TempraPalette.saved : TempraPalette.stopped
+        } ?? TempraPalette.primaryText
+
+        return VStack(spacing: 2) {
             metricLine(
                 "TOTAL CPU USAGE",
                 value: cpuText(displayedCPU.totalPercent),
@@ -410,14 +427,28 @@ struct MenuBarView: View {
                     + "fully attributed to an app."
             )
             metricLine(
-                "EST. POWER SAVED",
-                value: PowerMetricFormatter.text(watts: store.estimatedSavedCPUPowerWatts),
-                color: TempraPalette.saved
+                "BATTERY DRAW BEFORE LIMIT",
+                value: BatteryPowerFormatter.beforeLimitText(batteryComparison),
+                color: TempraPalette.primaryText
+            )
+            metricLine(
+                "BATTERY DRAW AFTER LIMIT",
+                value: BatteryPowerFormatter.afterLimitText(batteryComparison),
+                color: batteryResultColor
             )
             .help(
-                "Approximate reduction calculated from Tempra’s prevented CPU estimate and "
-                    + "the app’s measured energy per CPU time. GPU and other power that macOS "
-                    + "cannot attribute to the app are not included."
+                "Tempra freezes a stable whole-system battery baseline, waits for the limiter "
+                    + "and battery sensor to settle, then measures a separate stable window. "
+                    + "The result is frozen until the limiting session ends."
+            )
+            metricLine(
+                "MEASURED BATTERY CHANGE",
+                value: BatteryPowerFormatter.changeText(batteryComparison),
+                color: batteryResultColor
+            )
+            .help(
+                "This is the observed change in the Mac’s total battery draw. Tempra reports "
+                    + "Inconclusive when the readings are unstable or the set of limited apps changes."
             )
             metricLine(
                 "CPU TEMPERATURE",
@@ -484,7 +515,7 @@ struct MenuBarView: View {
                 !isIncluded
             )
         } label: {
-            Text("Include essential system processes")
+            Text("Include background and system processes")
                 .font(TempraTypography.footer)
                 .foregroundStyle(isIncluded ? TempraPalette.primaryText : Color.white)
                 .frame(maxWidth: .infinity)
@@ -500,8 +531,8 @@ struct MenuBarView: View {
         .padding(.top, 3)
         .animation(.easeInOut(duration: 0.15), value: isIncluded)
         .help(isIncluded
-              ? "Hide macOS daemons and background services"
-              : "Show every process macOS exposes, including daemons and background services")
+              ? "Hide background processes and protected macOS services"
+              : "Show user-owned background processes and protected macOS services")
         .accessibilityValue(isIncluded ? "On" : "Off")
     }
 
@@ -512,7 +543,6 @@ struct MenuBarView: View {
             isSystemProcess: item.isSystemProcess,
             isSelected: activeSelection?.anchorKey == anchorKey
         ) {
-            guard !item.isSystemProcess else { return }
             select(item: item, anchorKey: anchorKey)
         }
         .background {
@@ -740,8 +770,8 @@ struct MenuBarView: View {
             }
         }
 
-        if item.canControlApplication {
-            Button("Quit") {
+        if item.canQuitProcess {
+            Button(item.canControlApplication ? "Force Quit" : "Force Quit Process") {
                 performApplicationCommand(
                     .quit,
                     item: item,
@@ -750,9 +780,9 @@ struct MenuBarView: View {
             }
         }
 
-        if !item.isSystemProcess {
-            Divider()
+        Divider()
 
+        if item.canLimitCPU {
             Button("Limit to 50%") {
                 store.applyQuickRule(
                     bundleIdentifier: item.bundleIdentifier,
@@ -762,58 +792,69 @@ struct MenuBarView: View {
                     limitPercent: 50,
                     delaySeconds: 0
                 )
+                requestPrivilegedControlIfNeeded(for: item)
             }
+        }
 
-            Button(item.rule?.runOnEfficiencyCores == true
-                   ? "Stop Using Power-Saving Cores"
-                   : "Run on Power-Saving Cores") {
-                store.setEfficiencyCoreScheduling(
+        Button(item.rule?.runOnEfficiencyCores == true
+               ? "Stop Using Power-Saving Cores"
+               : "Run on Power-Saving Cores") {
+            store.setEfficiencyCoreScheduling(
+                bundleIdentifier: item.bundleIdentifier,
+                displayName: item.name,
+                applicationURL: item.applicationURL,
+                enabled: item.rule?.runOnEfficiencyCores != true,
+                delaySeconds: 0
+            )
+            requestPrivilegedControlIfNeeded(for: item)
+        }
+
+        Button("Pause after 30 seconds") {
+            store.applyQuickRule(
+                bundleIdentifier: item.bundleIdentifier,
+                displayName: item.name,
+                applicationURL: item.applicationURL,
+                action: .pause,
+                delaySeconds: 30
+            )
+            requestPrivilegedControlIfNeeded(for: item)
+        }
+
+        if let rule = item.rule {
+            Divider()
+
+            Button(rule.isEnabled ? "Disable Rule" : "Enable Rule") {
+                store.setRuleEnabled(
                     bundleIdentifier: item.bundleIdentifier,
-                    displayName: item.name,
-                    applicationURL: item.applicationURL,
-                    enabled: item.rule?.runOnEfficiencyCores != true,
-                    delaySeconds: 0
+                    enabled: !rule.isEnabled
                 )
             }
 
-            Button("Pause after 30 seconds") {
-                store.applyQuickRule(
-                    bundleIdentifier: item.bundleIdentifier,
-                    displayName: item.name,
-                    applicationURL: item.applicationURL,
-                    action: .pause,
-                    delaySeconds: 30
-                )
-            }
-
-            if let rule = item.rule {
-                Divider()
-
-                Button(rule.isEnabled ? "Disable Rule" : "Enable Rule") {
-                    store.setRuleEnabled(
-                        bundleIdentifier: item.bundleIdentifier,
-                        enabled: !rule.isEnabled
-                    )
+            if store.suspensionUntil(for: item.bundleIdentifier) != nil {
+                Button("End Snooze") {
+                    store.endSnooze(bundleIdentifier: item.bundleIdentifier)
                 }
-
-                if store.suspensionUntil(for: item.bundleIdentifier) != nil {
-                    Button("End Snooze") {
-                        store.endSnooze(bundleIdentifier: item.bundleIdentifier)
-                    }
-                } else {
-                    Button("Snooze for 15 Minutes") {
-                        store.snooze(bundleIdentifier: item.bundleIdentifier, for: 15 * 60)
-                    }
-                    Button("Snooze for 1 Hour") {
-                        store.snooze(bundleIdentifier: item.bundleIdentifier, for: 60 * 60)
-                    }
+            } else {
+                Button("Snooze for 15 Minutes") {
+                    store.snooze(bundleIdentifier: item.bundleIdentifier, for: 15 * 60)
                 }
-
-                Divider()
-                Button("Remove Rule", role: .destructive) {
-                    store.removeRule(bundleIdentifier: item.bundleIdentifier)
+                Button("Snooze for 1 Hour") {
+                    store.snooze(bundleIdentifier: item.bundleIdentifier, for: 60 * 60)
                 }
             }
+
+            Divider()
+            Button("Remove Rule", role: .destructive) {
+                store.removeRule(bundleIdentifier: item.bundleIdentifier)
+            }
+        }
+    }
+
+    private func requestPrivilegedControlIfNeeded(for item: AppDisplayItem) {
+        guard item.requiresPrivilegedControl,
+              !store.privilegedControlStatus.isEnabled else { return }
+        Task {
+            _ = await store.requestPrivilegedControl()
         }
     }
 
@@ -927,10 +968,6 @@ struct MenuBarView: View {
 
     private var activeSelection: MenuPanelSelection? {
         presentation.selection
-    }
-
-    private var processSectionHeight: CGFloat {
-        store.preferences.showsCPUHistoryGraph ? 255 : 399
     }
 
     private var processHeading: String {

@@ -349,3 +349,228 @@ struct PowerMetricPresentationTests {
         )
     }
 }
+
+@Suite("Battery power measurement")
+struct BatteryPowerMeasurementTests {
+    private final class ReadingSource: @unchecked Sendable {
+        var reading: BatteryElectricalReading?
+    }
+
+    @Test("Battery voltage and current produce measured watts with smoothing")
+    func batteryPowerAndSmoothing() throws {
+        let source = ReadingSource()
+        let monitor = BatteryPowerMonitor(readingProvider: { source.reading })
+
+        source.reading = BatteryElectricalReading(
+            voltageMillivolts: 12_000,
+            amperageMilliamps: -1_000,
+            isExternalPowerConnected: false
+        )
+        #expect(monitor.sample() == .discharging(watts: 12))
+
+        source.reading = BatteryElectricalReading(
+            voltageMillivolts: 12_000,
+            amperageMilliamps: -500,
+            isExternalPowerConnected: false
+        )
+        let smoothed = try #require(monitor.sample())
+        #expect(smoothed == .discharging(watts: 9))
+
+        source.reading = BatteryElectricalReading(
+            voltageMillivolts: 12_000,
+            amperageMilliamps: 500,
+            isExternalPowerConnected: true
+        )
+        #expect(monitor.sample() == .externalPower)
+
+        source.reading = BatteryElectricalReading(
+            voltageMillivolts: 12_000,
+            amperageMilliamps: .min,
+            isExternalPowerConnected: false
+        )
+        #expect(monitor.sample() == nil)
+    }
+
+    @Test("Stable measurement windows freeze one completed comparison")
+    func measuredComparison() throws {
+        var tracker = BatteryPowerSavingsTracker()
+        let start = Date(timeIntervalSince1970: 1_000)
+        for offset in 0..<10 {
+            tracker.update(
+                state: .discharging(watts: 12),
+                activeLimitIdentifiers: [],
+                now: start.addingTimeInterval(Double(offset))
+            )
+        }
+        #expect(tracker.comparison.phase == .baselineReady)
+
+        for offset in 10..<23 {
+            tracker.update(
+                state: .discharging(watts: 7),
+                activeLimitIdentifiers: ["limited.app"],
+                now: start.addingTimeInterval(Double(offset))
+            )
+        }
+
+        #expect(tracker.comparison.phase == .complete)
+        #expect(try #require(tracker.comparison.beforeLimitWatts) == 12)
+        #expect(try #require(tracker.comparison.afterLimitWatts) == 7)
+        #expect(try #require(tracker.comparison.savedWatts) == 5)
+
+        tracker.update(
+            state: .discharging(watts: 20),
+            activeLimitIdentifiers: ["limited.app"],
+            now: start.addingTimeInterval(23)
+        )
+        #expect(tracker.comparison.currentWatts == 20)
+        #expect(tracker.comparison.afterLimitWatts == 7)
+        #expect(tracker.comparison.savedWatts == 5)
+
+        tracker.update(
+            state: .externalPower,
+            activeLimitIdentifiers: ["limited.app"],
+            now: start.addingTimeInterval(24)
+        )
+        #expect(tracker.comparison == BatteryPowerComparison())
+    }
+
+    @Test("One extreme reading is removed from a stable baseline")
+    func baselineOutlierRejection() throws {
+        var tracker = BatteryPowerSavingsTracker()
+        let start = Date(timeIntervalSince1970: 2_000)
+        let readings: [Double] = [10, 10, 10, 40, 10, 10, 10, 10, 10, 10]
+        for (offset, watts) in readings.enumerated() {
+            tracker.update(
+                state: .discharging(watts: watts),
+                activeLimitIdentifiers: [],
+                now: start.addingTimeInterval(Double(offset))
+            )
+        }
+
+        #expect(tracker.comparison.phase == .baselineReady)
+        #expect(try #require(tracker.comparison.beforeLimitWatts) == 10)
+    }
+
+    @Test("Unstable after readings produce no savings claim")
+    func unstableAfterWindowIsInconclusive() {
+        var tracker = BatteryPowerSavingsTracker()
+        let start = Date(timeIntervalSince1970: 3_000)
+        for offset in 0..<10 {
+            tracker.update(
+                state: .discharging(watts: 10),
+                activeLimitIdentifiers: [],
+                now: start.addingTimeInterval(Double(offset))
+            )
+        }
+        for offset in 10..<23 {
+            tracker.update(
+                state: .discharging(watts: offset.isMultiple(of: 2) ? 2 : 20),
+                activeLimitIdentifiers: ["limited.app"],
+                now: start.addingTimeInterval(Double(offset))
+            )
+        }
+
+        #expect(tracker.comparison.phase == .inconclusive)
+        #expect(tracker.comparison.afterLimitWatts == nil)
+        #expect(tracker.comparison.savedWatts == nil)
+    }
+
+    @Test("Changing the limited app set invalidates the comparison")
+    func changedLimitSetIsInconclusive() {
+        var tracker = BatteryPowerSavingsTracker()
+        let start = Date(timeIntervalSince1970: 4_000)
+        for offset in 0..<10 {
+            tracker.update(
+                state: .discharging(watts: 10),
+                activeLimitIdentifiers: [],
+                now: start.addingTimeInterval(Double(offset))
+            )
+        }
+        tracker.update(
+            state: .discharging(watts: 8),
+            activeLimitIdentifiers: ["first.app"],
+            now: start.addingTimeInterval(10)
+        )
+        tracker.update(
+            state: .discharging(watts: 8),
+            activeLimitIdentifiers: ["first.app", "second.app"],
+            now: start.addingTimeInterval(11)
+        )
+
+        #expect(tracker.comparison.phase == .inconclusive)
+        #expect(tracker.comparison.savedWatts == nil)
+    }
+
+    @Test("A long sample gap discards a stale baseline")
+    func staleBaselineIsDiscarded() {
+        var tracker = BatteryPowerSavingsTracker()
+        let start = Date(timeIntervalSince1970: 5_000)
+        for offset in 0..<10 {
+            tracker.update(
+                state: .discharging(watts: 10),
+                activeLimitIdentifiers: [],
+                now: start.addingTimeInterval(Double(offset))
+            )
+        }
+        tracker.update(
+            state: .discharging(watts: 10),
+            activeLimitIdentifiers: [],
+            now: start.addingTimeInterval(40)
+        )
+
+        #expect(tracker.comparison.phase == .collectingBaseline)
+        #expect(tracker.comparison.beforeLimitWatts == nil)
+    }
+
+    @Test("Low-frequency sampling can complete without extra background work")
+    func lowFrequencyMeasurementCompletes() {
+        var tracker = BatteryPowerSavingsTracker()
+        let start = Date(timeIntervalSince1970: 6_000)
+        for offset in stride(from: 0, through: 25, by: 5) {
+            tracker.update(
+                state: .discharging(watts: 12),
+                activeLimitIdentifiers: [],
+                now: start.addingTimeInterval(Double(offset))
+            )
+        }
+        for offset in stride(from: 30, through: 70, by: 5) {
+            tracker.update(
+                state: .discharging(watts: 8),
+                activeLimitIdentifiers: ["limited.app"],
+                now: start.addingTimeInterval(Double(offset))
+            )
+        }
+
+        #expect(tracker.comparison.phase == .complete)
+        #expect(tracker.comparison.savedWatts == 4)
+    }
+
+    @Test("Measurement phases use clear compact menu text")
+    func measuredFormatting() {
+        #expect(BatteryPowerFormatter.text(watts: 12.34) == "12.3 W")
+        #expect(BatteryPowerFormatter.savingsText(watts: 2.25) == "2.2 W less")
+        #expect(BatteryPowerFormatter.savingsText(watts: -1.25) == "1.2 W more")
+        #expect(BatteryPowerFormatter.savingsText(watts: 0.01) == "No change")
+
+        let collecting = BatteryPowerComparison(phase: .collectingBaseline)
+        #expect(BatteryPowerFormatter.beforeLimitText(collecting) == "Measuring…")
+        #expect(BatteryPowerFormatter.afterLimitText(collecting) == "Waiting")
+
+        let measuringAfter = BatteryPowerComparison(
+            beforeLimitWatts: 12,
+            phase: .measuringAfter
+        )
+        #expect(BatteryPowerFormatter.beforeLimitText(measuringAfter) == "12.0 W")
+        #expect(BatteryPowerFormatter.afterLimitText(measuringAfter) == "Measuring…")
+
+        let complete = BatteryPowerComparison(
+            beforeLimitWatts: 8,
+            afterLimitWatts: 12,
+            phase: .complete
+        )
+        #expect(BatteryPowerFormatter.changeText(complete) == "4.0 W more")
+
+        let inconclusive = BatteryPowerComparison(phase: .inconclusive)
+        #expect(BatteryPowerFormatter.changeText(inconclusive) == "Inconclusive")
+    }
+}

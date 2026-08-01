@@ -31,6 +31,28 @@ struct MonitoringSample: Sendable {
     let didRefreshApplications: Bool
     let powerByIdentifier: [String: ProcessPowerSample]
     let powerMetricsSupported: Bool
+    let batteryPower: BatteryPowerState?
+    let privilegedAccessError: String?
+
+    init(
+        generation: UInt64,
+        systemCPU: SystemCPUSnapshot?,
+        apps: [ManagedApp]?,
+        didRefreshApplications: Bool,
+        powerByIdentifier: [String: ProcessPowerSample],
+        powerMetricsSupported: Bool,
+        batteryPower: BatteryPowerState? = nil,
+        privilegedAccessError: String? = nil
+    ) {
+        self.generation = generation
+        self.systemCPU = systemCPU
+        self.apps = apps
+        self.didRefreshApplications = didRefreshApplications
+        self.powerByIdentifier = powerByIdentifier
+        self.powerMetricsSupported = powerMetricsSupported
+        self.batteryPower = batteryPower
+        self.privilegedAccessError = privilegedAccessError
+    }
 }
 
 protocol MonitoringServicing: Sendable {
@@ -44,20 +66,24 @@ protocol MonitoringServicing: Sendable {
 actor MonitoringService: MonitoringServicing {
     private let processMonitor: ProcessMonitor
     private let powerMonitor: ProcessPowerMonitor
+    private let batteryPowerMonitor: BatteryPowerMonitor
     private let systemMetricsMonitor: SystemMetricsMonitor
 
     init(
         processMonitor: ProcessMonitor = ProcessMonitor(),
         powerMonitor: ProcessPowerMonitor = ProcessPowerMonitor(),
+        batteryPowerMonitor: BatteryPowerMonitor = BatteryPowerMonitor(),
         systemMetricsMonitor: SystemMetricsMonitor = SystemMetricsMonitor()
     ) {
         self.processMonitor = processMonitor
         self.powerMonitor = powerMonitor
+        self.batteryPowerMonitor = batteryPowerMonitor
         self.systemMetricsMonitor = systemMetricsMonitor
     }
 
-    func sample(_ request: MonitoringRequest) -> MonitoringSample {
+    func sample(_ request: MonitoringRequest) async -> MonitoringSample {
         let systemCPU = request.samplesSystemCPU ? systemMetricsMonitor.sample() : nil
+        let batteryPower = request.samplesSystemCPU ? batteryPowerMonitor.sample() : nil
         if let processChange = request.processChange {
             processMonitor.handleProcessChange(processChange)
         }
@@ -68,13 +94,15 @@ actor MonitoringService: MonitoringServicing {
                 apps: nil,
                 didRefreshApplications: false,
                 powerByIdentifier: [:],
-                powerMetricsSupported: powerMonitor.isSupported
+                powerMetricsSupported: powerMonitor.isSupported,
+                batteryPower: batteryPower
             )
         }
 
-        let apps = processMonitor.sample(
+        let apps = await processMonitor.sample(
             inventory: inventory,
-            includingEssentialSystemProcesses: request.includesEssentialSystemProcesses
+            includingEssentialSystemProcesses: request.includesEssentialSystemProcesses,
+            refreshesAudioActivity: request.processChange?.audioActivityChanged != false
         )
         let powerByIdentifier: [String: ProcessPowerSample]
         if request.samplesPower {
@@ -95,7 +123,9 @@ actor MonitoringService: MonitoringServicing {
             apps: apps,
             didRefreshApplications: processMonitor.didRefreshLastSample,
             powerByIdentifier: powerByIdentifier,
-            powerMetricsSupported: powerMonitor.isSupported
+            powerMetricsSupported: powerMonitor.isSupported,
+            batteryPower: batteryPower,
+            privilegedAccessError: processMonitor.privilegedAccessError
         )
     }
 

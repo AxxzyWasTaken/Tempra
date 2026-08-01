@@ -4,11 +4,23 @@ import Foundation
 struct ProcessIdentity: Hashable, Sendable {
     let pid: pid_t
     let startTimeMicroseconds: UInt64
+    let requiresPrivilegedControl: Bool
+
+    init(
+        pid: pid_t,
+        startTimeMicroseconds: UInt64,
+        requiresPrivilegedControl: Bool = false
+    ) {
+        self.pid = pid
+        self.startTimeMicroseconds = startTimeMicroseconds
+        self.requiresPrivilegedControl = requiresPrivilegedControl
+    }
 }
 
 struct ProcessControlTarget: Sendable {
     let bundleIdentifier: String
     let processIdentities: Set<ProcessIdentity>
+    let usesApplicationCommands: Bool
     let launchedAt: Date?
     let cpuPercent: Double
     let isFrontmost: Bool
@@ -20,6 +32,7 @@ struct ProcessControlTarget: Sendable {
     init(
         bundleIdentifier: String,
         processIdentities: Set<ProcessIdentity>,
+        usesApplicationCommands: Bool = true,
         launchedAt: Date? = nil,
         cpuPercent: Double,
         isFrontmost: Bool,
@@ -30,6 +43,7 @@ struct ProcessControlTarget: Sendable {
     ) {
         self.bundleIdentifier = bundleIdentifier
         self.processIdentities = processIdentities
+        self.usesApplicationCommands = usesApplicationCommands
         self.launchedAt = launchedAt
         self.cpuPercent = cpuPercent
         self.isFrontmost = isFrontmost

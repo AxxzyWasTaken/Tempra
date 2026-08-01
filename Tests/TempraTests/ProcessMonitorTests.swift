@@ -7,7 +7,7 @@ import Testing
 @Suite("Process monitor metadata cache")
 struct ProcessMonitorTests {
     @Test("Stable metadata is cached while CPU counters remain current")
-    func stableMetadataAndCurrentCPU() throws {
+    func stableMetadataAndCurrentCPU() async throws {
         let identity = ProcessIdentity(pid: 100, startTimeMicroseconds: 2_000_000)
         let reader = StubProcessSnapshotReader(
             snapshots: [100: snapshot(identity, cpuNanoseconds: 1_000_000_000)],
@@ -17,7 +17,7 @@ struct ProcessMonitorTests {
         let monitor = makeMonitor(reader: reader, clock: clock)
         let inventory = inventory(app("Example", pid: 100))
 
-        let initial = try #require(monitor.sample(inventory: inventory).first)
+        let initial = try #require(await monitor.sample(inventory: inventory).first)
         #expect(initial.cpuPercent == 0)
         #expect(initial.residentMemoryBytes == 128 * 1_024 * 1_024)
         #expect(initial.launchedAt?.timeIntervalSince1970 == 2)
@@ -30,7 +30,7 @@ struct ProcessMonitorTests {
             residentMemoryBytes: 160 * 1_024 * 1_024
         )
         clock.value = 11
-        let updated = try #require(monitor.sample(inventory: inventory).first)
+        let updated = try #require(await monitor.sample(inventory: inventory).first)
 
         #expect(abs(updated.cpuPercent - 50) < 0.000_000_1)
         #expect(updated.residentMemoryBytes == 160 * 1_024 * 1_024)
@@ -39,7 +39,7 @@ struct ProcessMonitorTests {
     }
 
     @Test("New processes are cached and exited processes are removed")
-    func newAndExitedProcesses() {
+    func newAndExitedProcesses() async {
         let mainIdentity = ProcessIdentity(pid: 100, startTimeMicroseconds: 1_000_000)
         let helperIdentity = ProcessIdentity(pid: 200, startTimeMicroseconds: 2_000_000)
         let reader = StubProcessSnapshotReader(
@@ -53,36 +53,37 @@ struct ProcessMonitorTests {
         let monitor = makeMonitor(reader: reader, clock: clock)
         let appInventory = inventory(app("Example", pid: 100))
 
-        _ = monitor.sample(inventory: appInventory)
+        _ = await monitor.sample(inventory: appInventory)
         #expect(monitor.cachedMetadataCount == 1)
 
         reader.snapshots[200] = snapshot(helperIdentity, parentPID: 100)
         clock.value = 2
-        let withHelper = monitor.sample(inventory: appInventory)
+        let withHelper = await monitor.sample(inventory: appInventory)
         #expect(withHelper.first?.processIdentifiers == [100, 200])
         #expect(monitor.cachedMetadataCount == 2)
         #expect(reader.pathReads[200] == 1)
 
         reader.snapshots[200] = snapshot(helperIdentity, parentPID: 1)
         clock.value = 3
-        let reparentedHelper = monitor.sample(inventory: appInventory)
+        let reparentedHelper = await monitor.sample(inventory: appInventory)
         #expect(reparentedHelper.first?.processIdentifiers == [100])
         #expect(reader.pathReads[200] == 1)
 
         reader.snapshots.removeValue(forKey: 200)
         clock.value = 4
-        let withoutHelper = monitor.sample(inventory: appInventory)
+        let withoutHelper = await monitor.sample(inventory: appInventory)
         #expect(withoutHelper.first?.processIdentifiers == [100])
         #expect(monitor.cachedMetadataCount == 1)
 
         reader.snapshots.removeAll()
         clock.value = 5
-        #expect(monitor.sample(inventory: appInventory).isEmpty)
+        let emptySample = await monitor.sample(inventory: appInventory)
+        #expect(emptySample.isEmpty)
         #expect(monitor.cachedMetadataCount == 0)
     }
 
     @Test("PID reuse replaces metadata and resets the CPU baseline")
-    func pidReuse() throws {
+    func pidReuse() async throws {
         let firstIdentity = ProcessIdentity(pid: 100, startTimeMicroseconds: 1_000_000)
         let replacementIdentity = ProcessIdentity(pid: 100, startTimeMicroseconds: 9_000_000)
         let reader = StubProcessSnapshotReader(
@@ -93,12 +94,12 @@ struct ProcessMonitorTests {
         let monitor = makeMonitor(reader: reader, clock: clock)
         let appInventory = inventory(app("Example", pid: 100))
 
-        _ = monitor.sample(inventory: appInventory)
+        _ = await monitor.sample(inventory: appInventory)
         reader.snapshots[100] = snapshot(replacementIdentity, cpuNanoseconds: 100_000_000)
         reader.paths[100] = "/Applications/Example.app/Contents/MacOS/Replacement"
         clock.value = 2
 
-        let replacement = try #require(monitor.sample(inventory: appInventory).first)
+        let replacement = try #require(await monitor.sample(inventory: appInventory).first)
         #expect(replacement.processIdentities == [replacementIdentity])
         #expect(replacement.launchedAt?.timeIntervalSince1970 == 9)
         #expect(replacement.cpuPercent == 0)
@@ -107,7 +108,7 @@ struct ProcessMonitorTests {
     }
 
     @Test("Forked helpers join every instance and retain audio and launch metadata")
-    func forkedHelperAssignment() throws {
+    func forkedHelperAssignment() async throws {
         let firstMain = ProcessIdentity(pid: 100, startTimeMicroseconds: 3_000_000)
         let secondMain = ProcessIdentity(pid: 101, startTimeMicroseconds: 2_000_000)
         let helper = ProcessIdentity(pid: 200, startTimeMicroseconds: 4_000_000)
@@ -131,13 +132,13 @@ struct ProcessMonitorTests {
             app("Example", pid: 101)
         )
 
-        let beforeFork = try #require(monitor.sample(inventory: appInventory).first)
+        let beforeFork = try #require(await monitor.sample(inventory: appInventory).first)
         #expect(beforeFork.processIdentifiers == [100, 101])
 
         reader.snapshots[200] = snapshot(helper, parentPID: 100)
         reader.snapshots[201] = snapshot(helperChild, parentPID: 200)
         clock.value = 2
-        let afterFork = try #require(monitor.sample(inventory: appInventory).first)
+        let afterFork = try #require(await monitor.sample(inventory: appInventory).first)
 
         #expect(afterFork.processIdentifiers == [100, 101, 200, 201])
         #expect(Set(afterFork.processIdentities) == [firstMain, secondMain, helper, helperChild])
@@ -147,7 +148,7 @@ struct ProcessMonitorTests {
     }
 
     @Test("User-owned system extensions remain controllable services")
-    func userOwnedSystemExtension() throws {
+    func userOwnedSystemExtension() async throws {
         let pid = getpid()
         let identity = ProcessIdentity(pid: pid, startTimeMicroseconds: 1_000_000)
         let extensionURL = URL(
@@ -176,7 +177,7 @@ struct ProcessMonitorTests {
             isHidden: false
         )
 
-        let results = monitor.sample(
+        let results = await monitor.sample(
             inventory: inventory(service),
             includingEssentialSystemProcesses: true
         )
@@ -189,8 +190,161 @@ struct ProcessMonitorTests {
         #expect(result.processIdentities == [identity])
     }
 
+    @Test("User-owned apps keep window control when their bundle is labeled as system")
+    func userOwnedSystemLabeledAppKeepsWindowControl() async throws {
+        let processID = getpid()
+        let identity = ProcessIdentity(pid: processID, startTimeMicroseconds: 1_000_000)
+        let bundleURL = URL(fileURLWithPath: "/System/Library/CoreServices/Finder.app")
+        let reader = StubProcessSnapshotReader(
+            snapshots: [processID: snapshot(identity, executableName: "Finder")],
+            paths: [
+                processID: bundleURL.appendingPathComponent("Contents/MacOS/Finder").path,
+            ]
+        )
+        let visibilitySnapshot = WindowVisibilitySnapshot(
+            windowsFrontToBack: [
+                WindowVisibilityRecord(
+                    ownerPID: processID,
+                    bounds: CGRect(x: 0, y: 0, width: 100, height: 100),
+                    layer: 0,
+                    alpha: 1
+                ),
+            ],
+            screenBounds: [CGRect(x: 0, y: 0, width: 100, height: 100)]
+        )
+        let monitor = makeMonitor(
+            reader: reader,
+            clock: StubUptime(value: 1),
+            windowVisibilitySnapshot: visibilitySnapshot
+        )
+        let descriptor = RunningApplicationDescriptor(
+            bundleIdentifier: "com.apple.finder",
+            localizedName: "Finder",
+            bundleURL: bundleURL,
+            processIdentifier: processID,
+            activationPolicyRawValue: NSApplication.ActivationPolicy.regular.rawValue,
+            isHidden: false
+        )
+
+        let results = await monitor.sample(
+            inventory: inventory(descriptor),
+            includingEssentialSystemProcesses: true
+        )
+        let result = try #require(results.first {
+            $0.bundleIdentifier == descriptor.bundleIdentifier
+        })
+
+        #expect(result.isSystemProcess)
+        #expect(!result.requiresPrivilegedControl)
+        #expect(result.windowVisibility == .visible)
+    }
+
+    @Test("User-owned CrossOver processes remain controllable without an app bundle")
+    func userOwnedCrossOverProcess() async throws {
+        let identity = ProcessIdentity(pid: 200, startTimeMicroseconds: 2_000_000)
+        let executablePath = "/Users/example/Library/Application Support/"
+            + "CrossOver/Bottles/Game/wine64-preloader"
+        let reader = StubProcessSnapshotReader(
+            snapshots: [200: snapshot(
+                identity,
+                executableName: "Game.exe"
+            )],
+            paths: [200: executablePath]
+        )
+        let monitor = ProcessMonitor(
+            processReader: reader,
+            currentUserID: 501,
+            uptime: { 1 },
+            audioProcessIdentifiers: { [] },
+            windowSnapshot: { nil },
+            processTableReader: {
+                (
+                    entries: [ProcessTableEntry(
+                        pid: 200,
+                        parentPID: 1,
+                        userID: 501,
+                        cpuPercent: 25,
+                        command: executablePath
+                    )],
+                    samplerPID: 999
+                )
+            }
+        )
+
+        let result = try #require(await monitor.sample(
+            inventory: inventory(),
+            includingEssentialSystemProcesses: true
+        ).first)
+
+        #expect(result.bundleIdentifier == BackgroundProcessPolicy.userOwnedIdentifier(
+            command: executablePath,
+            pid: 200
+        ))
+        #expect(result.processIdentifiers == [200])
+        #expect(result.processIdentities == [identity])
+        #expect(result.launchedAt?.timeIntervalSince1970 == 2)
+        #expect(result.name == "Game.exe")
+        #expect(result.isService)
+        #expect(!result.isSystemProcess)
+        #expect(!BackgroundProcessPolicy.isMonitorOnlyIdentifier(result.bundleIdentifier))
+    }
+
+    @Test("Privileged snapshots make root-owned processes safely controllable")
+    func privilegedRootProcessIdentity() async throws {
+        let processID: pid_t = 220
+        let executablePath = "/usr/libexec/example-root-service"
+        let identity = ProcessIdentity(
+            pid: processID,
+            startTimeMicroseconds: 7_000_000,
+            requiresPrivilegedControl: true
+        )
+        let reader = StubProcessSnapshotReader(snapshots: [:], paths: [:])
+        let monitor = ProcessMonitor(
+            processReader: reader,
+            currentUserID: 501,
+            uptime: { 1 },
+            audioProcessIdentifiers: { [] },
+            windowSnapshot: { nil },
+            processTableReader: {
+                (
+                    entries: [ProcessTableEntry(
+                        pid: processID,
+                        parentPID: 1,
+                        userID: 0,
+                        cpuPercent: 12,
+                        command: executablePath
+                    )],
+                    samplerPID: 999
+                )
+            },
+            privilegedSnapshotReader: { requestedPIDs in
+                #expect(requestedPIDs == [processID])
+                return [processID: ProcessKernelSnapshot(
+                    identity: identity,
+                    parentPID: 1,
+                    userID: 0,
+                    executableName: "example-root-service",
+                    executablePath: executablePath,
+                    totalCPUTimeNanoseconds: 1_000_000_000,
+                    residentMemoryBytes: 64 * 1_024 * 1_024
+                )]
+            }
+        )
+
+        let result = try #require(await monitor.sample(
+            inventory: inventory(),
+            includingEssentialSystemProcesses: true
+        ).first)
+
+        #expect(result.isSystemProcess)
+        #expect(result.processIdentities == [identity])
+        #expect(result.residentMemoryBytes == 64 * 1_024 * 1_024)
+        #expect(result.name == "example-root-service")
+        #expect(monitor.privilegedAccessError == nil)
+    }
+
     @Test("Window visibility is applied to each app from one snapshot")
-    func batchedWindowVisibilityIsAppliedToApps() throws {
+    func batchedWindowVisibilityIsAppliedToApps() async throws {
         let firstIdentity = ProcessIdentity(pid: 100, startTimeMicroseconds: 1_000_000)
         let secondIdentity = ProcessIdentity(pid: 101, startTimeMicroseconds: 1_000_000)
         let reader = StubProcessSnapshotReader(
@@ -226,7 +380,7 @@ struct ProcessMonitorTests {
             windowVisibilitySnapshot: visibilitySnapshot
         )
 
-        let apps = monitor.sample(inventory: inventory(
+        let apps = await monitor.sample(inventory: inventory(
             app("First", pid: 100),
             app("Second", pid: 101)
         ))
@@ -290,10 +444,20 @@ struct ProcessMonitorTests {
         #expect(exitNotification.invalidatedMetadata == [helper])
         #expect(exitNotification.processTableChanged)
         #expect(!ProcessChangeNotification.audioActivity.processTableChanged)
+        #expect(ProcessChangeNotification.audioActivity.audioActivityChanged)
+        #expect(!forkNotification.audioActivityChanged)
         #expect(ProcessChangeNotification.coalescing(
             forkNotification,
             execNotification
         ) == execNotification)
+        #expect(ProcessChangeNotification.coalescing(
+            forkNotification,
+            .audioActivity
+        ) == ProcessChangeNotification(
+            invalidatedMetadata: [],
+            processTableChanged: true,
+            audioActivityChanged: true
+        ))
 
         reader.paths[200] = appExecutable("Second", component: "Worker")
         clock.value = 2
@@ -318,6 +482,46 @@ struct ProcessMonitorTests {
             .processIdentifiers == [101])
         #expect(reader.pathReads[200] == 3)
         #expect(monitor.cachedMetadataCount == 2)
+    }
+
+    @Test("Process-only refreshes reuse the last audio activity snapshot")
+    @MainActor
+    func processRefreshReusesAudioActivity() async {
+        let identity = ProcessIdentity(pid: 100, startTimeMicroseconds: 1_000_000)
+        let reader = StubProcessSnapshotReader(
+            snapshots: [100: snapshot(identity)],
+            paths: [100: appExecutable("Example")]
+        )
+        let audioProbe = StubAudioProcessProbe()
+        let monitor = ProcessMonitor(
+            processReader: reader,
+            currentUserID: 501,
+            uptime: { 1 },
+            audioProcessIdentifiers: { audioProbe.read() },
+            windowSnapshot: { nil }
+        )
+        let appInventory = inventory(app("Example", pid: 100))
+        let service = MonitoringService(processMonitor: monitor)
+        let processChange = ManagedProcessWatcher.notification(
+            for: .fork,
+            identity: identity
+        )
+
+        _ = await service.sample(request(
+            inventory: appInventory,
+            processChange: nil
+        ))
+        _ = await service.sample(request(
+            inventory: appInventory,
+            processChange: processChange
+        ))
+        #expect(audioProbe.readCount == 1)
+
+        _ = await service.sample(request(
+            inventory: appInventory,
+            processChange: .audioActivity
+        ))
+        #expect(audioProbe.readCount == 2)
     }
 
     private func makeMonitor(
@@ -430,5 +634,14 @@ private final class StubUptime {
 
     init(value: TimeInterval) {
         self.value = value
+    }
+}
+
+private final class StubAudioProcessProbe {
+    private(set) var readCount = 0
+
+    func read() -> Set<pid_t> {
+        readCount += 1
+        return []
     }
 }

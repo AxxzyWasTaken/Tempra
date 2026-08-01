@@ -134,6 +134,9 @@ struct ProcessRowView: View {
         if isSystemProcess {
             return "· system"
         }
+        if item.isStandaloneProcess {
+            return "· process"
+        }
         guard let rule = item.rule else { return item.isService ? "· service" : nil }
         guard rule.isEnabled, item.status != .disabled else { return "· off" }
         return switch rule.action {

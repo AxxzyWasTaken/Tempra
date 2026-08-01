@@ -1,5 +1,6 @@
 import Darwin
 import Foundation
+import TempraSafety
 
 struct ProcessOperationResult: Equatable, Sendable {
     var applied: Set<ProcessIdentity> = []
@@ -10,43 +11,63 @@ struct ProcessOperationResult: Equatable, Sendable {
         !applied.isEmpty && failed.isEmpty
     }
 }
+
+private enum ProcessSystemControllerError: LocalizedError {
+    case arithmeticOverflow
+
+    var errorDescription: String? {
+        "A process CPU-time counter overflowed."
+    }
+}
+
 protocol ProcessSystemControlling: Sendable {
-    func totalCPUTime(for processes: Set<ProcessIdentity>) -> UInt64
-    func stop(_ processes: Set<ProcessIdentity>) -> ProcessOperationResult
-    func resume(_ processes: Set<ProcessIdentity>) -> ProcessOperationResult
-    func setBackgroundPriority(_ processes: Set<ProcessIdentity>) -> ProcessOperationResult
-    func restorePriority(_ processes: Set<ProcessIdentity>) -> ProcessOperationResult
+    func totalCPUTime(for processes: Set<ProcessIdentity>) async throws -> UInt64
+    func stop(_ processes: Set<ProcessIdentity>) async -> ProcessOperationResult
+    func resume(_ processes: Set<ProcessIdentity>) async -> ProcessOperationResult
+    func setBackgroundPriority(_ processes: Set<ProcessIdentity>) async -> ProcessOperationResult
+    func restorePriority(_ processes: Set<ProcessIdentity>) async -> ProcessOperationResult
+    func terminate(_ processes: Set<ProcessIdentity>) async -> ProcessOperationResult
 }
 
 struct LiveProcessSystemController: ProcessSystemControlling {
-    func totalCPUTime(for processes: Set<ProcessIdentity>) -> UInt64 {
-        processes.reduce(0) { total, process in
+    func totalCPUTime(for processes: Set<ProcessIdentity>) async throws -> UInt64 {
+        var total: UInt64 = 0
+        for process in processes {
             guard Self.currentIdentity(for: process.pid) == process,
                   let counter = Self.cpuTimeNanoseconds(for: process.pid) else {
-                return total
+                continue
             }
-            return total &+ counter
+            let sum = total.addingReportingOverflow(counter)
+            guard !sum.overflow else {
+                throw ProcessSystemControllerError.arithmeticOverflow
+            }
+            total = sum.partialValue
         }
+        return total
     }
 
-    func stop(_ processes: Set<ProcessIdentity>) -> ProcessOperationResult {
+    func stop(_ processes: Set<ProcessIdentity>) async -> ProcessOperationResult {
         apply(processes) { kill($0, SIGSTOP) }
     }
 
-    func resume(_ processes: Set<ProcessIdentity>) -> ProcessOperationResult {
+    func resume(_ processes: Set<ProcessIdentity>) async -> ProcessOperationResult {
         apply(processes) { kill($0, SIGCONT) }
     }
 
-    func setBackgroundPriority(_ processes: Set<ProcessIdentity>) -> ProcessOperationResult {
+    func setBackgroundPriority(_ processes: Set<ProcessIdentity>) async -> ProcessOperationResult {
         apply(processes) {
             setpriority(PRIO_DARWIN_PROCESS, id_t($0), PRIO_DARWIN_BG)
         }
     }
 
-    func restorePriority(_ processes: Set<ProcessIdentity>) -> ProcessOperationResult {
+    func restorePriority(_ processes: Set<ProcessIdentity>) async -> ProcessOperationResult {
         apply(processes) {
             setpriority(PRIO_DARWIN_PROCESS, id_t($0), 0)
         }
+    }
+
+    func terminate(_ processes: Set<ProcessIdentity>) async -> ProcessOperationResult {
+        apply(processes) { kill($0, PrivilegedProcessProtocol.forceQuitSignal) }
     }
 
     private func apply(
@@ -95,24 +116,117 @@ struct LiveProcessSystemController: ProcessSystemControlling {
         let expectedSize = Int32(MemoryLayout<proc_taskinfo>.size)
         let readSize = proc_pidinfo(pid, PROC_PIDTASKINFO, 0, &taskInfo, expectedSize)
         guard readSize == expectedSize else { return nil }
-        return nanoseconds(
-            fromMachTicks: taskInfo.pti_total_user &+ taskInfo.pti_total_system
+        let totalTicks = taskInfo.pti_total_user.addingReportingOverflow(
+            taskInfo.pti_total_system
         )
+        guard !totalTicks.overflow else { return nil }
+        return nanoseconds(fromMachTicks: totalTicks.partialValue)
     }
 
-    private static let machTimebase: mach_timebase_info_data_t = {
+    private static let machTimebase: mach_timebase_info_data_t? = {
         var info = mach_timebase_info_data_t()
-        _ = mach_timebase_info(&info)
+        guard mach_timebase_info(&info) == KERN_SUCCESS,
+              info.denom > 0 else { return nil }
         return info
     }()
 
-    private static func nanoseconds(fromMachTicks ticks: UInt64) -> UInt64 {
+    private static func nanoseconds(fromMachTicks ticks: UInt64) -> UInt64? {
+        guard let machTimebase else { return nil }
         let numerator = UInt64(machTimebase.numer)
         let denominator = UInt64(machTimebase.denom)
-        guard denominator > 0 else { return ticks }
 
         let whole = ticks / denominator
         let remainder = ticks % denominator
-        return whole * numerator + (remainder * numerator) / denominator
+        let wholeProduct = whole.multipliedReportingOverflow(by: numerator)
+        let remainderProduct = remainder.multipliedReportingOverflow(by: numerator)
+        guard !wholeProduct.overflow, !remainderProduct.overflow else { return nil }
+        let total = wholeProduct.partialValue.addingReportingOverflow(
+            remainderProduct.partialValue / denominator
+        )
+        return total.overflow ? nil : total.partialValue
+    }
+}
+
+struct RoutedProcessSystemController: ProcessSystemControlling {
+    private let local: LiveProcessSystemController
+    private let privileged: PrivilegedProcessClient
+
+    init(
+        local: LiveProcessSystemController = LiveProcessSystemController(),
+        privileged: PrivilegedProcessClient = .shared
+    ) {
+        self.local = local
+        self.privileged = privileged
+    }
+
+    func totalCPUTime(for processes: Set<ProcessIdentity>) async throws -> UInt64 {
+        let (localProcesses, privilegedProcesses) = partition(processes)
+        let localTotal = try await local.totalCPUTime(for: localProcesses)
+        guard !privilegedProcesses.isEmpty else { return localTotal }
+        let privilegedTotal = try await privileged.totalCPUTime(for: privilegedProcesses)
+        let sum = localTotal.addingReportingOverflow(privilegedTotal)
+        guard !sum.overflow else {
+            throw PrivilegedProcessClientError.remoteFailure(
+                "The combined CPU-time counter overflowed."
+            )
+        }
+        return sum.partialValue
+    }
+
+    func stop(_ processes: Set<ProcessIdentity>) async -> ProcessOperationResult {
+        await apply(.stop, to: processes) { await local.stop($0) }
+    }
+
+    func resume(_ processes: Set<ProcessIdentity>) async -> ProcessOperationResult {
+        await apply(.resume, to: processes) { await local.resume($0) }
+    }
+
+    func setBackgroundPriority(
+        _ processes: Set<ProcessIdentity>
+    ) async -> ProcessOperationResult {
+        await apply(.setBackgroundPriority, to: processes) {
+            await local.setBackgroundPriority($0)
+        }
+    }
+
+    func restorePriority(
+        _ processes: Set<ProcessIdentity>
+    ) async -> ProcessOperationResult {
+        await apply(.restorePriority, to: processes) {
+            await local.restorePriority($0)
+        }
+    }
+
+    func terminate(_ processes: Set<ProcessIdentity>) async -> ProcessOperationResult {
+        await apply(.terminate, to: processes) { await local.terminate($0) }
+    }
+
+    private func apply(
+        _ action: PrivilegedProcessAction,
+        to processes: Set<ProcessIdentity>,
+        localOperation: (Set<ProcessIdentity>) async -> ProcessOperationResult
+    ) async -> ProcessOperationResult {
+        let (localProcesses, privilegedProcesses) = partition(processes)
+        var result = await localOperation(localProcesses)
+        guard !privilegedProcesses.isEmpty else { return result }
+        do {
+            let privilegedResult = try await privileged.perform(
+                action,
+                processes: privilegedProcesses
+            )
+            result.applied.formUnion(privilegedResult.applied)
+            result.stale.formUnion(privilegedResult.stale)
+            result.failed.formUnion(privilegedResult.failed)
+        } catch {
+            result.failed.formUnion(privilegedProcesses)
+        }
+        return result
+    }
+
+    private func partition(
+        _ processes: Set<ProcessIdentity>
+    ) -> (local: Set<ProcessIdentity>, privileged: Set<ProcessIdentity>) {
+        let privileged = processes.filter(\.requiresPrivilegedControl)
+        return (processes.subtracting(privileged), Set(privileged))
     }
 }

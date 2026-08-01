@@ -4,10 +4,12 @@ import Foundation
 struct ProcessChangeNotification: Equatable, Sendable {
     let invalidatedMetadata: Set<ProcessIdentity>
     let processTableChanged: Bool
+    let audioActivityChanged: Bool
 
     static let audioActivity = ProcessChangeNotification(
         invalidatedMetadata: [],
-        processTableChanged: false
+        processTableChanged: false,
+        audioActivityChanged: true
     )
 
     static func coalescing(
@@ -24,7 +26,9 @@ struct ProcessChangeNotification: Equatable, Sendable {
                 invalidatedMetadata: first.invalidatedMetadata.union(
                     second.invalidatedMetadata
                 ),
-                processTableChanged: first.processTableChanged || second.processTableChanged
+                processTableChanged: first.processTableChanged || second.processTableChanged,
+                audioActivityChanged: first.audioActivityChanged
+                    || second.audioActivityChanged
             )
         }
     }
@@ -51,13 +55,14 @@ final class ManagedProcessWatcher {
     private var pendingProcessTableChange = false
     private var pendingAudioUpdate: AudioUpdate?
     private var audioUpdateTask: Task<Void, Never>?
+    private var watchedAudioProcessIdentifiers: Set<pid_t>?
     private var audioRevision: UInt64 = 0
     private var isStopped = false
     private var onChange: ChangeHandler?
 
     init(
         audioMonitor: any AudioActivityMonitoring = AudioActivityMonitor(),
-        eventDebounceInterval: TimeInterval = 0.1
+        eventDebounceInterval: TimeInterval = 2
     ) {
         self.audioMonitor = audioMonitor
         self.eventDebounceInterval = eventDebounceInterval
@@ -96,6 +101,8 @@ final class ManagedProcessWatcher {
             processEventSources[identity] = source
         }
 
+        guard watchedAudioProcessIdentifiers != audioProcessIdentifiers else { return }
+        watchedAudioProcessIdentifiers = audioProcessIdentifiers
         let revision = nextAudioRevision()
         enqueueAudioUpdate(.watch(
             revision: revision,
@@ -119,6 +126,7 @@ final class ManagedProcessWatcher {
         processChangeWorkItem = nil
         pendingMetadataInvalidations.removeAll()
         pendingProcessTableChange = false
+        watchedAudioProcessIdentifiers = nil
         processEventSources.values.forEach { $0.cancel() }
         processEventSources.removeAll()
         onChange = nil
@@ -134,7 +142,8 @@ final class ManagedProcessWatcher {
             invalidatedMetadata: events.contains(.exec) || events.contains(.exit)
                 ? [identity]
                 : [],
-            processTableChanged: true
+            processTableChanged: true,
+            audioActivityChanged: false
         )
     }
 
@@ -148,7 +157,8 @@ final class ManagedProcessWatcher {
             processChangeWorkItem = nil
             let notification = ProcessChangeNotification(
                 invalidatedMetadata: pendingMetadataInvalidations,
-                processTableChanged: pendingProcessTableChange
+                processTableChanged: pendingProcessTableChange,
+                audioActivityChanged: false
             )
             pendingMetadataInvalidations.removeAll()
             pendingProcessTableChange = false

@@ -10,6 +10,7 @@ struct ProcessControllerSchedulingTests {
     private func target(
         identifier: String? = nil,
         processIdentities: Set<ProcessIdentity> = [],
+        usesApplicationCommands: Bool = true,
         launchedAt: Date? = nil,
         cpuPercent: Double = 50,
         isFrontmost: Bool = false,
@@ -21,6 +22,7 @@ struct ProcessControllerSchedulingTests {
         ProcessControlTarget(
             bundleIdentifier: identifier ?? self.identifier,
             processIdentities: processIdentities,
+            usesApplicationCommands: usesApplicationCommands,
             launchedAt: launchedAt,
             cpuPercent: cpuPercent,
             isFrontmost: isFrontmost,
@@ -110,6 +112,41 @@ struct ProcessControllerSchedulingTests {
         #expect(outcome == .succeeded)
         #expect(terminationCallCount == 1)
         #expect(snapshot.statuses[identifier] == .waiting)
+        await controller.shutdown()
+    }
+
+    @Test("Menu quit terminates a standalone process without an app command")
+    func menuQuitTerminatesStandaloneProcess() async {
+        let controlledProcess = process(150)
+        let processSystem = RecordingProcessSystem()
+        var applicationTerminationCallCount = 0
+        let controller = ProcessController(
+            system: processSystem,
+            crashWatchdog: RecordingProcessCrashWatchdog(),
+            terminateApplication: { _ in
+                applicationTerminationCallCount += 1
+                return true
+            }
+        )
+        _ = await controller.update(
+            targets: [target(
+                processIdentities: [controlledProcess],
+                usesApplicationCommands: false,
+                launchedAt: oldLaunchDate
+            )],
+            rules: [:],
+            isEnabled: true,
+            revision: 1
+        )
+
+        let outcome = await controller.performApplicationCommand(
+            .quit,
+            bundleIdentifier: identifier
+        )
+
+        #expect(outcome == .succeeded)
+        #expect(processSystem.didAttemptToTerminate(controlledProcess))
+        #expect(applicationTerminationCallCount == 0)
         await controller.shutdown()
     }
 
@@ -305,9 +342,11 @@ struct ProcessControllerSchedulingTests {
         await controller.shutdown()
     }
 
-    @Test("An app older than the launch grace period can be limited")
-    func oldLaunchEnablesControlCadence() async {
-        let controller = ProcessController()
+    @Test("An app at its CPU allowance uses efficiency scheduling without hard limiting")
+    func oldLaunchStartsWithEfficiencyScheduling() async {
+        let system = RecordingProcessSystem()
+        let controlledProcess = process(30)
+        let controller = ProcessController(system: system)
         let rule = AppRule(
             bundleIdentifier: identifier,
             displayName: "Example",
@@ -315,14 +354,53 @@ struct ProcessControllerSchedulingTests {
             delaySeconds: 0
         )
         let snapshot = await controller.update(
-            targets: [target(launchedAt: Date().addingTimeInterval(-61))],
+            targets: [target(
+                processIdentities: [controlledProcess],
+                launchedAt: Date().addingTimeInterval(-61)
+            )],
             rules: [identifier: rule],
             isEnabled: true,
             revision: 1
         )
 
-        #expect(snapshot.statuses[identifier] == .limited(50))
+        #expect(snapshot.statuses[identifier] == .energyEfficient)
+        #expect(system.didAttemptToSetBackgroundPriority(controlledProcess))
+        #expect(!system.didAttemptToStop(controlledProcess))
         #expect(snapshot.scheduledTickInterval == 1)
+        await controller.shutdown()
+    }
+
+    @Test("WindowServer limit rules use efficiency scheduling without hard limiting")
+    func windowServerCannotBeCPULimited() async {
+        let system = RecordingProcessSystem()
+        let controlledProcess = process(31)
+        let controller = ProcessController(system: system)
+        let windowServerIdentifier = BackgroundProcessPolicy.identifier(
+            command: "/System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer",
+            pid: controlledProcess.pid
+        )
+        let rule = AppRule(
+            bundleIdentifier: windowServerIdentifier,
+            displayName: "WindowServer",
+            action: .limit,
+            limitPercent: 1,
+            delaySeconds: 0
+        )
+        let snapshot = await controller.update(
+            targets: [target(
+                identifier: windowServerIdentifier,
+                processIdentities: [controlledProcess],
+                usesApplicationCommands: false,
+                launchedAt: Date().addingTimeInterval(-61)
+            )],
+            rules: [windowServerIdentifier: rule],
+            isEnabled: true,
+            revision: 1
+        )
+
+        #expect(snapshot.statuses[windowServerIdentifier] == .energyEfficient)
+        #expect(system.didAttemptToSetBackgroundPriority(controlledProcess))
+        #expect(!system.didAttemptToStop(controlledProcess))
         await controller.shutdown()
     }
 
@@ -395,7 +473,8 @@ struct ProcessControllerSchedulingTests {
 
     @Test("Becoming visible releases active CPU control")
     func becomingVisibleReleasesControl() async {
-        let controller = ProcessController()
+        let controlledProcess = process(31)
+        let controller = ProcessController(system: RecordingProcessSystem())
         let rule = AppRule(
             bundleIdentifier: identifier,
             displayName: "Example",
@@ -403,14 +482,18 @@ struct ProcessControllerSchedulingTests {
             delaySeconds: 0
         )
         let launchedAt = Date().addingTimeInterval(-61)
-        let limited = await controller.update(
-            targets: [target(launchedAt: launchedAt)],
+        let efficient = await controller.update(
+            targets: [target(
+                processIdentities: [controlledProcess],
+                launchedAt: launchedAt
+            )],
             rules: [identifier: rule],
             isEnabled: true,
             revision: 1
         )
         let visible = await controller.update(
             targets: [target(
+                processIdentities: [controlledProcess],
                 launchedAt: launchedAt,
                 windowVisibility: .visible
             )],
@@ -419,7 +502,7 @@ struct ProcessControllerSchedulingTests {
             revision: 2
         )
 
-        #expect(limited.statuses[identifier] == .limited(50))
+        #expect(efficient.statuses[identifier] == .energyEfficient)
         #expect(visible.statuses[identifier] == .waiting)
         await controller.shutdown()
     }
@@ -428,6 +511,7 @@ struct ProcessControllerSchedulingTests {
     func visibilityRecheckReleasesControl() async {
         let manualClock = ManualProcessControlClock()
         let controller = ProcessController(
+            system: RecordingProcessSystem(),
             windowSnapshotProvider: { nil },
             clock: manualClock.clock
         )
@@ -437,8 +521,12 @@ struct ProcessControllerSchedulingTests {
             action: .limit,
             delaySeconds: 0
         )
-        let limited = await controller.update(
-            targets: [target(launchedAt: Date().addingTimeInterval(-61))],
+        let controlledProcess = process(32)
+        let efficient = await controller.update(
+            targets: [target(
+                processIdentities: [controlledProcess],
+                launchedAt: Date().addingTimeInterval(-61)
+            )],
             rules: [identifier: rule],
             isEnabled: true,
             revision: 1
@@ -453,7 +541,7 @@ struct ProcessControllerSchedulingTests {
         }
         let protected = await controller.currentSnapshot()
 
-        #expect(limited.statuses[identifier] == .limited(50))
+        #expect(efficient.statuses[identifier] == .energyEfficient)
         #expect(protected.statuses[identifier] == .waiting)
         await controller.shutdown()
     }
@@ -508,7 +596,7 @@ struct ProcessControllerSchedulingTests {
 
     @Test("A fully covered app remains eligible for management")
     func coveredAppSchedulesControl() async {
-        let controller = ProcessController()
+        let controller = ProcessController(system: RecordingProcessSystem())
         let rule = AppRule(
             bundleIdentifier: identifier,
             displayName: "Example",
@@ -517,6 +605,7 @@ struct ProcessControllerSchedulingTests {
         )
         let snapshot = await controller.update(
             targets: [target(
+                processIdentities: [process(33)],
                 launchedAt: Date().addingTimeInterval(-61),
                 windowVisibility: .covered
             )],
@@ -525,7 +614,7 @@ struct ProcessControllerSchedulingTests {
             revision: 1
         )
 
-        #expect(snapshot.statuses[identifier] == .waiting)
+        #expect(snapshot.statuses[identifier] == .energyEfficient)
         #expect((snapshot.scheduledTickInterval ?? 0) > 0.9)
         #expect((snapshot.scheduledTickInterval ?? 2) <= 1)
         await controller.shutdown()
@@ -1077,7 +1166,7 @@ struct ProcessControllerSchedulingTests {
         await controller.shutdown()
     }
 
-    @Test("The default control window stops a busy process after ten milliseconds")
+    @Test("The default control window stops a busy process after fifty milliseconds")
     func defaultControlWindowBoundsBurstDuration() async {
         let manualClock = ManualProcessControlClock()
         let system = RecordingProcessSystem()
@@ -1100,13 +1189,13 @@ struct ProcessControllerSchedulingTests {
         )
         #expect(await eventually { manualClock.pendingSleepCount == 2 })
 
-        system.setCPUTimeNanoseconds(10_000_000)
-        manualClock.advance(by: .milliseconds(9))
+        system.setCPUTimeNanoseconds(50_000_000)
+        manualClock.advance(by: .milliseconds(49))
         #expect(!system.didAttemptToStop(controlledProcess))
         manualClock.advance(by: .milliseconds(1))
         #expect(await eventually { system.didAttemptToStop(controlledProcess) })
 
-        manualClock.advance(by: .milliseconds(39))
+        manualClock.advance(by: .milliseconds(199))
         #expect(!system.didAttemptToResume(controlledProcess))
         manualClock.advance(by: .milliseconds(1))
         #expect(await eventually { system.didAttemptToResume(controlledProcess) })
@@ -1141,18 +1230,29 @@ struct ProcessControllerSchedulingTests {
         #expect(await eventually { manualClock.pendingSleepCount == 2 })
 
         system.setCPUTimeNanoseconds(800_000_000)
-        manualClock.advance(by: .milliseconds(500))
-        #expect(await eventually { system.didAttemptToStop(controlledProcess) })
-
         manualClock.advance(by: .milliseconds(999))
-        #expect(!system.didAttemptToResume(controlledProcess))
-
+        #expect(!system.didAttemptToStop(controlledProcess))
         manualClock.advance(by: .milliseconds(1))
-        #expect(await eventually { system.didAttemptToResume(controlledProcess) })
+        #expect(await eventually { system.didAttemptToStop(controlledProcess) })
+        var stopped = await controller.currentSnapshot()
+        for _ in 0..<1_000 {
+            if stopped.statuses[identifier] == .limited(50) { break }
+            await Task.yield()
+            stopped = await controller.currentSnapshot()
+        }
+        #expect(stopped.statuses[identifier] == .limited(50))
+
+        manualClock.advance(by: .milliseconds(750))
+        for _ in 0..<1_000 {
+            if system.didAttemptToResume(controlledProcess) { break }
+            _ = await controller.currentSnapshot()
+            await Task.yield()
+        }
+        #expect(system.didAttemptToResume(controlledProcess))
         await controller.shutdown()
     }
 
-    @Test("A low CPU limit receives a responsiveness slice after one second")
+    @Test("A low CPU limit receives a responsiveness slice within 750 milliseconds")
     func lowLimitReceivesResponsivenessSlice() async {
         let manualClock = ManualProcessControlClock()
         let system = RecordingProcessSystem()
@@ -1178,13 +1278,56 @@ struct ProcessControllerSchedulingTests {
         #expect(system.didAttemptToStop(controlledProcess))
         #expect(await eventually { manualClock.pendingSleepCount == 2 })
 
-        manualClock.advance(by: .milliseconds(999))
+        manualClock.advance(by: .milliseconds(749))
         #expect(!system.didAttemptToResume(controlledProcess))
         #expect(manualClock.deadlineWakeCount == 0)
 
         manualClock.advance(by: .milliseconds(1))
         #expect(await eventually { system.didAttemptToResume(controlledProcess) })
         #expect(manualClock.deadlineWakeCount <= 2)
+        await controller.shutdown()
+    }
+
+    @Test("Measured CPU must exceed the allowance before hard limiting starts")
+    func measuredDemandGatesHardLimiting() async {
+        let manualClock = ManualProcessControlClock()
+        let system = RecordingProcessSystem()
+        let controlledProcess = process(34)
+        let hiddenSnapshot = WindowVisibilitySnapshot(windowsFrontToBack: [], screenBounds: [])
+        let controller = ProcessController(
+            system: system,
+            crashWatchdog: RecordingProcessCrashWatchdog(),
+            windowSnapshotProvider: { hiddenSnapshot },
+            clock: manualClock.clock
+        )
+
+        let initial = await controller.update(
+            targets: [target(
+                processIdentities: [controlledProcess],
+                launchedAt: oldLaunchDate,
+                cpuPercent: 10
+            )],
+            rules: [identifier: limitRule(identifier, limitPercent: 20)],
+            isEnabled: true,
+            revision: 1
+        )
+
+        #expect(initial.statuses[identifier] == .energyEfficient)
+        #expect(system.didAttemptToSetBackgroundPriority(controlledProcess))
+        #expect(!system.didAttemptToStop(controlledProcess))
+        #expect(await eventually { manualClock.pendingSleepCount == 2 })
+
+        system.setCPUTimeNanoseconds(100_000_000)
+        manualClock.advance(by: .seconds(1))
+        #expect(await eventually { manualClock.deadlineWakeCount >= 1 })
+        #expect(await controller.currentSnapshot().statuses[identifier] == .energyEfficient)
+        #expect(!system.didAttemptToStop(controlledProcess))
+        #expect(await eventually { manualClock.pendingSleepCount == 2 })
+
+        system.setCPUTimeNanoseconds(400_000_000)
+        manualClock.advance(by: .seconds(1))
+        #expect(await eventually { system.didAttemptToStop(controlledProcess) })
+        #expect(await controller.currentSnapshot().statuses[identifier] == .limited(20))
         await controller.shutdown()
     }
 
@@ -1331,6 +1474,8 @@ private final class RecordingProcessSystem: ProcessSystemControlling, @unchecked
     private let lock = NSLock()
     private var stopAttempts: [Set<ProcessIdentity>] = []
     private var resumeAttempts: [Set<ProcessIdentity>] = []
+    private var backgroundPriorityAttempts: [Set<ProcessIdentity>] = []
+    private var terminationAttempts: [Set<ProcessIdentity>] = []
     private var cpuTimeNanoseconds: UInt64 = 0
     private var stopFailuresRemaining: [ProcessIdentity: Int] = [:]
     private var resumeFailuresRemaining: [ProcessIdentity: Int] = [:]
@@ -1346,6 +1491,14 @@ private final class RecordingProcessSystem: ProcessSystemControlling, @unchecked
 
     func didAttemptToResume(_ process: ProcessIdentity) -> Bool {
         withLock { resumeAttempts.contains { $0.contains(process) } }
+    }
+
+    func didAttemptToSetBackgroundPriority(_ process: ProcessIdentity) -> Bool {
+        withLock { backgroundPriorityAttempts.contains { $0.contains(process) } }
+    }
+
+    func didAttemptToTerminate(_ process: ProcessIdentity) -> Bool {
+        withLock { terminationAttempts.contains { $0.contains(process) } }
     }
 
     func failNextStop(for process: ProcessIdentity) {
@@ -1411,7 +1564,10 @@ private final class RecordingProcessSystem: ProcessSystemControlling, @unchecked
     }
 
     func setBackgroundPriority(_ processes: Set<ProcessIdentity>) -> ProcessOperationResult {
-        ProcessOperationResult(applied: processes)
+        withLock {
+            backgroundPriorityAttempts.append(processes)
+            return ProcessOperationResult(applied: processes)
+        }
     }
 
     func restorePriority(_ processes: Set<ProcessIdentity>) -> ProcessOperationResult {
@@ -1427,6 +1583,13 @@ private final class RecordingProcessSystem: ProcessSystemControlling, @unchecked
                 }
             }
             return result
+        }
+    }
+
+    func terminate(_ processes: Set<ProcessIdentity>) -> ProcessOperationResult {
+        withLock {
+            terminationAttempts.append(processes)
+            return ProcessOperationResult(applied: processes)
         }
     }
 

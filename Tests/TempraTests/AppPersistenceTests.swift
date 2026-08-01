@@ -26,6 +26,90 @@ struct AppPersistenceTests {
         }
     }
 
+    @Test("Background and system process rules persist")
+    func userOwnedBackgroundRulePersistence() throws {
+        try withDefaults { defaults in
+            let persistence = AppPersistence(defaults: defaults)
+            let store = try AppStore(
+                persistence: persistence,
+                managementCoordinator: ProcessManagementCoordinator(),
+                monitoringService: MonitoringService(),
+                launchAtLoginController: TestLaunchAtLoginController(),
+                startsMonitoring: false,
+                persistenceErrorHandler: { _ in }
+            )
+            let executablePath = "/Users/example/Library/Application Support/"
+                + "CrossOver/Bottles/Game/wine64-preloader"
+            let userIdentifier = BackgroundProcessPolicy.userOwnedIdentifier(
+                command: executablePath,
+                pid: 200
+            )
+            let systemIdentifier = BackgroundProcessPolicy.identifier(
+                command: "/usr/libexec/logd",
+                pid: 100
+            )
+
+            store.save(AppRule(
+                bundleIdentifier: userIdentifier,
+                displayName: "Game.exe",
+                action: .limit,
+                limitPercent: 50,
+                applicationURL: URL(fileURLWithPath: executablePath)
+            ))
+            store.save(AppRule(
+                bundleIdentifier: systemIdentifier,
+                displayName: "logd",
+                action: .limit,
+                limitPercent: 50
+            ))
+
+            #expect(store.rules[userIdentifier]?.action == .limit)
+            #expect(store.rules[systemIdentifier]?.action == .limit)
+            #expect(try persistence.loadRules()[userIdentifier]?.limitPercent == 50)
+            #expect(try persistence.loadRules()[systemIdentifier]?.limitPercent == 50)
+        }
+    }
+
+    @Test("WindowServer CPU limits migrate to efficiency-only rules")
+    func windowServerLimitMigration() throws {
+        try withDefaults { defaults in
+            let persistence = AppPersistence(defaults: defaults)
+            let identifier = BackgroundProcessPolicy.identifier(
+                command: "/System/Library/PrivateFrameworks/SkyLight.framework/Versions/A/Resources/WindowServer",
+                pid: 100
+            )
+            try persistence.saveRules([identifier: AppRule(
+                bundleIdentifier: identifier,
+                displayName: "WindowServer",
+                action: .limit,
+                limitPercent: 7
+            )])
+
+            let store = try AppStore(
+                persistence: persistence,
+                managementCoordinator: ProcessManagementCoordinator(),
+                monitoringService: MonitoringService(),
+                launchAtLoginController: TestLaunchAtLoginController(),
+                startsMonitoring: false,
+                persistenceErrorHandler: { _ in }
+            )
+
+            let inMemoryRule = try #require(store.rules[identifier])
+            let savedRule = try #require(persistence.loadRules()[identifier])
+            #expect(inMemoryRule.action == .none)
+            #expect(inMemoryRule.runOnEfficiencyCores)
+            #expect(savedRule.action == .none)
+            #expect(savedRule.runOnEfficiencyCores)
+
+            var attemptedLimit = savedRule
+            attemptedLimit.action = .limit
+            attemptedLimit.limitPercent = 5
+            store.save(attemptedLimit)
+            #expect(store.rules[identifier]?.action == RuleAction.none)
+            #expect(store.rules[identifier]?.runOnEfficiencyCores == true)
+        }
+    }
+
     @Test("Menu-bar system samples record history without application data")
     func menuBarSamplesRecordLightweightHistory() throws {
         try withDefaults { defaults in
@@ -302,6 +386,47 @@ struct AppPersistenceTests {
             }
             #expect(defaults.data(forKey: ManagementLedger.storageKey) == original)
             #expect(ledger.durations(since: .distantPast).isEmpty)
+        }
+    }
+
+    @Test("One limiting session does not persist each internal phase change")
+    func limitPhaseChangesUseHeartbeatPersistence() throws {
+        try withDefaults { defaults in
+            let ledger = try ManagementLedger(defaults: defaults)
+            let startedAt = Date(timeIntervalSince1970: 100)
+            try ledger.transition(
+                bundleIdentifier: "example.app",
+                displayName: "Example",
+                applicationURL: nil,
+                status: .limited(10),
+                at: startedAt
+            )
+            let initialData = try #require(
+                defaults.data(forKey: ManagementLedger.storageKey)
+            )
+
+            try ledger.transition(
+                bundleIdentifier: "example.app",
+                displayName: "Example",
+                applicationURL: nil,
+                status: .energyEfficient,
+                at: startedAt.addingTimeInterval(10)
+            )
+
+            #expect(defaults.data(forKey: ManagementLedger.storageKey) == initialData)
+            #expect(ledger.durations(
+                since: startedAt,
+                now: startedAt.addingTimeInterval(20)
+            ).first?.limitedDuration == 20)
+
+            try ledger.transition(
+                bundleIdentifier: "example.app",
+                displayName: "Example",
+                applicationURL: nil,
+                status: .normal,
+                at: startedAt.addingTimeInterval(20)
+            )
+            #expect(defaults.data(forKey: ManagementLedger.storageKey) != initialData)
         }
     }
 

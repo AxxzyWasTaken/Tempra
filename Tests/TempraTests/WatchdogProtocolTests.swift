@@ -1,9 +1,15 @@
+import Darwin
 import Foundation
 import TempraSafety
 import Testing
 
 @Suite("Crash watchdog protocol")
 struct WatchdogProtocolTests {
+    @Test("Process termination uses the force-quit signal")
+    func processTerminationUsesForceQuitSignal() {
+        #expect(PrivilegedProcessProtocol.forceQuitSignal == SIGKILL)
+    }
+
     @Test("Commands decode across bounded input chunks")
     func chunkedCommands() throws {
         let first = WatchdogCommand(
@@ -54,5 +60,33 @@ struct WatchdogProtocolTests {
         #expect(throws: WatchdogProtocolError.tooManyProcesses) {
             try stream.append(frame)
         }
+    }
+
+    @Test("Privileged requests and responses preserve verified process identities")
+    func privilegedProtocolRoundTrip() throws {
+        let identity = PrivilegedProcessIdentity(
+            pid: 42,
+            startTimeMicroseconds: 123_456
+        )
+        let request = PrivilegedProcessRequest(
+            action: .stop,
+            processes: [identity]
+        )
+        let decodedRequest = try JSONDecoder().decode(
+            PrivilegedProcessRequest.self,
+            from: JSONEncoder().encode(request)
+        )
+        #expect(decodedRequest == request)
+
+        let response = PrivilegedProcessResponse(
+            applied: [identity],
+            totalCPUTimeNanoseconds: 900
+        )
+        let decodedResponse = try JSONDecoder().decode(
+            PrivilegedProcessResponse.self,
+            from: JSONEncoder().encode(response)
+        )
+        #expect(decodedResponse == response)
+        #expect(PrivilegedProcessProtocol.maximumProcessCount == 4_096)
     }
 }

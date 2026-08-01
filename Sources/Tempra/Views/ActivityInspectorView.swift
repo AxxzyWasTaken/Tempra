@@ -27,8 +27,8 @@ struct ActivityInspectorView: View {
 
                     applicationSection
 
-                    if item.isSystemProcess {
-                        monitorOnlyNotice
+                    if item.requiresPrivilegedControl {
+                        privilegedControlNotice
                     }
                 }
                 .padding(.horizontal, 16)
@@ -56,7 +56,7 @@ struct ActivityInspectorView: View {
                     .font(TempraTypography.title)
                     .lineLimit(1)
 
-                Text(item.isSystemProcess ? "Monitor only" : item.stateText)
+                Text(item.stateText)
                     .font(TempraTypography.footer)
                     .foregroundStyle(TempraPalette.secondaryText)
                     .lineLimit(1)
@@ -113,22 +113,37 @@ struct ActivityInspectorView: View {
         }
     }
 
-    private var monitorOnlyNotice: some View {
-        HStack(alignment: .top, spacing: 7) {
-            Image(systemName: "lock.shield")
-                .foregroundStyle(TempraPalette.secondaryText)
-                .accessibilityHidden(true)
+    private var privilegedControlNotice: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            HStack(alignment: .top, spacing: 7) {
+                Image(systemName: store.privilegedControlStatus.isEnabled
+                      ? "checkmark.shield"
+                      : "lock.shield")
+                    .foregroundStyle(TempraPalette.secondaryText)
+                    .accessibilityHidden(true)
 
-            Text("Tempra shows activity for this protected system process but does not control it.")
-                .foregroundStyle(TempraPalette.secondaryText)
-                .fixedSize(horizontal: false, vertical: true)
+                Text(store.privilegedControlStatus.message
+                     ?? "Administrator access is enabled for this process.")
+                    .foregroundStyle(TempraPalette.secondaryText)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            if let actionTitle = store.privilegedControlStatus.actionTitle {
+                Button(actionTitle) {
+                    Task {
+                        _ = await store.requestPrivilegedControl()
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+            }
         }
         .padding(9)
         .background(
             TempraPalette.secondaryControlFill,
             in: RoundedRectangle(cornerRadius: 7, style: .continuous)
         )
-        .accessibilityElement(children: .combine)
+        .accessibilityElement(children: .contain)
     }
 
     private func failureNotice(_ message: String) -> some View {
@@ -207,6 +222,7 @@ struct ActivityInspectorView: View {
 
     private var applicationTypeText: String {
         if item.isSystemProcess { return "System process" }
+        if item.isStandaloneProcess { return "Background process" }
         if item.isService { return "Background service" }
         return "Application"
     }

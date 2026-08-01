@@ -29,10 +29,12 @@ final class AppStore: ObservableObject {
     @Published private(set) var applicationActionFailure: ApplicationActionFailurePresentation?
     @Published private(set) var isEnabled: Bool
     @Published private(set) var launchAtLoginError: String?
+    @Published private(set) var privilegedControlStatus: PrivilegedControlStatus
     @Published var displayItems: [AppDisplayItem] = []
 
     let managementCoordinator: ProcessManagementCoordinator
     private let launchAtLoginController: any LaunchAtLoginControlling
+    private let privilegedHelperManager: PrivilegedHelperManager
     private let persistence: AppPersistence
     private let monitoringService: any MonitoringServicing
     private let persistenceErrorHandler: PersistenceErrorHandler
@@ -73,10 +75,15 @@ final class AppStore: ObservableObject {
         launchAtLoginController: any LaunchAtLoginControlling,
         startsMonitoring: Bool,
         iconCache: AppIconCache? = nil,
+        privilegedHelperManager: PrivilegedHelperManager? = nil,
         persistenceErrorHandler: @escaping PersistenceErrorHandler
     ) throws {
         let loadedEnabled = try persistence.loadEnabled()
         let loadedRules = try persistence.loadRules()
+        let safeLoadedRules = loadedRules.mapValues(SystemProcessRulePolicy.normalized)
+        if safeLoadedRules != loadedRules {
+            try persistence.saveRules(safeLoadedRules)
+        }
         var loadedPreferences = try persistence.loadPreferences()
         let loadedSuspensions = try persistence.loadSuspensions()
         let loadedActivity = try persistence.loadActivity()
@@ -96,19 +103,22 @@ final class AppStore: ObservableObject {
         self.managementCoordinator = managementCoordinator
         self.monitoringService = monitoringService
         self.launchAtLoginController = launchAtLoginController
+        let privilegedHelperManager = privilegedHelperManager ?? PrivilegedHelperManager()
+        self.privilegedHelperManager = privilegedHelperManager
         self.persistenceErrorHandler = persistenceErrorHandler
         self.historyStore = historyStore
         self.iconCache = iconCache ?? AppIconCache()
         self.managementLedger = managementLedger
         isEnabled = loadedEnabled
-        rules = loadedRules
+        privilegedControlStatus = privilegedHelperManager.status
+        rules = safeLoadedRules
         loadedPreferences.launchAtLogin = launchAtLoginController.isEnabled
         preferences = loadedPreferences
         suspensions = loadedSuspensions
         activityEvents = historyStore.activityEvents
         cpuHistorySamples = historyStore.cpuHistorySamples
         persistedEnabled = loadedEnabled
-        persistedRules = loadedRules
+        persistedRules = safeLoadedRules
         persistedPreferences = loadedPreferences
         persistedSuspensions = loadedSuspensions
         managementLedger.startHeartbeat { [weak self] error in
@@ -137,15 +147,14 @@ final class AppStore: ObservableObject {
     }
 
     func save(_ rule: AppRule) {
-        guard !BackgroundProcessPolicy.isMonitorOnlyIdentifier(rule.bundleIdentifier),
-              apps.first(where: { $0.bundleIdentifier == rule.bundleIdentifier })?
-                .isSystemProcess != true else { return }
-
         var normalized = rule
         normalized.limitPercent = CPULimitRange.clamped(normalized.limitPercent)
-        if normalized.action == .pause {
+        if normalized.action == .limit {
+            normalized.runOnEfficiencyCores = true
+        } else if normalized.action == .pause {
             normalized.runOnEfficiencyCores = false
         }
+        normalized = SystemProcessRulePolicy.normalized(normalized)
         normalized.updatedAt = Date()
         if normalized.applicationURL == nil {
             normalized.applicationURL = apps.first {
@@ -167,6 +176,7 @@ final class AppStore: ObservableObject {
             detail: normalized.summary
         )
         applyRulesToCurrentApps()
+        configureMonitoringDemand(refreshImmediately: true)
     }
 
     func applyQuickRule(
@@ -185,7 +195,9 @@ final class AppStore: ObservableObject {
         rule.displayName = displayName
         rule.applicationURL = applicationURL ?? rule.applicationURL
         rule.action = action
-        if action == .pause {
+        if action == .limit {
+            rule.runOnEfficiencyCores = true
+        } else if action == .pause {
             rule.runOnEfficiencyCores = false
         }
         rule.limitPercent = limitPercent
@@ -239,6 +251,7 @@ final class AppStore: ObservableObject {
             detail: "Tempra will no longer manage this app."
         )
         applyRulesToCurrentApps()
+        configureMonitoringDemand(refreshImmediately: true)
     }
 
     func snooze(bundleIdentifier: String, for duration: TimeInterval) {
@@ -274,11 +287,21 @@ final class AppStore: ObservableObject {
             )
             return false
         }
-        guard !item.isSystemProcess else {
+        if item.requiresPrivilegedControl, !privilegedControlStatus.isEnabled {
+            let status = await requestPrivilegedControl()
             setApplicationActionFailure(
                 for: item,
-                message: "Tempra can monitor \(item.name), but it cannot control this protected system process."
+                message: status.message
+                    ?? "Tempra is waiting for a verified process identity."
             )
+            return false
+        }
+        if item.requiresPrivilegedControl, item.controllableProcessCount == 0 {
+            setApplicationActionFailure(
+                for: item,
+                message: "Tempra does not yet have a verified identity for \(item.name)."
+            )
+            refresh()
             return false
         }
 
@@ -327,6 +350,19 @@ final class AppStore: ObservableObject {
 
     func dismissApplicationActionFailure() {
         applicationActionFailure = nil
+    }
+
+    func requestPrivilegedControl() async -> PrivilegedControlStatus {
+        let status = await privilegedHelperManager.requestEnable()
+        privilegedControlStatus = status
+        if status.isEnabled {
+            refresh()
+        }
+        return status
+    }
+
+    func openPrivilegedControlSettings() {
+        privilegedHelperManager.openApprovalSettings()
     }
 
     func setEnabled(_ enabled: Bool) {
@@ -545,7 +581,7 @@ final class AppStore: ObservableObject {
         monitoringCoordinator.configure(
             demand: demand,
             refreshImmediately: refreshImmediately,
-            includesEssentialSystemProcesses: preferences.includesEssentialSystemProcesses
+            includesEssentialSystemProcesses: includesBackgroundAndSystemProcesses
         )
 
         if previousDemand != demand {
@@ -559,7 +595,7 @@ final class AppStore: ObservableObject {
         guard !hasBegunShutdown else { return }
         purgeExpiredSuspensions()
         monitoringCoordinator.requestEventRefresh(
-            includesEssentialSystemProcesses: preferences.includesEssentialSystemProcesses
+            includesEssentialSystemProcesses: includesBackgroundAndSystemProcesses
         )
     }
 
@@ -573,6 +609,16 @@ final class AppStore: ObservableObject {
     ) {
         guard !hasBegunShutdown else { return }
         var rebuildsDisplayItems = false
+
+        let activeLimitIdentifiers = Set(
+            managementCoordinator.statuses.compactMap { identifier, status in
+                status.isActivelyLimitingCPU ? identifier : nil
+            }
+        )
+        runtimeMetrics.updateBatteryPower(
+            state: sample.batteryPower,
+            activeLimitIdentifiers: activeLimitIdentifiers
+        )
 
         if let systemCPU = sample.systemCPU {
             self.systemCPU = systemCPU
@@ -590,6 +636,13 @@ final class AppStore: ObservableObject {
             }
             applyRulesToCurrentApps(rebuildsDisplayItems: false)
             rebuildsDisplayItems = true
+        }
+
+        if let privilegedAccessError = sample.privilegedAccessError,
+           privilegedHelperManager.status == .enabled {
+            privilegedControlStatus = .helperUnavailable(privilegedAccessError)
+        } else {
+            privilegedControlStatus = privilegedHelperManager.status
         }
 
         if demand.samplesPower, sample.apps != nil {
@@ -647,7 +700,7 @@ final class AppStore: ObservableObject {
             guard let self, !hasBegunShutdown else { return }
             purgeExpiredSuspensions()
             monitoringCoordinator.requestEventRefresh(
-                includesEssentialSystemProcesses: preferences.includesEssentialSystemProcesses,
+                includesEssentialSystemProcesses: includesBackgroundAndSystemProcesses,
                 processChange: processChange
             )
         }
@@ -659,6 +712,11 @@ final class AppStore: ObservableObject {
         if rebuildsDisplayItems {
             rebuildDisplayItems()
         }
+    }
+
+    private var includesBackgroundAndSystemProcesses: Bool {
+        preferences.includesEssentialSystemProcesses
+            || rules.keys.contains(where: BackgroundProcessPolicy.isMonitorOnlyIdentifier)
     }
 
     private func updatePowerMetrics(
@@ -694,7 +752,7 @@ final class AppStore: ObservableObject {
 
     private func refreshRuleMetadata() {
         var changed = false
-        for app in apps where !app.isSystemProcess {
+        for app in apps {
             guard var rule = rules[app.bundleIdentifier] else { continue }
             if rule.displayName != app.name || rule.applicationURL != app.bundleURL {
                 rule.displayName = app.name
@@ -718,33 +776,30 @@ final class AppStore: ObservableObject {
     private func handleControllerEvent(_ event: ProcessControllerEvent) {
         switch event {
         case .statusTransition(let identifier, let previous, let current):
-            apps = apps.map { app in
-                guard app.bundleIdentifier == identifier else { return app }
-                var updated = app
-                updated.status = current
-                return updated
-            }
             let displayName = apps.first { $0.bundleIdentifier == identifier }?.name
                 ?? rules[identifier]?.displayName
                 ?? identifier
             let applicationURL = apps.first { $0.bundleIdentifier == identifier }?.bundleURL
                 ?? rules[identifier]?.applicationURL
-            do {
-                try managementLedger.transition(
+            let isInternalLimitPhaseChange = ManagementMetricCategory(status: previous) == .limited
+                && ManagementMetricCategory(status: current) == .limited
+            if !isInternalLimitPhaseChange {
+                do {
+                    try managementLedger.transition(
+                        bundleIdentifier: identifier,
+                        displayName: displayName,
+                        applicationURL: applicationURL,
+                        status: current
+                    )
+                } catch {
+                    reportPersistenceError(error)
+                }
+                recordControllerTransition(
                     bundleIdentifier: identifier,
-                    displayName: displayName,
-                    applicationURL: applicationURL,
-                    status: current
+                    previous: previous,
+                    current: current
                 )
-            } catch {
-                reportPersistenceError(error)
             }
-            recordControllerTransition(
-                bundleIdentifier: identifier,
-                previous: previous,
-                current: current
-            )
-            rebuildDisplayItems()
         case .activity(let identifier, let kind, let detail):
             recordActivity(bundleIdentifier: identifier, kind: kind, detail: detail)
         case .pauseWakeMonitoringChanged:
@@ -782,7 +837,7 @@ final class AppStore: ObservableObject {
             detail = "Waiting for the rule delay."
         case .limited(let percent):
             kind = .limited
-            let cores = rules[bundleIdentifier]?.runOnEfficiencyCores == true
+            let cores = rules[bundleIdentifier]?.usesEfficiencyCoreScheduling == true
                 ? " and using power-saving core scheduling"
                 : ""
             detail = "Limited to \(Int(percent))% CPU\(cores)."
@@ -928,7 +983,7 @@ final class AppStore: ObservableObject {
             let commandName = switch command {
             case .bringToFront: "bring \(appName) to the front"
             case .hide: "hide \(appName)"
-            case .quit: "quit \(appName)"
+            case .quit: "force quit \(appName)"
             }
             return "macOS did not accept the request to \(commandName)."
         }

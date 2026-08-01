@@ -14,13 +14,16 @@ struct AppDisplayItem: Identifiable {
     let estimatedSavedPowerWatts: Double?
     let residentMemoryBytes: UInt64?
     let processCount: Int
+    let controllableProcessCount: Int
     let launchedAt: Date?
     let isRunning: Bool
     let isFrontmost: Bool
     let isHidden: Bool
     let isPlayingAudio: Bool
     let isService: Bool
+    let isBackgroundProcess: Bool
     let isSystemProcess: Bool
+    let requiresPrivilegedControl: Bool
     let status: ManagementStatus
     let rule: AppRule?
     let isAttention: Bool
@@ -38,13 +41,16 @@ struct AppDisplayItem: Identifiable {
         estimatedSavedPowerWatts: Double? = nil,
         residentMemoryBytes: UInt64? = nil,
         processCount: Int = 0,
+        controllableProcessCount: Int = 0,
         launchedAt: Date? = nil,
         isRunning: Bool,
         isFrontmost: Bool,
         isHidden: Bool,
         isPlayingAudio: Bool,
         isService: Bool = false,
+        isBackgroundProcess: Bool = false,
         isSystemProcess: Bool = false,
+        requiresPrivilegedControl: Bool? = nil,
         status: ManagementStatus,
         rule: AppRule?,
         isAttention: Bool,
@@ -62,13 +68,16 @@ struct AppDisplayItem: Identifiable {
         self.estimatedSavedPowerWatts = estimatedSavedPowerWatts
         self.residentMemoryBytes = residentMemoryBytes
         self.processCount = processCount
+        self.controllableProcessCount = controllableProcessCount
         self.launchedAt = launchedAt
         self.isRunning = isRunning
         self.isFrontmost = isFrontmost
         self.isHidden = isHidden
         self.isPlayingAudio = isPlayingAudio
         self.isService = isService
+        self.isBackgroundProcess = isBackgroundProcess
         self.isSystemProcess = isSystemProcess
+        self.requiresPrivilegedControl = requiresPrivilegedControl ?? isSystemProcess
         self.status = status
         self.rule = rule
         self.isAttention = isAttention
@@ -145,7 +154,21 @@ struct AppDisplayItem: Identifiable {
     }
 
     var canControlApplication: Bool {
-        isRunning && !isSystemProcess
+        isRunning
+            && !requiresPrivilegedControl
+            && !BackgroundProcessPolicy.isBackgroundIdentifier(bundleIdentifier)
+    }
+
+    var canQuitProcess: Bool {
+        isRunning
+    }
+
+    var canLimitCPU: Bool {
+        !SystemProcessRulePolicy.isWindowServer(bundleIdentifier: bundleIdentifier)
+    }
+
+    var isStandaloneProcess: Bool {
+        BackgroundProcessPolicy.isBackgroundIdentifier(bundleIdentifier)
     }
 
     var ruleSummary: String {

@@ -45,6 +45,32 @@ enum RuleAction: String, Codable, CaseIterable, Identifiable, Sendable {
     }
 }
 
+enum SystemProcessRulePolicy {
+    private static let windowServerBundleIdentifier = "com.apple.WindowServer"
+    private static let backgroundCommandPrefix = "tempra.background:command:"
+
+    static func isWindowServer(bundleIdentifier: String) -> Bool {
+        if bundleIdentifier.caseInsensitiveCompare(windowServerBundleIdentifier) == .orderedSame {
+            return true
+        }
+        guard bundleIdentifier.hasPrefix(backgroundCommandPrefix) else { return false }
+        let command = String(bundleIdentifier.dropFirst(backgroundCommandPrefix.count))
+        return URL(fileURLWithPath: command).lastPathComponent
+            .caseInsensitiveCompare("WindowServer") == .orderedSame
+    }
+
+    static func normalized(_ rule: AppRule) -> AppRule {
+        guard isWindowServer(bundleIdentifier: rule.bundleIdentifier),
+              rule.action == .limit else {
+            return rule
+        }
+        var normalized = rule
+        normalized.action = .none
+        normalized.runOnEfficiencyCores = true
+        return normalized
+    }
+}
+
 struct AppRule: Codable, Equatable, Identifiable, Sendable {
     var bundleIdentifier: String
     var displayName: String
@@ -80,7 +106,8 @@ struct AppRule: Codable, Equatable, Identifiable, Sendable {
         self.bundleIdentifier = bundleIdentifier
         self.displayName = displayName
         self.action = action
-        self.runOnEfficiencyCores = action == .pause ? false : runOnEfficiencyCores
+        self.runOnEfficiencyCores = action == .limit
+            || (action != .pause && runOnEfficiencyCores)
         self.limitPercent = limitPercent
         self.delaySeconds = delaySeconds
         self.protectAudio = protectAudio
@@ -129,7 +156,9 @@ struct AppRule: Codable, Equatable, Identifiable, Sendable {
             Bool.self,
             forKey: .runOnEfficiencyCores
         ) ?? isLegacyEfficiencyRule
-        if action == .pause {
+        if action == .limit {
+            runOnEfficiencyCores = true
+        } else if action == .pause {
             runOnEfficiencyCores = false
         }
         limitPercent = try container.decodeIfPresent(Double.self, forKey: .limitPercent) ?? 50
@@ -166,7 +195,7 @@ struct AppRule: Codable, Equatable, Identifiable, Sendable {
         case .none:
             actionSummary = runOnEfficiencyCores ? "Power-saving cores" : "Idle actions"
         case .limit:
-            let cores = runOnEfficiencyCores ? " · power-saving cores" : ""
+            let cores = usesEfficiencyCoreScheduling ? " · power-saving cores" : ""
             actionSummary = "Limit to \(Int(limitPercent))%\(cores)"
         case .pause:
             actionSummary = "Pause"
@@ -196,7 +225,7 @@ struct AppRule: Codable, Equatable, Identifiable, Sendable {
             behaviors.append("hide it after \(Int(hideAfterMinutes)) minutes")
         }
         if let quitAfterMinutes {
-            behaviors.append("quit it after \(Int(quitAfterMinutes)) minutes")
+            behaviors.append("force quit it after \(Int(quitAfterMinutes)) minutes")
         }
 
         let condition = onlyWhenHidden ? " while it is hidden" : " while it is in the background"
@@ -210,6 +239,10 @@ struct AppRule: Codable, Equatable, Identifiable, Sendable {
             || runOnEfficiencyCores
             || hideAfterMinutes != nil
             || quitAfterMinutes != nil
+    }
+
+    var usesEfficiencyCoreScheduling: Bool {
+        action == .limit || runOnEfficiencyCores
     }
 }
 

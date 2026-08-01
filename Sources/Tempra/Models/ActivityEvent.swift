@@ -25,7 +25,7 @@ enum ActivityKind: String, Codable, Sendable {
         case .audioProtected: "Audio protected"
         case .energyEfficient: "Power-saving cores"
         case .hidden: "App hidden"
-        case .quit: "App quit"
+        case .quit: "App force quit"
         case .snoozed: "Snoozed"
         case .ruleSaved: "Rule saved"
         case .ruleDisabled: "Rule disabled"

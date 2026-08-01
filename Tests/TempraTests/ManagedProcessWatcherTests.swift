@@ -7,6 +7,32 @@ import Testing
 @Suite("Managed process event ordering")
 @MainActor
 struct ManagedProcessWatcherTests {
+    @Test("Managed process events are coalesced for two seconds by default")
+    func defaultDebounceCoalescesProcessEvents() async {
+        let audioMonitor = RecordingAudioActivityMonitor()
+        let watcher = ManagedProcessWatcher(audioMonitor: audioMonitor)
+        var notifications: [ProcessChangeNotification] = []
+        watcher.watch(
+            processIdentities: [],
+            audioProcessIdentifiers: [],
+            onChange: { notifications.append($0) }
+        )
+        let identity = ProcessIdentity(pid: 100, startTimeMicroseconds: 1_000_000)
+        let notification = ManagedProcessWatcher.notification(
+            for: .fork,
+            identity: identity
+        )
+
+        watcher.handleProcessChange(for: notification)
+        try? await Task.sleep(for: .milliseconds(150))
+        watcher.handleProcessChange(for: notification)
+
+        #expect(notifications.isEmpty)
+        #expect(await eventually(timeout: .seconds(3)) { notifications.count == 1 })
+
+        await watcher.stop()
+    }
+
     @Test("Rapid managed process events use only the short debounce")
     func rapidProcessEventsUseShortDebounce() async {
         let audioMonitor = RecordingAudioActivityMonitor()
@@ -64,6 +90,33 @@ struct ManagedProcessWatcherTests {
             .watch(revision: 3, processIdentifiers: [3]),
             .stop(revision: 4)
         ])
+    }
+
+    @Test("An unchanged audio target set does not rebuild Core Audio listeners")
+    func unchangedAudioTargetsAreNotReconfigured() async {
+        let audioMonitor = RecordingAudioActivityMonitor()
+        let watcher = ManagedProcessWatcher(audioMonitor: audioMonitor)
+
+        watcher.watch(
+            processIdentities: [],
+            audioProcessIdentifiers: [1],
+            onChange: { _ in }
+        )
+        #expect(await eventually {
+            await audioMonitor.events == [.watch(revision: 1, processIdentifiers: [1])]
+        })
+
+        watcher.watch(
+            processIdentities: [],
+            audioProcessIdentifiers: [1],
+            onChange: { _ in }
+        )
+        try? await Task.sleep(for: .milliseconds(50))
+        #expect(await audioMonitor.events == [
+            .watch(revision: 1, processIdentifiers: [1])
+        ])
+
+        await watcher.stop()
     }
 
     @Test("Shutdown waits for an in-flight audio update before stopping")
@@ -154,9 +207,12 @@ struct ManagedProcessWatcherTests {
     }
 
     private func eventually(
+        timeout: Duration = .milliseconds(500),
         _ condition: @escaping @MainActor @Sendable () async -> Bool
     ) async -> Bool {
-        for _ in 0..<50 {
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: timeout)
+        while clock.now < deadline {
             if await condition() {
                 return true
             }
