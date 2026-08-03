@@ -12,6 +12,7 @@ final class ProcessManagementCoordinator {
     private let controller: ProcessController
     private let processWatcher: ManagedProcessWatcher
     private var revision: UInt64 = 0
+    private var acceptsControllerResults = true
     private var updateTask: Task<Void, Never>?
     private var pauseActivationEventMonitor: Any?
     private var eventHandler: EventHandler?
@@ -56,15 +57,24 @@ final class ProcessManagementCoordinator {
         isEnabled: Bool,
         onProcessChange: @escaping ChangeHandler
     ) {
+        guard acceptsControllerResults, revision < .max else { return }
+        revision += 1
+        let protectedAudioIdentifiers = Set(apps.compactMap { app in
+            SoundSourceCompatibilityPolicy.isProtected(
+                bundleIdentifier: app.bundleIdentifier,
+                applicationURL: app.bundleURL
+            ) ? app.bundleIdentifier : nil
+        })
         let effectiveRules = rules.compactMapValues { rule -> AppRule? in
-            guard rule.hasBehavior,
-                  rule.isEnabled,
+            guard rule.isEnabled,
+                  !protectedAudioIdentifiers.contains(rule.bundleIdentifier),
                   suspensions[rule.bundleIdentifier]?.isActive != true else {
                 return nil
             }
-            return SystemProcessRulePolicy.normalized(
+            let normalized = SystemProcessRulePolicy.normalized(
                 activeProfile?.applying(to: rule) ?? rule
             )
+            return normalized.hasBehavior ? normalized : nil
         }
         let managedApps = apps.filter { effectiveRules[$0.bundleIdentifier] != nil }
         processWatcher.watch(
@@ -75,7 +85,6 @@ final class ProcessManagementCoordinator {
             onChange: onProcessChange
         )
 
-        revision &+= 1
         let requestRevision = revision
         let targets = apps.lazy.map {
             ProcessControlTarget(
@@ -89,7 +98,10 @@ final class ProcessManagementCoordinator {
                 isHidden: $0.isHidden,
                 isPlayingAudio: $0.isPlayingAudio,
                 windowVisibility: $0.windowVisibility,
-                isProtectedByMenuBarOverlay: $0.isProtectedByMenuBarOverlay
+                isProtectedByMenuBarOverlay: $0.isProtectedByMenuBarOverlay,
+                isProtectedAudioInfrastructure: protectedAudioIdentifiers.contains(
+                    $0.bundleIdentifier
+                )
             )
         }
         let targetSnapshot = Array(targets)
@@ -107,6 +119,7 @@ final class ProcessManagementCoordinator {
     }
 
     func shutdown() async -> ProcessRestorationResult {
+        acceptsControllerResults = false
         updateTask?.cancel()
         updateTask = nil
         if let pauseActivationEventMonitor {
@@ -133,20 +146,24 @@ final class ProcessManagementCoordinator {
     }
 
     private func handle(_ event: ProcessControllerEvent) {
+        guard acceptsControllerResults else { return }
         switch event {
-        case .statusTransition(let identifier, _, let current):
+        case .statusTransition(let eventRevision, let identifier, _, let current):
+            guard eventRevision == revision else { return }
             statuses[identifier] = current
             stateHandler?(statuses, estimatedSavedCPUByIdentifier)
             eventHandler?(event)
-        case .activity:
+        case .activity(let eventRevision, _, _, _):
+            guard eventRevision == revision else { return }
             eventHandler?(event)
-        case .pauseWakeMonitoringChanged(let enabled):
+        case .pauseWakeMonitoringChanged(let eventRevision, let enabled):
+            guard eventRevision == revision else { return }
             setPauseWakeMonitoringEnabled(enabled)
         }
     }
 
     private func apply(_ snapshot: ProcessControlSnapshot) {
-        guard snapshot.revision == revision else { return }
+        guard acceptsControllerResults, snapshot.revision == revision else { return }
         statuses = snapshot.statuses
         estimatedSavedCPUByIdentifier = snapshot.estimatedSavedCPUByIdentifier
         stateHandler?(statuses, estimatedSavedCPUByIdentifier)

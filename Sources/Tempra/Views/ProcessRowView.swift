@@ -106,9 +106,7 @@ struct ProcessRowView: View {
         }
         .buttonStyle(.plain)
         .opacity(item.isRunning ? 1 : 0.58)
-        .help(isSystemProcess
-              ? "Protected system process · monitor only"
-              : "\(item.stateText) · Current \(item.cpuText) · 1-minute average \(item.averageCPUText)")
+        .help(rowHelp)
     }
 
     @ViewBuilder
@@ -131,6 +129,9 @@ struct ProcessRowView: View {
     }
 
     private var ruleTag: String? {
+        if item.isSoundSourceComponent {
+            return "· audio"
+        }
         if isSystemProcess {
             return "· system"
         }
@@ -144,6 +145,16 @@ struct ProcessRowView: View {
         case .limit: "< \(Int(rule.limitPercent))%"
         case .pause: "· paused"
         }
+    }
+
+    private var rowHelp: String {
+        if item.isSoundSourceComponent {
+            return "SoundSource audio component · monitor only"
+        }
+        if isSystemProcess {
+            return "Protected system process · monitor only"
+        }
+        return "\(item.stateText) · Current \(item.cpuText) · 1-minute average \(item.averageCPUText)"
     }
 
     private var ruleTagColor: Color {

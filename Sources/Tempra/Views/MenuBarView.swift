@@ -770,83 +770,87 @@ struct MenuBarView: View {
             }
         }
 
-        if item.canQuitProcess {
-            Button(item.canControlApplication ? "Force Quit" : "Force Quit Process") {
-                performApplicationCommand(
-                    .quit,
-                    item: item,
-                    anchorKey: anchorKey
-                )
+        if item.canManageProcess {
+            if item.canQuitProcess {
+                Button(item.canControlApplication ? "Force Quit" : "Force Quit Process") {
+                    performApplicationCommand(
+                        .quit,
+                        item: item,
+                        anchorKey: anchorKey
+                    )
+                }
             }
-        }
 
-        Divider()
+            Divider()
 
-        if item.canLimitCPU {
-            Button("Limit to 50%") {
-                store.applyQuickRule(
+            if item.canLimitCPU {
+                Button("Limit to 50%") {
+                    store.applyQuickRule(
+                        bundleIdentifier: item.bundleIdentifier,
+                        displayName: item.name,
+                        applicationURL: item.applicationURL,
+                        action: .limit,
+                        limitPercent: 50,
+                        delaySeconds: 0
+                    )
+                    requestPrivilegedControlIfNeeded(for: item)
+                }
+            }
+
+            Button(item.rule?.runOnEfficiencyCores == true
+                   ? "Stop Using Power-Saving Cores"
+                   : "Run on Power-Saving Cores") {
+                store.setEfficiencyCoreScheduling(
                     bundleIdentifier: item.bundleIdentifier,
                     displayName: item.name,
                     applicationURL: item.applicationURL,
-                    action: .limit,
-                    limitPercent: 50,
+                    enabled: item.rule?.runOnEfficiencyCores != true,
                     delaySeconds: 0
                 )
                 requestPrivilegedControlIfNeeded(for: item)
             }
-        }
 
-        Button(item.rule?.runOnEfficiencyCores == true
-               ? "Stop Using Power-Saving Cores"
-               : "Run on Power-Saving Cores") {
-            store.setEfficiencyCoreScheduling(
-                bundleIdentifier: item.bundleIdentifier,
-                displayName: item.name,
-                applicationURL: item.applicationURL,
-                enabled: item.rule?.runOnEfficiencyCores != true,
-                delaySeconds: 0
-            )
-            requestPrivilegedControlIfNeeded(for: item)
-        }
-
-        Button("Pause after 30 seconds") {
-            store.applyQuickRule(
-                bundleIdentifier: item.bundleIdentifier,
-                displayName: item.name,
-                applicationURL: item.applicationURL,
-                action: .pause,
-                delaySeconds: 30
-            )
-            requestPrivilegedControlIfNeeded(for: item)
-        }
-
-        if let rule = item.rule {
-            Divider()
-
-            Button(rule.isEnabled ? "Disable Rule" : "Enable Rule") {
-                store.setRuleEnabled(
+            Button("Pause after 30 seconds") {
+                store.applyQuickRule(
                     bundleIdentifier: item.bundleIdentifier,
-                    enabled: !rule.isEnabled
+                    displayName: item.name,
+                    applicationURL: item.applicationURL,
+                    action: .pause,
+                    delaySeconds: 30
                 )
+                requestPrivilegedControlIfNeeded(for: item)
             }
 
-            if store.suspensionUntil(for: item.bundleIdentifier) != nil {
-                Button("End Snooze") {
-                    store.endSnooze(bundleIdentifier: item.bundleIdentifier)
-                }
-            } else {
-                Button("Snooze for 15 Minutes") {
-                    store.snooze(bundleIdentifier: item.bundleIdentifier, for: 15 * 60)
-                }
-                Button("Snooze for 1 Hour") {
-                    store.snooze(bundleIdentifier: item.bundleIdentifier, for: 60 * 60)
-                }
-            }
+            if let rule = item.rule {
+                Divider()
 
-            Divider()
-            Button("Remove Rule", role: .destructive) {
-                store.removeRule(bundleIdentifier: item.bundleIdentifier)
+                Button(rule.isEnabled ? "Disable Rule" : "Enable Rule") {
+                    store.setRuleEnabled(
+                        bundleIdentifier: item.bundleIdentifier,
+                        enabled: !rule.isEnabled
+                    )
+                }
+
+                if store.suspensionUntil(for: item.bundleIdentifier) != nil {
+                    Button("End Snooze") {
+                        store.endSnooze(bundleIdentifier: item.bundleIdentifier)
+                    }
+                } else {
+                    Button("Snooze for 15 Minutes") {
+                        store.snooze(bundleIdentifier: item.bundleIdentifier, for: 15 * 60)
+                    }
+                    Button("Snooze for 1 Hour") {
+                        store.snooze(bundleIdentifier: item.bundleIdentifier, for: 60 * 60)
+                    }
+                }
+
+                Divider()
+                Button("Remove Rule", role: .destructive) {
+                    store.removeRule(bundleIdentifier: item.bundleIdentifier)
+                }
             }
+        } else {
+            Text("Protected for SoundSource compatibility")
         }
     }
 
@@ -946,6 +950,10 @@ struct MenuBarView: View {
     }
 
     private func select(item: AppDisplayItem, anchorKey: String) {
+        if !item.canManageProcess {
+            showActivity(item: item, anchorKey: anchorKey)
+            return
+        }
         presentation.select(
             bundleIdentifier: item.bundleIdentifier,
             anchorKey: anchorKey,

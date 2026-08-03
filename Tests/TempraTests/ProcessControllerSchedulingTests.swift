@@ -17,6 +17,7 @@ struct ProcessControllerSchedulingTests {
         isHidden: Bool = true,
         isPlayingAudio: Bool = false,
         isProtectedByMenuBarOverlay: Bool = false,
+        isProtectedAudioInfrastructure: Bool = false,
         windowVisibility: AppWindowVisibility = .hiddenOrMinimized
     ) -> ProcessControlTarget {
         ProcessControlTarget(
@@ -29,7 +30,8 @@ struct ProcessControllerSchedulingTests {
             isHidden: isHidden,
             isPlayingAudio: isPlayingAudio,
             windowVisibility: windowVisibility,
-            isProtectedByMenuBarOverlay: isProtectedByMenuBarOverlay
+            isProtectedByMenuBarOverlay: isProtectedByMenuBarOverlay,
+            isProtectedAudioInfrastructure: isProtectedAudioInfrastructure
         )
     }
 
@@ -70,6 +72,50 @@ struct ProcessControllerSchedulingTests {
         #expect(processSystem.didAttemptToResume(controlledProcess))
         #expect(terminatedIdentifier == identifier)
         #expect(await controller.currentSnapshot().statuses[identifier] == .waiting)
+        await controller.shutdown()
+    }
+
+    @Test("SoundSource rules and direct commands cannot stop audio infrastructure")
+    func soundSourceControlIsBlocked() async {
+        let soundSourceIdentifier = "com.rogueamoeba.FutureSoundSourceHost"
+        let controlledProcess = process(101)
+        let processSystem = RecordingProcessSystem()
+        var terminationCallCount = 0
+        let controller = ProcessController(
+            system: processSystem,
+            crashWatchdog: RecordingProcessCrashWatchdog(),
+            terminateApplication: { _ in
+                terminationCallCount += 1
+                return true
+            }
+        )
+        let rule = AppRule(
+            bundleIdentifier: soundSourceIdentifier,
+            displayName: "SoundSource",
+            action: .pause,
+            quitAfterMinutes: 1
+        )
+
+        _ = await controller.update(
+            targets: [target(
+                identifier: soundSourceIdentifier,
+                processIdentities: [controlledProcess],
+                launchedAt: oldLaunchDate,
+                isProtectedAudioInfrastructure: true
+            )],
+            rules: [soundSourceIdentifier: rule],
+            isEnabled: true,
+            revision: 1
+        )
+        let outcome = await controller.performApplicationCommand(
+            .quit,
+            bundleIdentifier: soundSourceIdentifier
+        )
+
+        #expect(outcome == .failed(.compatibilityProtected))
+        #expect(!processSystem.didAttemptToStop(controlledProcess))
+        #expect(!processSystem.didAttemptToTerminate(controlledProcess))
+        #expect(terminationCallCount == 0)
         await controller.shutdown()
     }
 
@@ -220,6 +266,117 @@ struct ProcessControllerSchedulingTests {
         )
 
         #expect(snapshot.scheduledTickInterval == nil)
+        await controller.shutdown()
+    }
+
+    @Test("A newer revision prevents a suspended pause from stopping the process")
+    func newerRevisionPreventsSuspendedPause() async {
+        let controlledProcess = process(103)
+        let system = RecordingProcessSystem()
+        let watchdog = SuspendedProcessCrashWatchdog()
+        let controller = ProcessController(
+            system: system,
+            crashWatchdog: watchdog,
+            frontmostProvider: { nil }
+        )
+        let rule = AppRule(
+            bundleIdentifier: identifier,
+            displayName: "Example",
+            action: .pause
+        )
+        let controlledTarget = target(
+            processIdentities: [controlledProcess],
+            launchedAt: oldLaunchDate
+        )
+
+        let staleUpdate = Task {
+            await controller.update(
+                targets: [controlledTarget],
+                rules: [identifier: rule],
+                isEnabled: true,
+                revision: 1
+            )
+        }
+        #expect(await eventuallyAsync { await watchdog.preparationStarted })
+
+        let currentUpdate = Task {
+            await controller.update(
+                targets: [controlledTarget],
+                rules: [:],
+                isEnabled: true,
+                revision: 2
+            )
+        }
+        #expect(await eventuallyAsync {
+            await controller.currentSnapshot().revision == 2
+        })
+
+        await watchdog.releasePreparation()
+        _ = await staleUpdate.value
+        let current = await currentUpdate.value
+
+        #expect(current.revision == 2)
+        #expect(current.statuses[identifier] == nil)
+        #expect(!system.didAttemptToStop(controlledProcess))
+        await controller.shutdown()
+    }
+
+    @Test("A newer revision restores a stop that completes after rule removal")
+    func newerRevisionRestoresLateStop() async {
+        let controlledProcess = process(104)
+        let manualClock = ManualProcessControlClock()
+        let system = SuspendedStopProcessSystem()
+        let watchdog = RecordingProcessCrashWatchdog()
+        let controller = ProcessController(
+            system: system,
+            crashWatchdog: watchdog,
+            frontmostProvider: { nil },
+            controlInterval: 0.5,
+            minimumRunDuration: 0.005,
+            clock: manualClock.clock
+        )
+        let rule = AppRule(
+            bundleIdentifier: identifier,
+            displayName: "Example",
+            action: .limit,
+            limitPercent: 10
+        )
+        let controlledTarget = target(
+            processIdentities: [controlledProcess],
+            launchedAt: oldLaunchDate,
+            cpuPercent: 100
+        )
+
+        _ = await controller.update(
+            targets: [controlledTarget],
+            rules: [identifier: rule],
+            isEnabled: true,
+            revision: 1
+        )
+        #expect(await eventually { manualClock.sleepRegistrationCount == 2 })
+        manualClock.advance(by: .milliseconds(50))
+        #expect(await eventuallyAsync { await system.stopStarted })
+
+        let currentUpdate = Task {
+            await controller.update(
+                targets: [controlledTarget],
+                rules: [:],
+                isEnabled: true,
+                revision: 2
+            )
+        }
+        #expect(await eventuallyAsync {
+            await controller.currentSnapshot().revision == 2
+        })
+
+        await system.releaseStop()
+        let current = await currentUpdate.value
+
+        #expect(current.revision == 2)
+        #expect(current.statuses[identifier] == nil)
+        #expect(await system.didResume(controlledProcess))
+        #expect(!(await system.isStopped(controlledProcess)))
+        #expect(!watchdog.isTracking(controlledProcess))
         await controller.shutdown()
     }
 
@@ -960,8 +1117,11 @@ struct ProcessControllerSchedulingTests {
         )
 
         #expect(protected.statuses[identifier] == .audioProtected)
+        #expect(protected.scheduledTickInterval == nil)
+        #expect(manualClock.pendingSleepCount == 0)
         #expect(!system.didAttemptToStop(controlledProcess))
 
+        manualClock.advance(by: .seconds(14))
         let briefGap = await controller.update(
             targets: [target(
                 processIdentities: [controlledProcess],
@@ -974,10 +1134,67 @@ struct ProcessControllerSchedulingTests {
         )
 
         #expect(briefGap.statuses[identifier] == .audioProtected)
+        #expect(briefGap.scheduledTickInterval == 15)
         #expect(!system.didAttemptToStop(controlledProcess))
+        #expect(await eventually { manualClock.pendingSleepCount == 1 })
 
-        manualClock.advance(by: .seconds(20))
-        let paused = await controller.update(
+        manualClock.advance(by: .seconds(14))
+        #expect(!system.didAttemptToStop(controlledProcess))
+        #expect(await controller.currentSnapshot().statuses[identifier] == .audioProtected)
+
+        manualClock.advance(by: .milliseconds(1_001))
+        #expect(manualClock.deadlineWakeCount == 1)
+        #expect(manualClock.pendingSleepCount == 0)
+        #expect(await eventually { system.didAttemptToStop(controlledProcess) })
+        #expect(await eventuallyAsync {
+            await controller.currentSnapshot().statuses[identifier] == .paused
+        })
+        #expect(await eventuallyAsync {
+            guard let interval = await controller.currentSnapshot().scheduledTickInterval else {
+                return false
+            }
+            return interval > 0.9 && interval <= 1
+        })
+        let paused = await controller.currentSnapshot()
+
+        #expect(paused.statuses[identifier] == .paused)
+        #expect((paused.scheduledTickInterval ?? 0) > 0.9)
+        #expect((paused.scheduledTickInterval ?? 2) <= 1)
+        await controller.shutdown()
+    }
+
+    @Test("Frontmost audio protects the first background sample")
+    func frontmostAudioProtectsFirstBackgroundSample() async {
+        let manualClock = ManualProcessControlClock()
+        let system = RecordingProcessSystem()
+        let controlledProcess = process(71)
+        let controller = ProcessController(
+            system: system,
+            crashWatchdog: RecordingProcessCrashWatchdog(),
+            frontmostProvider: { nil },
+            clock: manualClock.clock
+        )
+        let rule = AppRule(
+            bundleIdentifier: identifier,
+            displayName: "Example",
+            action: .pause,
+            protectAudio: true
+        )
+
+        let frontmost = await controller.update(
+            targets: [target(
+                processIdentities: [controlledProcess],
+                launchedAt: oldLaunchDate,
+                isFrontmost: true,
+                isPlayingAudio: true
+            )],
+            rules: [identifier: rule],
+            isEnabled: true,
+            revision: 1
+        )
+        #expect(frontmost.statuses[identifier] == .normal)
+
+        let firstBackgroundSample = await controller.update(
             targets: [target(
                 processIdentities: [controlledProcess],
                 launchedAt: oldLaunchDate,
@@ -985,11 +1202,12 @@ struct ProcessControllerSchedulingTests {
             )],
             rules: [identifier: rule],
             isEnabled: true,
-            revision: 3
+            revision: 2
         )
 
-        #expect(paused.statuses[identifier] == .paused)
-        #expect(system.didAttemptToStop(controlledProcess))
+        #expect(firstBackgroundSample.statuses[identifier] == .audioProtected)
+        #expect(firstBackgroundSample.scheduledTickInterval == 15)
+        #expect(!system.didAttemptToStop(controlledProcess))
         await controller.shutdown()
     }
 
@@ -1389,7 +1607,9 @@ struct ProcessControllerSchedulingTests {
         system.setCPUTimeNanoseconds(400_000_000)
         manualClock.advance(by: .seconds(1))
         #expect(await eventually { system.didAttemptToStop(controlledProcess) })
-        #expect(await controller.currentSnapshot().statuses[identifier] == .limited(20))
+        #expect(await eventuallyAsync {
+            await controller.currentSnapshot().statuses[identifier] == .limited(20)
+        })
         await controller.shutdown()
     }
 
@@ -1458,16 +1678,111 @@ struct ProcessControllerSchedulingTests {
     }
 
     private func eventually(_ condition: @escaping @Sendable () -> Bool) async -> Bool {
-        for _ in 0..<1_000 {
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: .seconds(2))
+        while clock.now < deadline {
             if condition() { return true }
-            await Task.yield()
+            do {
+                try await Task.sleep(for: .milliseconds(1))
+            } catch {
+                return condition()
+            }
         }
         return condition()
+    }
+
+    private func eventuallyAsync(
+        _ condition: @escaping @Sendable () async -> Bool
+    ) async -> Bool {
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: .seconds(2))
+        while clock.now < deadline {
+            if await condition() { return true }
+            do {
+                try await Task.sleep(for: .milliseconds(1))
+            } catch {
+                return await condition()
+            }
+        }
+        return await condition()
     }
 }
 
 private enum RecordingWatchdogError: Error {
     case unavailable
+}
+
+private actor SuspendedProcessCrashWatchdog: ProcessCrashWatchdogControlling {
+    private(set) var preparationStarted = false
+    private var preparationContinuation: CheckedContinuation<Void, Never>?
+
+    func prepareToStop(_ processes: Set<ProcessIdentity>) async throws {
+        preparationStarted = true
+        await withCheckedContinuation { continuation in
+            preparationContinuation = continuation
+        }
+    }
+
+    func synchronize(_ processes: Set<ProcessIdentity>) {}
+    func disarm() {}
+
+    func releasePreparation() {
+        preparationContinuation?.resume()
+        preparationContinuation = nil
+    }
+}
+
+private actor SuspendedStopProcessSystem: ProcessSystemControlling {
+    private(set) var stopStarted = false
+    private var stopContinuation: CheckedContinuation<Void, Never>?
+    private var stoppedProcesses: Set<ProcessIdentity> = []
+    private var resumedProcesses: Set<ProcessIdentity> = []
+
+    func totalCPUTime(for processes: Set<ProcessIdentity>) -> UInt64 {
+        0
+    }
+
+    func stop(_ processes: Set<ProcessIdentity>) async -> ProcessOperationResult {
+        stopStarted = true
+        await withCheckedContinuation { continuation in
+            stopContinuation = continuation
+        }
+        stoppedProcesses.formUnion(processes)
+        return ProcessOperationResult(applied: processes)
+    }
+
+    func resume(_ processes: Set<ProcessIdentity>) -> ProcessOperationResult {
+        stoppedProcesses.subtract(processes)
+        resumedProcesses.formUnion(processes)
+        return ProcessOperationResult(applied: processes)
+    }
+
+    func setBackgroundPriority(
+        _ processes: Set<ProcessIdentity>
+    ) -> ProcessOperationResult {
+        ProcessOperationResult(applied: processes)
+    }
+
+    func restorePriority(_ processes: Set<ProcessIdentity>) -> ProcessOperationResult {
+        ProcessOperationResult(applied: processes)
+    }
+
+    func terminate(_ processes: Set<ProcessIdentity>) -> ProcessOperationResult {
+        ProcessOperationResult(applied: processes)
+    }
+
+    func releaseStop() {
+        stopContinuation?.resume()
+        stopContinuation = nil
+    }
+
+    func didResume(_ process: ProcessIdentity) -> Bool {
+        resumedProcesses.contains(process)
+    }
+
+    func isStopped(_ process: ProcessIdentity) -> Bool {
+        stoppedProcesses.contains(process)
+    }
 }
 
 private final class RecordingProcessCrashWatchdog: ProcessCrashWatchdogControlling,

@@ -39,6 +39,7 @@ final class AppStore: ObservableObject {
     private let monitoringService: any MonitoringServicing
     private let persistenceErrorHandler: PersistenceErrorHandler
     private let historyStore: AppHistoryStore
+    private let suspensionClock: SuspensionExpirationClock
     let iconCache: AppIconCache
     let managementLedger: ManagementLedger
     private lazy var monitoringCoordinator = MonitoringCoordinator(
@@ -54,6 +55,8 @@ final class AppStore: ObservableObject {
     private var persistedRules: [String: AppRule]
     private var persistedPreferences: AppPreferences
     private var persistedSuspensions: [String: RuleSuspension]
+    private var suspensionExpirationTask: Task<Void, Never>?
+    private var suspensionExpirationID: UUID?
 
     convenience init(
         persistenceErrorHandler: @escaping PersistenceErrorHandler
@@ -76,11 +79,15 @@ final class AppStore: ObservableObject {
         startsMonitoring: Bool,
         iconCache: AppIconCache? = nil,
         privilegedHelperManager: PrivilegedHelperManager? = nil,
+        suspensionClock: SuspensionExpirationClock = .continuous,
         persistenceErrorHandler: @escaping PersistenceErrorHandler
     ) throws {
         let loadedEnabled = try persistence.loadEnabled()
         let loadedRules = try persistence.loadRules()
-        let safeLoadedRules = loadedRules.mapValues(SystemProcessRulePolicy.normalized)
+        let safeLoadedRules = loadedRules.compactMapValues { rule -> AppRule? in
+            let normalized = SystemProcessRulePolicy.normalized(rule)
+            return normalized.hasBehavior ? normalized : nil
+        }
         if safeLoadedRules != loadedRules {
             try persistence.saveRules(safeLoadedRules)
         }
@@ -107,6 +114,7 @@ final class AppStore: ObservableObject {
         self.privilegedHelperManager = privilegedHelperManager
         self.persistenceErrorHandler = persistenceErrorHandler
         self.historyStore = historyStore
+        self.suspensionClock = suspensionClock
         self.iconCache = iconCache ?? AppIconCache()
         self.managementLedger = managementLedger
         isEnabled = loadedEnabled
@@ -136,6 +144,7 @@ final class AppStore: ObservableObject {
                 self?.applyManagementState(statuses: statuses, savedCPU: savedCPU)
             }
         )
+        scheduleSuspensionExpiration()
 
         if startsMonitoring {
             workspaceEventMonitor.start { [weak self] in
@@ -154,14 +163,14 @@ final class AppStore: ObservableObject {
         } else if normalized.action == .pause {
             normalized.runOnEfficiencyCores = false
         }
-        normalized = SystemProcessRulePolicy.normalized(normalized)
-        normalized.updatedAt = Date()
         if normalized.applicationURL == nil {
             normalized.applicationURL = apps.first {
                 $0.bundleIdentifier == normalized.bundleIdentifier
             }?.bundleURL
                 ?? NSWorkspace.shared.urlForApplication(withBundleIdentifier: normalized.bundleIdentifier)
         }
+        normalized = SystemProcessRulePolicy.normalized(normalized)
+        normalized.updatedAt = Date()
 
         if !normalized.hasBehavior {
             removeRule(bundleIdentifier: normalized.bundleIdentifier)
@@ -245,6 +254,7 @@ final class AppStore: ObservableObject {
             previousRules: previousRules,
             previousSuspensions: previousSuspensions
         ) else { return }
+        scheduleSuspensionExpiration()
         recordActivity(
             bundleIdentifier: bundleIdentifier,
             kind: .ruleRemoved,
@@ -255,7 +265,7 @@ final class AppStore: ObservableObject {
     }
 
     func snooze(bundleIdentifier: String, for duration: TimeInterval) {
-        let until = Date().addingTimeInterval(duration)
+        let until = suspensionClock.now().addingTimeInterval(duration)
         suspensions[bundleIdentifier] = RuleSuspension(
             bundleIdentifier: bundleIdentifier,
             until: until
@@ -266,12 +276,14 @@ final class AppStore: ObservableObject {
             kind: .snoozed,
             detail: "Until \(until.formatted(date: .omitted, time: .shortened))"
         )
+        scheduleSuspensionExpiration()
         applyRulesToCurrentApps()
     }
 
     func endSnooze(bundleIdentifier: String) {
         guard suspensions.removeValue(forKey: bundleIdentifier) != nil else { return }
         guard persistSuspensions() else { return }
+        scheduleSuspensionExpiration()
         applyRulesToCurrentApps()
     }
 
@@ -280,6 +292,14 @@ final class AppStore: ObservableObject {
         for item: AppDisplayItem
     ) async -> Bool {
         guard !hasBegunShutdown else { return false }
+        guard item.canManageProcess else {
+            setApplicationActionFailure(
+                for: item,
+                message: "Tempra keeps this SoundSource audio component running so audio "
+                    + "routing and effects continue to work."
+            )
+            return false
+        }
         guard item.isRunning else {
             setApplicationActionFailure(
                 for: item,
@@ -593,7 +613,9 @@ final class AppStore: ObservableObject {
 
     func refresh() {
         guard !hasBegunShutdown else { return }
-        purgeExpiredSuspensions()
+        if purgeExpiredSuspensions() {
+            scheduleSuspensionExpiration()
+        }
         monitoringCoordinator.requestEventRefresh(
             includesEssentialSystemProcesses: includesBackgroundAndSystemProcesses
         )
@@ -668,6 +690,9 @@ final class AppStore: ObservableObject {
         guard !hasShutDown else { return .success }
         if !hasBegunShutdown {
             hasBegunShutdown = true
+            suspensionExpirationTask?.cancel()
+            suspensionExpirationTask = nil
+            suspensionExpirationID = nil
             isEnabled = false
             do {
                 try managementLedger.shutdown()
@@ -698,7 +723,9 @@ final class AppStore: ObservableObject {
             isEnabled: isEnabled
         ) { [weak self] processChange in
             guard let self, !hasBegunShutdown else { return }
-            purgeExpiredSuspensions()
+            if purgeExpiredSuspensions() {
+                scheduleSuspensionExpiration()
+            }
             monitoringCoordinator.requestEventRefresh(
                 includesEssentialSystemProcesses: includesBackgroundAndSystemProcesses,
                 processChange: processChange
@@ -766,16 +793,50 @@ final class AppStore: ObservableObject {
         }
     }
 
-    private func purgeExpiredSuspensions() {
-        let expired = suspensions.values.filter { !$0.isActive }.map(\.bundleIdentifier)
-        guard !expired.isEmpty else { return }
+    @discardableResult
+    private func purgeExpiredSuspensions() -> Bool {
+        let now = suspensionClock.now()
+        let expired = suspensions.values.filter { $0.until <= now }.map(\.bundleIdentifier)
+        guard !expired.isEmpty else { return false }
         expired.forEach { suspensions.removeValue(forKey: $0) }
         persistSuspensions()
+        return true
+    }
+
+    private func scheduleSuspensionExpiration() {
+        suspensionExpirationTask?.cancel()
+        suspensionExpirationTask = nil
+        suspensionExpirationID = nil
+
+        let now = suspensionClock.now()
+        guard !hasBegunShutdown,
+              let deadline = suspensions.values.lazy.map(\.until).filter({ $0 > now }).min() else {
+            return
+        }
+
+        let expirationID = UUID()
+        suspensionExpirationID = expirationID
+        suspensionExpirationTask = Task { @MainActor [weak self, suspensionClock] in
+            let reachedDeadline = await suspensionClock.sleepUntil(deadline)
+            guard reachedDeadline, !Task.isCancelled else { return }
+            self?.handleSuspensionExpiration(id: expirationID)
+        }
+    }
+
+    private func handleSuspensionExpiration(id: UUID) {
+        guard suspensionExpirationID == id, !hasBegunShutdown else { return }
+        suspensionExpirationTask = nil
+        suspensionExpirationID = nil
+        let didExpire = purgeExpiredSuspensions()
+        if didExpire {
+            applyRulesToCurrentApps()
+        }
+        scheduleSuspensionExpiration()
     }
 
     private func handleControllerEvent(_ event: ProcessControllerEvent) {
         switch event {
-        case .statusTransition(let identifier, let previous, let current):
+        case .statusTransition(_, let identifier, let previous, let current):
             let displayName = apps.first { $0.bundleIdentifier == identifier }?.name
                 ?? rules[identifier]?.displayName
                 ?? identifier
@@ -800,7 +861,7 @@ final class AppStore: ObservableObject {
                     current: current
                 )
             }
-        case .activity(let identifier, let kind, let detail):
+        case .activity(_, let identifier, let kind, let detail):
             recordActivity(bundleIdentifier: identifier, kind: kind, detail: detail)
         case .pauseWakeMonitoringChanged:
             break
@@ -976,6 +1037,9 @@ final class AppStore: ObservableObject {
         switch failure {
         case .notRunning:
             return "\(appName) is no longer running."
+        case .compatibilityProtected:
+            return "Tempra keeps this SoundSource audio component running so audio "
+                + "routing and effects continue to work."
         case .restorationFailed:
             return "Tempra could not safely resume every process for \(appName), "
                 + "so it did not send the command. Try again."

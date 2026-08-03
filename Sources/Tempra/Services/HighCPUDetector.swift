@@ -31,7 +31,13 @@ struct HighCPUDetector {
         pendingAlert: HighCPUAlert?,
         now: Date = Date()
     ) -> HighCPUDetectionResult {
-        let alertableApps = apps.filter { !$0.isSystemProcess }
+        let alertableApps = apps.filter {
+            !$0.isSystemProcess
+                && !SoundSourceCompatibilityPolicy.isProtected(
+                    bundleIdentifier: $0.bundleIdentifier,
+                    applicationURL: $0.bundleURL
+                )
+        }
         let activeIdentifiers = Set(alertableApps.map(\.bundleIdentifier))
         var attentionIdentifiers = Set(
             trackers.compactMap { $0.value.isAttention ? $0.key : nil }

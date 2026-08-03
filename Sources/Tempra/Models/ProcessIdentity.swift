@@ -28,6 +28,7 @@ struct ProcessControlTarget: Sendable {
     let isPlayingAudio: Bool
     var windowVisibility: AppWindowVisibility
     let isProtectedByMenuBarOverlay: Bool
+    let isProtectedAudioInfrastructure: Bool
 
     init(
         bundleIdentifier: String,
@@ -39,7 +40,8 @@ struct ProcessControlTarget: Sendable {
         isHidden: Bool,
         isPlayingAudio: Bool,
         windowVisibility: AppWindowVisibility = .unknown,
-        isProtectedByMenuBarOverlay: Bool = false
+        isProtectedByMenuBarOverlay: Bool = false,
+        isProtectedAudioInfrastructure: Bool = false
     ) {
         self.bundleIdentifier = bundleIdentifier
         self.processIdentities = processIdentities
@@ -51,6 +53,7 @@ struct ProcessControlTarget: Sendable {
         self.isPlayingAudio = isPlayingAudio
         self.windowVisibility = windowVisibility
         self.isProtectedByMenuBarOverlay = isProtectedByMenuBarOverlay
+        self.isProtectedAudioInfrastructure = isProtectedAudioInfrastructure
     }
 }
 
@@ -63,10 +66,11 @@ struct ProcessControlSnapshot: Sendable {
 
 enum ProcessControllerEvent: Sendable {
     case statusTransition(
+        revision: UInt64,
         bundleIdentifier: String,
         previous: ManagementStatus,
         current: ManagementStatus
     )
-    case activity(bundleIdentifier: String, kind: ActivityKind, detail: String)
-    case pauseWakeMonitoringChanged(Bool)
+    case activity(revision: UInt64, bundleIdentifier: String, kind: ActivityKind, detail: String)
+    case pauseWakeMonitoringChanged(revision: UInt64, enabled: Bool)
 }

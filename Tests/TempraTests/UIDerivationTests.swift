@@ -422,6 +422,18 @@ struct UIDerivationTests {
             name: "WindowServer",
             isSystemProcess: true
         )
+        let soundSource = item(
+            identifier: SoundSourceCompatibilityPolicy.primaryBundleIdentifier,
+            name: "SoundSource"
+        )
+        let futureSoundSourceHelper = item(
+            identifier: "com.rogueamoeba.FutureSoundSourceHost",
+            name: "SoundSource Helper",
+            applicationURL: URL(
+                fileURLWithPath: "/Applications/SoundSource.app/Contents/XPCServices/"
+                    + "FutureSoundSourceHost.xpc"
+            )
+        )
 
         #expect(ordinary.canControlApplication)
         #expect(standalone.isStandaloneProcess)
@@ -430,6 +442,13 @@ struct UIDerivationTests {
         #expect(!stopped.canControlApplication)
         #expect(!windowServer.canLimitCPU)
         #expect(windowServer.canQuitProcess)
+        #expect(soundSource.isSoundSourceComponent)
+        #expect(!soundSource.canManageProcess)
+        #expect(!soundSource.canControlApplication)
+        #expect(!soundSource.canQuitProcess)
+        #expect(!soundSource.canLimitCPU)
+        #expect(futureSoundSourceHelper.isSoundSourceComponent)
+        #expect(!futureSoundSourceHelper.canManageProcess)
         #expect(ordinary.residentMemoryText == "—")
     }
 

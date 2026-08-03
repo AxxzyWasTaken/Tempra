@@ -221,6 +221,7 @@ struct ActivityInspectorView: View {
     }
 
     private var applicationTypeText: String {
+        if item.isSoundSourceComponent { return "SoundSource audio component" }
         if item.isSystemProcess { return "System process" }
         if item.isStandaloneProcess { return "Background process" }
         if item.isService { return "Background service" }

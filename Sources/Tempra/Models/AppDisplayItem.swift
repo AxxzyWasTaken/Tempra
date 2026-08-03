@@ -155,16 +155,29 @@ struct AppDisplayItem: Identifiable {
 
     var canControlApplication: Bool {
         isRunning
+            && canManageProcess
             && !requiresPrivilegedControl
             && !BackgroundProcessPolicy.isBackgroundIdentifier(bundleIdentifier)
     }
 
     var canQuitProcess: Bool {
-        isRunning
+        isRunning && canManageProcess
     }
 
     var canLimitCPU: Bool {
-        !SystemProcessRulePolicy.isWindowServer(bundleIdentifier: bundleIdentifier)
+        canManageProcess
+            && !SystemProcessRulePolicy.isWindowServer(bundleIdentifier: bundleIdentifier)
+    }
+
+    var canManageProcess: Bool {
+        !isSoundSourceComponent
+    }
+
+    var isSoundSourceComponent: Bool {
+        SoundSourceCompatibilityPolicy.isProtected(
+            bundleIdentifier: bundleIdentifier,
+            applicationURL: applicationURL
+        )
     }
 
     var isStandaloneProcess: Bool {

@@ -70,6 +70,124 @@ struct BackgroundProcessPolicyTests {
         ))
     }
 
+    @Test("SoundSource audio infrastructure is compatibility protected")
+    func soundSourceCompatibility() {
+        let protectedBundleIdentifiers = [
+            "com.rogueamoeba.soundsource",
+            "com.rogueamoeba.aceagent",
+            "com.rogueamoeba.arkaudiod"
+        ]
+        for identifier in protectedBundleIdentifiers {
+            #expect(SoundSourceCompatibilityPolicy.isProtected(
+                bundleIdentifier: identifier
+            ))
+        }
+
+        let bundledHelperIdentifiers = [
+            "com.rogueamoeba.APERoutePicker",
+            "com.rogueamoeba.APERouteService",
+            "com.rogueamoeba.RemoteAUHost",
+            "com.rogueamoeba.RemoteAUHost.x86",
+            "com.rogueamoeba.RemoteAUHostLauncher",
+            "com.rogueamoeba.RemoteAUHostLauncher.x86"
+        ]
+        for identifier in bundledHelperIdentifiers {
+            #expect(SoundSourceCompatibilityPolicy.isProtected(
+                bundleIdentifier: identifier,
+                applicationURL: URL(
+                    fileURLWithPath: "/Applications/SoundSource.app/Contents/XPCServices/"
+                        + "\(identifier).xpc"
+                )
+            ))
+        }
+
+        let arkaudiodPath = "/Library/Audio/Plug-Ins/HAL/ARK.driver/Contents/Resources/"
+            + "Audio Routing Kit (ARK).app/Contents/MacOS/arkaudiod"
+        let backgroundIdentifier = BackgroundProcessPolicy.userOwnedIdentifier(
+            command: arkaudiodPath,
+            pid: 100
+        )
+        #expect(SoundSourceCompatibilityPolicy.isProtected(
+            bundleIdentifier: backgroundIdentifier
+        ))
+        #expect(SoundSourceCompatibilityPolicy.isProtectedExecutable("arkaudiod"))
+        #expect(SoundSourceCompatibilityPolicy.isProtectedExecutable("aceagent"))
+        #expect(SoundSourceCompatibilityPolicy.isProtected(
+            bundleIdentifier: "com.rogueamoeba.FutureSoundSourceHost",
+            applicationURL: URL(
+                fileURLWithPath: "/Applications/SoundSource.app/Contents/XPCServices/"
+                    + "FutureSoundSourceHost.xpc"
+            )
+        ))
+        #expect(!SoundSourceCompatibilityPolicy.isProtected(
+            bundleIdentifier: "com.rogueamoeba.audiohijack"
+        ))
+        #expect(!SoundSourceCompatibilityPolicy.isProtected(
+            bundleIdentifier: "com.rogueamoeba.audiohijack",
+            applicationURL: URL(fileURLWithPath: "/Applications/Audio Hijack.app")
+        ))
+        #expect(!SoundSourceCompatibilityPolicy.isProtected(
+            bundleIdentifier: "com.rogueamoeba.RemoteAUHost",
+            applicationURL: URL(
+                fileURLWithPath: "/Applications/Audio Hijack.app/Contents/XPCServices/"
+                    + "RemoteAUHost.xpc"
+            )
+        ))
+    }
+
+    @Test("SoundSource rules normalize to monitor-only behavior")
+    func soundSourceRuleNormalization() {
+        let normalized = SystemProcessRulePolicy.normalized(AppRule(
+            bundleIdentifier: SoundSourceCompatibilityPolicy.primaryBundleIdentifier,
+            displayName: "SoundSource",
+            action: .limit,
+            runOnEfficiencyCores: true,
+            hideAfterMinutes: 1,
+            quitAfterMinutes: 2
+        ))
+
+        #expect(normalized.action == .none)
+        #expect(!normalized.runOnEfficiencyCores)
+        #expect(normalized.hideAfterMinutes == nil)
+        #expect(normalized.quitAfterMinutes == nil)
+        #expect(!normalized.hasBehavior)
+    }
+
+    @Test("SoundSource components do not offer incompatible high-CPU actions")
+    func soundSourceHighCPUDetection() {
+        let identifier = SoundSourceCompatibilityPolicy.primaryBundleIdentifier
+        let app = ManagedApp(
+            bundleIdentifier: identifier,
+            name: "SoundSource",
+            bundleURL: URL(fileURLWithPath: "/Applications/SoundSource.app"),
+            processIdentifiers: [100],
+            cpuPercent: 100,
+            isFrontmost: false,
+            isHidden: false,
+            isPlayingAudio: false,
+            isSystemProcess: false,
+            status: .normal
+        )
+        var preferences = AppPreferences()
+        preferences.continuousMonitoringEnabled = true
+        preferences.highCPUAlertsEnabled = true
+        preferences.highCPUThreshold = 25
+        preferences.highCPUDuration = 0
+        var detector = HighCPUDetector()
+
+        let result = detector.evaluate(
+            apps: [app],
+            preferences: preferences,
+            suspendedIdentifiers: [],
+            pendingAlert: nil,
+            now: Date(timeIntervalSince1970: 1_000)
+        )
+
+        #expect(result.attentionIdentifiers.isEmpty)
+        #expect(result.pendingAlert == nil)
+        #expect(result.events.isEmpty)
+    }
+
     @Test("Background identities are stable and monitor-only")
     func backgroundIdentity() {
         let first = BackgroundProcessPolicy.identifier(command: "/usr/libexec/logd", pid: 10)

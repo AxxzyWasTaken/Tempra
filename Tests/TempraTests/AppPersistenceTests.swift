@@ -110,6 +110,48 @@ struct AppPersistenceTests {
         }
     }
 
+    @Test("Saved SoundSource rules are removed and cannot be recreated")
+    func soundSourceRuleMigration() throws {
+        try withDefaults { defaults in
+            let persistence = AppPersistence(defaults: defaults)
+            let identifier = SoundSourceCompatibilityPolicy.primaryBundleIdentifier
+            try persistence.saveRules([identifier: AppRule(
+                bundleIdentifier: identifier,
+                displayName: "SoundSource",
+                action: .pause,
+                hideAfterMinutes: 1,
+                quitAfterMinutes: 2
+            )])
+
+            let store = try AppStore(
+                persistence: persistence,
+                managementCoordinator: ProcessManagementCoordinator(),
+                monitoringService: MonitoringService(),
+                launchAtLoginController: TestLaunchAtLoginController(),
+                startsMonitoring: false,
+                persistenceErrorHandler: { _ in }
+            )
+
+            #expect(store.rules[identifier] == nil)
+            #expect(try persistence.loadRules()[identifier] == nil)
+
+            store.save(AppRule(
+                bundleIdentifier: "com.rogueamoeba.FutureSoundSourceHost",
+                displayName: "SoundSource Helper",
+                action: .limit,
+                limitPercent: 20,
+                applicationURL: URL(
+                    fileURLWithPath: "/Applications/SoundSource.app/Contents/XPCServices/"
+                        + "FutureSoundSourceHost.xpc"
+                )
+            ))
+            #expect(store.rules[identifier] == nil)
+            #expect(try persistence.loadRules()[identifier] == nil)
+            #expect(store.rules["com.rogueamoeba.FutureSoundSourceHost"] == nil)
+            #expect(try persistence.loadRules()["com.rogueamoeba.FutureSoundSourceHost"] == nil)
+        }
+    }
+
     @Test("Menu-bar system samples record history without application data")
     func menuBarSamplesRecordLightweightHistory() throws {
         try withDefaults { defaults in

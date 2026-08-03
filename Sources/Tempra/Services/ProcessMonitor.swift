@@ -99,6 +99,17 @@ enum BackgroundProcessPolicy {
             || isUserOwnedIdentifier(identifier)
     }
 
+    static func command(from identifier: String) -> String? {
+        let commandPrefixes = [
+            identifierPrefix + "command:",
+            userOwnedIdentifierPrefix + "command:"
+        ]
+        guard let prefix = commandPrefixes.first(where: identifier.hasPrefix) else {
+            return nil
+        }
+        return String(identifier.dropFirst(prefix.count))
+    }
+
     private static func identifier(command: String, pid: pid_t, prefix: String) -> String {
         let identity = command.isEmpty ? "pid:\(pid)" : "command:\(command)"
         return prefix + identity

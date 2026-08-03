@@ -45,6 +45,44 @@ enum RuleAction: String, Codable, CaseIterable, Identifiable, Sendable {
     }
 }
 
+enum SoundSourceCompatibilityPolicy {
+    static let primaryBundleIdentifier = "com.rogueamoeba.soundsource"
+
+    private static let protectedBundleIdentifiers: Set<String> = [
+        primaryBundleIdentifier,
+        "com.rogueamoeba.aceagent",
+        "com.rogueamoeba.arkaudiod",
+    ]
+    private static let protectedExecutableNames: Set<String> = [
+        "aceagent",
+        "arkaudiod"
+    ]
+
+    static func isProtected(
+        bundleIdentifier: String,
+        applicationURL: URL? = nil
+    ) -> Bool {
+        let normalizedIdentifier = bundleIdentifier.lowercased()
+        if protectedBundleIdentifiers.contains(normalizedIdentifier) {
+            return true
+        }
+        if let command = BackgroundProcessPolicy.command(from: bundleIdentifier),
+           isProtectedExecutable(command) {
+            return true
+        }
+        guard let applicationURL else { return false }
+        return applicationURL.standardizedFileURL.pathComponents.contains { component in
+            component.caseInsensitiveCompare("SoundSource.app") == .orderedSame
+        }
+    }
+
+    static func isProtectedExecutable(_ command: String) -> Bool {
+        protectedExecutableNames.contains(
+            URL(fileURLWithPath: command).lastPathComponent.lowercased()
+        )
+    }
+}
+
 enum SystemProcessRulePolicy {
     private static let windowServerBundleIdentifier = "com.apple.WindowServer"
     private static let backgroundCommandPrefix = "tempra.background:command:"
@@ -60,6 +98,18 @@ enum SystemProcessRulePolicy {
     }
 
     static func normalized(_ rule: AppRule) -> AppRule {
+        if SoundSourceCompatibilityPolicy.isProtected(
+            bundleIdentifier: rule.bundleIdentifier,
+            applicationURL: rule.applicationURL
+        ) {
+            var normalized = rule
+            normalized.action = .none
+            normalized.runOnEfficiencyCores = false
+            normalized.hideAfterMinutes = nil
+            normalized.quitAfterMinutes = nil
+            return normalized
+        }
+
         guard isWindowServer(bundleIdentifier: rule.bundleIdentifier),
               rule.action == .limit else {
             return rule
