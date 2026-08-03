@@ -931,6 +931,51 @@ struct ProcessControllerSchedulingTests {
         await controller.shutdown()
     }
 
+    @Test("Audio protection delays pause until playback stops")
+    func audioProtectionDelaysPause() async {
+        let system = RecordingProcessSystem()
+        let controlledProcess = process(70)
+        let controller = ProcessController(
+            system: system,
+            crashWatchdog: RecordingProcessCrashWatchdog()
+        )
+        let rule = AppRule(
+            bundleIdentifier: identifier,
+            displayName: "Example",
+            action: .pause,
+            protectAudio: true
+        )
+
+        let protected = await controller.update(
+            targets: [target(
+                processIdentities: [controlledProcess],
+                launchedAt: oldLaunchDate,
+                isPlayingAudio: true
+            )],
+            rules: [identifier: rule],
+            isEnabled: true,
+            revision: 1
+        )
+
+        #expect(protected.statuses[identifier] == .audioProtected)
+        #expect(!system.didAttemptToStop(controlledProcess))
+
+        let paused = await controller.update(
+            targets: [target(
+                processIdentities: [controlledProcess],
+                launchedAt: oldLaunchDate,
+                isPlayingAudio: false
+            )],
+            rules: [identifier: rule],
+            isEnabled: true,
+            revision: 2
+        )
+
+        #expect(paused.statuses[identifier] == .paused)
+        #expect(system.didAttemptToStop(controlledProcess))
+        await controller.shutdown()
+    }
+
     @Test("Shutdown restores a process stopped by the deadline scheduler")
     func shutdownRestoresStoppedProcess() async {
         let manualClock = ManualProcessControlClock()

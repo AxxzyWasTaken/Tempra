@@ -659,6 +659,17 @@ final class ProcessMonitor {
            !cachedBackgroundSample.isEmpty,
            now - backgroundSampleTime < processTableRefreshInterval {
             didRefreshLastSample = false
+            if refreshesAudioActivity {
+                let playingAudioProcessIdentifiers = audioProcessIdentifiers()
+                cachedAudioProcessIdentifiers = playingAudioProcessIdentifiers
+                cachedBackgroundSample = cachedBackgroundSample.map { app in
+                    var updated = app
+                    updated.isPlayingAudio = app.processIdentifiers.contains(
+                        where: playingAudioProcessIdentifiers.contains
+                    )
+                    return updated
+                }
+            }
             cachedBackgroundSample = applyingWindowState(
                 to: cachedBackgroundSample,
                 inventory: inventory

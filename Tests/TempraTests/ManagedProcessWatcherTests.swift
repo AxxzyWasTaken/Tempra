@@ -206,6 +206,30 @@ struct ManagedProcessWatcherTests {
         await monitor.stop(revision: 3)
     }
 
+    @Test("Retained audio listeners use the current watch revision")
+    func retainedAudioListenerRemainsActive() async throws {
+        let backend = RecordingAudioBackend(processObjects: [10: 110, 20: 120])
+        let monitor = AudioActivityMonitor(backend: backend)
+        var activityCount = 0
+
+        await monitor.watch(
+            revision: 1,
+            processIdentifiers: [10],
+            onActivityChange: { activityCount += 1 }
+        )
+        let retainedCallback = try #require(backend.callback(for: .runningOutput(110)))
+
+        await monitor.watch(
+            revision: 2,
+            processIdentifiers: [10, 20],
+            onActivityChange: { activityCount += 1 }
+        )
+        retainedCallback()
+
+        #expect(await eventually { activityCount == 1 })
+        await monitor.stop(revision: 3)
+    }
+
     private func eventually(
         timeout: Duration = .milliseconds(500),
         _ condition: @escaping @MainActor @Sendable () async -> Bool

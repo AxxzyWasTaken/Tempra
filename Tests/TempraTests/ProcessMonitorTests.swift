@@ -584,6 +584,60 @@ struct ProcessMonitorTests {
         #expect(audioProbe.readCount == 2)
     }
 
+    @Test("Cached system-process samples still refresh audio activity")
+    @MainActor
+    func cachedSystemProcessSampleRefreshesAudioActivity() async throws {
+        let identity = ProcessIdentity(pid: 100, startTimeMicroseconds: 1_000_000)
+        let reader = StubProcessSnapshotReader(
+            snapshots: [100: snapshot(identity)],
+            paths: [100: appExecutable("Example")]
+        )
+        let clock = StubUptime(value: 1)
+        let audioProbe = StubAudioProcessProbe()
+        let monitor = ProcessMonitor(
+            processReader: reader,
+            currentUserID: 501,
+            uptime: { clock.value },
+            audioProcessIdentifiers: { audioProbe.read() },
+            windowSnapshot: { nil },
+            processTableReader: {
+                (
+                    entries: [ProcessTableEntry(
+                        pid: 100,
+                        parentPID: 1,
+                        userID: 501,
+                        cpuPercent: 0,
+                        command: "/Applications/Example.app/Contents/MacOS/Example"
+                    )],
+                    samplerPID: 999
+                )
+            }
+        )
+        let appInventory = inventory(app("Example", pid: 100))
+
+        _ = await monitor.sample(
+            inventory: appInventory,
+            includingEssentialSystemProcesses: true
+        )
+        clock.value = 2
+        _ = await monitor.sample(
+            inventory: appInventory,
+            includingEssentialSystemProcesses: true
+        )
+
+        audioProbe.processIdentifiers = [100]
+        clock.value = 2.1
+        let cachedRefresh = try #require(await monitor.sample(
+            inventory: appInventory,
+            includingEssentialSystemProcesses: true,
+            refreshesAudioActivity: true
+        ).first)
+
+        #expect(cachedRefresh.isPlayingAudio)
+        #expect(audioProbe.readCount == 3)
+        #expect(!monitor.didRefreshLastSample)
+    }
+
     private func makeMonitor(
         reader: StubProcessSnapshotReader,
         clock: StubUptime,
@@ -699,9 +753,10 @@ private final class StubUptime {
 
 private final class StubAudioProcessProbe {
     private(set) var readCount = 0
+    var processIdentifiers: Set<pid_t> = []
 
     func read() -> Set<pid_t> {
         readCount += 1
-        return []
+        return processIdentifiers
     }
 }

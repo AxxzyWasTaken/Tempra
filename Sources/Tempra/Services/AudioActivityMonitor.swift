@@ -208,9 +208,14 @@ final class LiveAudioActivityBackend: AudioActivityBackend, @unchecked Sendable 
 actor AudioActivityMonitor: AudioActivityMonitoring {
     typealias ActivityHandler = @MainActor @Sendable () -> Void
 
+    private struct ProcessListener {
+        let id: UUID
+        let token: AudioListenerToken
+    }
+
     private let backend: any AudioActivityBackend
     private var watchedProcessIdentifiers: Set<pid_t> = []
-    private var processListeners: [AudioObjectID: AudioListenerToken] = [:]
+    private var processListeners: [AudioObjectID: ProcessListener] = [:]
     private var processListListener: AudioListenerToken?
     private var onActivityChange: ActivityHandler?
     private var revision: UInt64 = 0
@@ -248,16 +253,23 @@ actor AudioActivityMonitor: AudioActivityMonitoring {
 
         let desiredObjects = Set(watchedProcessIdentifiers.compactMap(backend.processObject))
         for objectID in Set(processListeners.keys).subtracting(desiredObjects) {
-            guard let token = processListeners.removeValue(forKey: objectID) else { continue }
-            backend.removeListener(token)
+            guard let listener = processListeners.removeValue(forKey: objectID) else { continue }
+            backend.removeListener(listener.token)
         }
 
         for objectID in desiredObjects where processListeners[objectID] == nil {
-            let listenerRevision = revision
+            let listenerID = UUID()
             let token = backend.addListener(for: .runningOutput(objectID)) { [weak self] in
-                Task { await self?.notifyActivityChanged(revision: listenerRevision) }
+                Task {
+                    await self?.notifyActivityChanged(
+                        processObject: objectID,
+                        listenerID: listenerID
+                    )
+                }
             }
-            processListeners[objectID] = token
+            if let token {
+                processListeners[objectID] = ProcessListener(id: listenerID, token: token)
+            }
         }
     }
 
@@ -274,7 +286,7 @@ actor AudioActivityMonitor: AudioActivityMonitoring {
     }
 
     private func removeAllListeners() {
-        processListeners.values.forEach(backend.removeListener)
+        processListeners.values.forEach { backend.removeListener($0.token) }
         processListeners.removeAll()
         if let processListListener {
             backend.removeListener(processListListener)
@@ -284,6 +296,14 @@ actor AudioActivityMonitor: AudioActivityMonitoring {
 
     private func notifyActivityChanged(revision: UInt64) async {
         guard revision == self.revision else { return }
+        await onActivityChange?()
+    }
+
+    private func notifyActivityChanged(
+        processObject: AudioObjectID,
+        listenerID: UUID
+    ) async {
+        guard processListeners[processObject]?.id == listenerID else { return }
         await onActivityChange?()
     }
 }

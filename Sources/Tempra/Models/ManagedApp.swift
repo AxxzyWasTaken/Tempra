@@ -84,7 +84,7 @@ struct ManagedApp: Identifiable, Sendable {
     let residentMemoryBytes: UInt64?
     var isFrontmost: Bool
     var isHidden: Bool
-    let isPlayingAudio: Bool
+    var isPlayingAudio: Bool
     let isService: Bool
     let isBackgroundProcess: Bool
     let isSystemProcess: Bool
