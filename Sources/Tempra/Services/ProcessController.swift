@@ -194,6 +194,7 @@ actor ProcessController {
     private let limitObservationInterval: TimeInterval = 1
     private let minimumDemandSampleDuration: TimeInterval = 0.25
     private let userActivationProbeDuration: TimeInterval = 0.4
+    private let audioProtectionReleaseDelay: TimeInterval = 15
     private let restorationAttempts = 3
     private let visibilityRecheckInterval: TimeInterval = 1
     static let launchGracePeriod: TimeInterval = 60
@@ -207,6 +208,7 @@ actor ProcessController {
     private var limitRuntimes: [String: LimitRuntime] = [:]
     private var pausedBaselineCPU: [String: Double] = [:]
     private var pauseActivationProbeUntil: [String: Date] = [:]
+    private var audioProtectionUntil: [String: ContinuousClock.Instant] = [:]
     private var hideRequested: Set<String> = []
     private var quitRequested: Set<String> = []
     private var statuses: [String: ManagementStatus] = [:]
@@ -297,6 +299,11 @@ actor ProcessController {
         await reconcileControlledProcesses()
 
         let targetIdentifiers = Set(groups.keys)
+        audioProtectionUntil = audioProtectionUntil.filter { identifier, _ in
+            targetIdentifiers.contains(identifier)
+                && self.rules[identifier]?.hasBehavior == true
+                && self.rules[identifier]?.protectAudio == true
+        }
         let identifiersToRestore = trackedIdentifiers.filter {
             !targetIdentifiers.contains($0) || rules[$0]?.hasBehavior != true
         }
@@ -417,6 +424,7 @@ actor ProcessController {
             }
         }
         statuses = statuses.filter { $0.value == .unavailable }
+        audioProtectionUntil.removeAll()
         await updatePauseWakeMonitoring()
         let result = restorationResult()
         if result.succeeded {
@@ -528,7 +536,11 @@ actor ProcessController {
                 continue
             }
 
-            if rule.protectAudio && app.isPlayingAudio {
+            if refreshAudioProtection(
+                identifier: identifier,
+                isPlayingAudio: app.isPlayingAudio,
+                isEnabled: rule.protectAudio
+            ) {
                 if await prepareForDeferredAction(
                     rule: rule,
                     app: app,
@@ -1399,6 +1411,31 @@ actor ProcessController {
         return true
     }
 
+    private func refreshAudioProtection(
+        identifier: String,
+        isPlayingAudio: Bool,
+        isEnabled: Bool
+    ) -> Bool {
+        guard isEnabled else {
+            audioProtectionUntil.removeValue(forKey: identifier)
+            return false
+        }
+
+        let now = clock.now()
+        if isPlayingAudio {
+            audioProtectionUntil[identifier] = now.advanced(
+                by: Self.duration(audioProtectionReleaseDelay)
+            )
+            return true
+        }
+        guard let deadline = audioProtectionUntil[identifier] else { return false }
+        guard now < deadline else {
+            audioProtectionUntil.removeValue(forKey: identifier)
+            return false
+        }
+        return true
+    }
+
     private func resumeStoppedProcesses(for identifier: String, attempts: Int) async -> Bool {
         let unresolved = await performWithRetries(
             stoppedByTempra[identifier, default: []],
@@ -1701,6 +1738,7 @@ actor ProcessController {
 
     private func scheduleNextTick(now: Date = Date()) {
         guard isEnabled else { return }
+        let audioClockNow = clock.now()
         var nextInterval: TimeInterval?
         func include(_ interval: TimeInterval) {
             let normalized = max(0.001, interval)
@@ -1719,6 +1757,10 @@ actor ProcessController {
             }
             if let until = pauseActivationProbeUntil[identifier] {
                 include(until.timeIntervalSince(now))
+            }
+            if let until = audioProtectionUntil[identifier], audioClockNow < until {
+                include(Self.timeInterval(audioClockNow.duration(to: until)))
+                continue
             }
             guard !(rule.protectAudio && app.isPlayingAudio) else { continue }
             let backgroundStart = backgroundSince[identifier] ?? now

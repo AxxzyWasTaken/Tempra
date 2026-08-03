@@ -931,13 +931,15 @@ struct ProcessControllerSchedulingTests {
         await controller.shutdown()
     }
 
-    @Test("Audio protection delays pause until playback stops")
-    func audioProtectionDelaysPause() async {
+    @Test("Audio protection survives a brief playback gap before pausing")
+    func audioProtectionSurvivesBriefPlaybackGap() async {
+        let manualClock = ManualProcessControlClock()
         let system = RecordingProcessSystem()
         let controlledProcess = process(70)
         let controller = ProcessController(
             system: system,
-            crashWatchdog: RecordingProcessCrashWatchdog()
+            crashWatchdog: RecordingProcessCrashWatchdog(),
+            clock: manualClock.clock
         )
         let rule = AppRule(
             bundleIdentifier: identifier,
@@ -960,7 +962,7 @@ struct ProcessControllerSchedulingTests {
         #expect(protected.statuses[identifier] == .audioProtected)
         #expect(!system.didAttemptToStop(controlledProcess))
 
-        let paused = await controller.update(
+        let briefGap = await controller.update(
             targets: [target(
                 processIdentities: [controlledProcess],
                 launchedAt: oldLaunchDate,
@@ -969,6 +971,21 @@ struct ProcessControllerSchedulingTests {
             rules: [identifier: rule],
             isEnabled: true,
             revision: 2
+        )
+
+        #expect(briefGap.statuses[identifier] == .audioProtected)
+        #expect(!system.didAttemptToStop(controlledProcess))
+
+        manualClock.advance(by: .seconds(20))
+        let paused = await controller.update(
+            targets: [target(
+                processIdentities: [controlledProcess],
+                launchedAt: oldLaunchDate,
+                isPlayingAudio: false
+            )],
+            rules: [identifier: rule],
+            isEnabled: true,
+            revision: 3
         )
 
         #expect(paused.statuses[identifier] == .paused)
