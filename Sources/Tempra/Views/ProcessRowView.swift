@@ -21,7 +21,7 @@ private func dotAppearance(
             color: TempraPalette.waiting,
             fill: highlightsFrontmostWaiting && item.isFrontmost ? .full : .half
         )
-    case .limited:
+    case .limited, .limitedWithProtectedProcesses:
         return TempraDotAppearance(color: TempraPalette.slowed, fill: .full)
     case .paused:
         return TempraDotAppearance(color: TempraPalette.stopped, fill: .full)
@@ -29,6 +29,8 @@ private func dotAppearance(
         return TempraDotAppearance(color: TempraPalette.waiting, fill: .full)
     case .audioProtected:
         return TempraDotAppearance(color: .purple, fill: .half)
+    case .networkProtected:
+        return TempraDotAppearance(color: .blue, fill: .half)
     case .snoozed:
         return TempraDotAppearance(color: TempraPalette.accent, fill: .half)
     case .unavailable:

@@ -110,13 +110,18 @@ enum SystemProcessRulePolicy {
             return normalized
         }
 
-        guard isWindowServer(bundleIdentifier: rule.bundleIdentifier),
-              rule.action == .limit else {
-            return rule
+        if isWindowServer(bundleIdentifier: rule.bundleIdentifier),
+           rule.action == .limit {
+            var normalized = rule
+            normalized.action = .none
+            normalized.runOnEfficiencyCores = true
+            return normalized
         }
+
         var normalized = rule
-        normalized.action = .none
-        normalized.runOnEfficiencyCores = true
+        if normalized.action == .limit || normalized.action == .pause {
+            normalized.runOnEfficiencyCores = false
+        }
         return normalized
     }
 }
@@ -156,8 +161,7 @@ struct AppRule: Codable, Equatable, Identifiable, Sendable {
         self.bundleIdentifier = bundleIdentifier
         self.displayName = displayName
         self.action = action
-        self.runOnEfficiencyCores = action == .limit
-            || (action != .pause && runOnEfficiencyCores)
+        self.runOnEfficiencyCores = action == .none && runOnEfficiencyCores
         self.limitPercent = limitPercent
         self.delaySeconds = delaySeconds
         self.protectAudio = protectAudio
@@ -206,9 +210,7 @@ struct AppRule: Codable, Equatable, Identifiable, Sendable {
             Bool.self,
             forKey: .runOnEfficiencyCores
         ) ?? isLegacyEfficiencyRule
-        if action == .limit {
-            runOnEfficiencyCores = true
-        } else if action == .pause {
+        if action == .limit || action == .pause {
             runOnEfficiencyCores = false
         }
         limitPercent = try container.decodeIfPresent(Double.self, forKey: .limitPercent) ?? 50
@@ -245,8 +247,7 @@ struct AppRule: Codable, Equatable, Identifiable, Sendable {
         case .none:
             actionSummary = runOnEfficiencyCores ? "Power-saving cores" : "Idle actions"
         case .limit:
-            let cores = usesEfficiencyCoreScheduling ? " · power-saving cores" : ""
-            actionSummary = "Limit to \(Int(limitPercent))%\(cores)"
+            actionSummary = "Limit to \(Int(limitPercent))%"
         case .pause:
             actionSummary = "Pause"
         }
@@ -292,7 +293,7 @@ struct AppRule: Codable, Equatable, Identifiable, Sendable {
     }
 
     var usesEfficiencyCoreScheduling: Bool {
-        action == .limit || runOnEfficiencyCores
+        runOnEfficiencyCores
     }
 }
 

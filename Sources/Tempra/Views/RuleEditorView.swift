@@ -107,12 +107,12 @@ struct RuleEditorView: View {
                     if item.canLimitCPU {
                         Button("Gentle · 50%") {
                             draft.action = .limit
-                            draft.runOnEfficiencyCores = true
+                            draft.runOnEfficiencyCores = false
                             draft.limitPercent = 50
                         }
                         Button("Strict · 20%") {
                             draft.action = .limit
-                            draft.runOnEfficiencyCores = true
+                            draft.runOnEfficiencyCores = false
                             draft.limitPercent = 20
                         }
                     }
@@ -377,7 +377,7 @@ struct RuleEditorView: View {
             set: { enabled in
                 draft.action = enabled ? .limit : .none
                 if enabled {
-                    draft.runOnEfficiencyCores = true
+                    draft.runOnEfficiencyCores = false
                 }
             }
         ))

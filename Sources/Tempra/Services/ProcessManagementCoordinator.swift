@@ -90,6 +90,7 @@ final class ProcessManagementCoordinator {
             ProcessControlTarget(
                 bundleIdentifier: $0.bundleIdentifier,
                 processIdentities: Set($0.processIdentities),
+                processSamples: $0.processSamples,
                 usesApplicationCommands: !$0.requiresPrivilegedControl
                     && !BackgroundProcessPolicy.isBackgroundIdentifier($0.bundleIdentifier),
                 launchedAt: $0.launchedAt,
@@ -143,6 +144,16 @@ final class ProcessManagementCoordinator {
             command,
             bundleIdentifier: bundleIdentifier
         )
+    }
+
+    func applicationDidActivate(bundleIdentifier: String) async {
+        guard acceptsControllerResults else { return }
+        let requestRevision = revision
+        let snapshot = await controller.applicationDidActivate(
+            bundleIdentifier: bundleIdentifier
+        )
+        guard acceptsControllerResults, revision == requestRevision else { return }
+        apply(snapshot)
     }
 
     private func handle(_ event: ProcessControllerEvent) {

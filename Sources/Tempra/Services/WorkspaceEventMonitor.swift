@@ -5,7 +5,10 @@ final class WorkspaceEventMonitor {
     private var observers: [NSObjectProtocol] = []
     private var runningApplicationsObservation: NSKeyValueObservation?
 
-    func start(onChange: @escaping @MainActor @Sendable () -> Void) {
+    func start(
+        onApplicationActivated: @escaping @MainActor @Sendable (String) async -> Void,
+        onChange: @escaping @MainActor @Sendable () -> Void
+    ) {
         guard runningApplicationsObservation == nil, observers.isEmpty else { return }
         let workspace = NSWorkspace.shared
         runningApplicationsObservation = workspace.observe(
@@ -14,8 +17,25 @@ final class WorkspaceEventMonitor {
         ) { _, _ in
             Task { @MainActor in onChange() }
         }
+
+        observers.append(workspace.notificationCenter.addObserver(
+            forName: NSWorkspace.didActivateApplicationNotification,
+            object: nil,
+            queue: .main
+        ) { notification in
+            let bundleIdentifier = (
+                notification.userInfo?[NSWorkspace.applicationUserInfoKey]
+                    as? NSRunningApplication
+            )?.bundleIdentifier
+            Task { @MainActor in
+                if let bundleIdentifier {
+                    await onApplicationActivated(bundleIdentifier)
+                }
+                onChange()
+            }
+        })
+
         for name in [
-            NSWorkspace.didActivateApplicationNotification,
             NSWorkspace.didHideApplicationNotification,
             NSWorkspace.didUnhideApplicationNotification,
             NSWorkspace.didWakeNotification

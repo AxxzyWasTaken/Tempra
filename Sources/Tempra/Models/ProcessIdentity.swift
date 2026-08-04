@@ -17,9 +17,35 @@ struct ProcessIdentity: Hashable, Sendable {
     }
 }
 
+struct ManagedProcessSample: Equatable, Sendable {
+    let identity: ProcessIdentity
+    let cpuPercent: Double
+    let isMainProcess: Bool
+    let isPlayingAudio: Bool
+    let networkActivity: ProcessNetworkActivity
+    let hasCPUMeasurement: Bool
+
+    init(
+        identity: ProcessIdentity,
+        cpuPercent: Double,
+        isMainProcess: Bool,
+        isPlayingAudio: Bool = false,
+        networkActivity: ProcessNetworkActivity = .inactive,
+        hasCPUMeasurement: Bool = true
+    ) {
+        self.identity = identity
+        self.cpuPercent = cpuPercent.isFinite ? max(0, cpuPercent) : 0
+        self.isMainProcess = isMainProcess
+        self.isPlayingAudio = isPlayingAudio
+        self.networkActivity = networkActivity
+        self.hasCPUMeasurement = hasCPUMeasurement
+    }
+}
+
 struct ProcessControlTarget: Sendable {
     let bundleIdentifier: String
     let processIdentities: Set<ProcessIdentity>
+    let processSamples: [ManagedProcessSample]
     let usesApplicationCommands: Bool
     let launchedAt: Date?
     let cpuPercent: Double
@@ -33,6 +59,7 @@ struct ProcessControlTarget: Sendable {
     init(
         bundleIdentifier: String,
         processIdentities: Set<ProcessIdentity>,
+        processSamples: [ManagedProcessSample]? = nil,
         usesApplicationCommands: Bool = true,
         launchedAt: Date? = nil,
         cpuPercent: Double,
@@ -45,6 +72,24 @@ struct ProcessControlTarget: Sendable {
     ) {
         self.bundleIdentifier = bundleIdentifier
         self.processIdentities = processIdentities
+        if let processSamples {
+            self.processSamples = processSamples
+                .filter { processIdentities.contains($0.identity) }
+                .sorted { $0.identity.pid < $1.identity.pid }
+        } else {
+            let sortedIdentities = processIdentities.sorted { $0.pid < $1.pid }
+            let sampleCPU = sortedIdentities.isEmpty
+                ? 0
+                : max(0, cpuPercent) / Double(sortedIdentities.count)
+            self.processSamples = sortedIdentities.enumerated().map { index, identity in
+                ManagedProcessSample(
+                    identity: identity,
+                    cpuPercent: sampleCPU,
+                    isMainProcess: index == 0,
+                    isPlayingAudio: isPlayingAudio
+                )
+            }
+        }
         self.usesApplicationCommands = usesApplicationCommands
         self.launchedAt = launchedAt
         self.cpuPercent = cpuPercent

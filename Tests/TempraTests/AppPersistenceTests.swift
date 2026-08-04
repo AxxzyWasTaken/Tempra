@@ -110,6 +110,46 @@ struct AppPersistenceTests {
         }
     }
 
+    @Test("Saved CPU-limit rules discard background priority")
+    func cpuLimitRulesUseNormalPriority() throws {
+        try withDefaults { defaults in
+            let persistence = AppPersistence(defaults: defaults)
+            var legacyRule = AppRule(
+                bundleIdentifier: "example.game",
+                displayName: "Example Game",
+                action: .limit,
+                limitPercent: 7
+            )
+            legacyRule.runOnEfficiencyCores = true
+            try persistence.saveRules([legacyRule.bundleIdentifier: legacyRule])
+
+            let loadedRule = try #require(
+                persistence.loadRules()[legacyRule.bundleIdentifier]
+            )
+            #expect(loadedRule.action == .limit)
+            #expect(!loadedRule.runOnEfficiencyCores)
+
+            let store = try AppStore(
+                persistence: persistence,
+                managementCoordinator: ProcessManagementCoordinator(),
+                monitoringService: MonitoringService(),
+                launchAtLoginController: TestLaunchAtLoginController(),
+                startsMonitoring: false,
+                persistenceErrorHandler: { _ in }
+            )
+            var attemptedRule = loadedRule
+            attemptedRule.runOnEfficiencyCores = true
+            store.save(attemptedRule)
+
+            #expect(store.rules[legacyRule.bundleIdentifier]?.action == .limit)
+            #expect(store.rules[legacyRule.bundleIdentifier]?.runOnEfficiencyCores == false)
+            #expect(
+                try persistence.loadRules()[legacyRule.bundleIdentifier]?
+                    .runOnEfficiencyCores == false
+            )
+        }
+    }
+
     @Test("Saved SoundSource rules are removed and cannot be recreated")
     func soundSourceRuleMigration() throws {
         try withDefaults { defaults in

@@ -6,12 +6,12 @@ enum ManagementMetricCategory: String, Codable, Equatable, Sendable {
 
     init?(status: ManagementStatus) {
         switch status {
-        case .limited, .energyEfficient:
+        case .limited, .limitedWithProtectedProcesses, .energyEfficient:
             self = .limited
         case .paused:
             self = .paused
-        case .normal, .waiting, .audioProtected, .snoozed, .disabled, .notRunning,
-                .unavailable:
+        case .normal, .waiting, .audioProtected, .networkProtected, .snoozed,
+                .disabled, .notRunning, .unavailable:
             return nil
         }
     }
@@ -388,8 +388,8 @@ final class ManagementLedger {
                 category = .limited
             case .paused:
                 category = .paused
-            case .waiting, .restored, .audioProtected, .hidden, .quit, .snoozed,
-                    .ruleDisabled, .ruleRemoved, .error:
+            case .waiting, .restored, .audioProtected, .networkProtected, .hidden,
+                    .quit, .snoozed, .ruleDisabled, .ruleRemoved, .error:
                 category = nil
             case .ruleSaved, .highCPU:
                 continue

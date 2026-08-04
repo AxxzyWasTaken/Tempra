@@ -167,7 +167,7 @@ struct ProcessMonitorTests {
         #expect(monitor.cachedMetadataCount == 1)
     }
 
-    @Test("Forked helpers join every instance and retain audio and launch metadata")
+    @Test("Forked helpers join every instance and use the newest app launch")
     func forkedHelperAssignment() async throws {
         let firstMain = ProcessIdentity(pid: 100, startTimeMicroseconds: 3_000_000)
         let secondMain = ProcessIdentity(pid: 101, startTimeMicroseconds: 2_000_000)
@@ -186,7 +186,12 @@ struct ProcessMonitorTests {
             ]
         )
         let clock = StubUptime(value: 1)
-        let monitor = makeMonitor(reader: reader, clock: clock, audioPIDs: [200])
+        let monitor = makeMonitor(
+            reader: reader,
+            clock: clock,
+            audioPIDs: [200],
+            networkStates: [helperChild: .active]
+        )
         let appInventory = inventory(
             app("Example", pid: 100),
             app("Example", pid: 101)
@@ -203,8 +208,17 @@ struct ProcessMonitorTests {
         #expect(afterFork.processIdentifiers == [100, 101, 200, 201])
         #expect(Set(afterFork.processIdentities) == [firstMain, secondMain, helper, helperChild])
         #expect(afterFork.residentMemoryBytes == 512 * 1_024 * 1_024)
-        #expect(afterFork.launchedAt?.timeIntervalSince1970 == 2)
+        #expect(afterFork.launchedAt?.timeIntervalSince1970 == 3)
         #expect(afterFork.isPlayingAudio)
+        let samplesByIdentity = Dictionary(
+            uniqueKeysWithValues: afterFork.processSamples.map { ($0.identity, $0) }
+        )
+        #expect(samplesByIdentity[firstMain]?.isMainProcess == true)
+        #expect(samplesByIdentity[secondMain]?.isMainProcess == true)
+        #expect(samplesByIdentity[helper]?.isMainProcess == false)
+        #expect(samplesByIdentity[helper]?.isPlayingAudio == true)
+        #expect(samplesByIdentity[helper]?.hasCPUMeasurement == false)
+        #expect(samplesByIdentity[helperChild]?.networkActivity == .active)
     }
 
     @Test("User-owned system extensions remain controllable services")
@@ -642,6 +656,7 @@ struct ProcessMonitorTests {
         reader: StubProcessSnapshotReader,
         clock: StubUptime,
         audioPIDs: Set<pid_t> = [],
+        networkStates: [ProcessIdentity: ProcessNetworkActivity] = [:],
         windowVisibilitySnapshot: WindowVisibilitySnapshot? = nil
     ) -> ProcessMonitor {
         ProcessMonitor(
@@ -649,6 +664,7 @@ struct ProcessMonitorTests {
             currentUserID: 501,
             uptime: { clock.value },
             audioProcessIdentifiers: { audioPIDs },
+            networkActivity: { networkStates[$0] ?? .inactive },
             windowSnapshot: { windowVisibilitySnapshot }
         )
     }

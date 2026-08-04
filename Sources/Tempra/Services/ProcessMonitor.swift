@@ -591,6 +591,7 @@ final class ProcessMonitor {
         let url: URL?
         var pids: [pid_t]
         var processIdentities: [ProcessIdentity]
+        var processSamples: [ManagedProcessSample]
         var cpuPercent: Double
         var residentMemoryBytes: UInt64?
         let isSystemProcess: Bool
@@ -611,6 +612,7 @@ final class ProcessMonitor {
     private let currentUserID: uid_t
     private let uptime: () -> TimeInterval
     private let audioProcessIdentifiers: () -> Set<pid_t>
+    private let networkActivity: @Sendable (ProcessIdentity) -> ProcessNetworkActivity
     private let windowSnapshot: () -> WindowVisibilitySnapshot?
     private let processTableReader: ProcessTableReader
     private let privilegedSnapshotReader: PrivilegedSnapshotReader
@@ -625,6 +627,9 @@ final class ProcessMonitor {
         uptime: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime },
         audioProcessIdentifiers: @escaping () -> Set<pid_t> = {
             AudioOutputProbe.playingProcessIdentifiers()
+        },
+        networkActivity: @escaping @Sendable (ProcessIdentity) -> ProcessNetworkActivity = {
+            ProcessNetworkActivityProbe().activity(for: $0)
         },
         windowSnapshot: @escaping () -> WindowVisibilitySnapshot? = {
             WindowVisibilitySnapshot.capture()
@@ -641,6 +646,7 @@ final class ProcessMonitor {
         self.currentUserID = currentUserID
         self.uptime = uptime
         self.audioProcessIdentifiers = audioProcessIdentifiers
+        self.networkActivity = networkActivity
         self.windowSnapshot = windowSnapshot
         self.processTableReader = processTableReader
         self.privilegedSnapshotReader = privilegedSnapshotReader
@@ -710,6 +716,7 @@ final class ProcessMonitor {
 
         var currentCounters: [ProcessIdentity: CPUCounter] = [:]
         var cpuByPID: [pid_t: Double] = [:]
+        var measuredIdentities: Set<ProcessIdentity> = []
 
         for process in rawProcesses {
             guard let identity = process.identity, let counter = process.counter else {
@@ -726,6 +733,7 @@ final class ProcessMonitor {
 
             let delta = counter.totalNanoseconds - previous.totalNanoseconds
             cpuByPID[process.pid] = (Double(delta) / (elapsed * 1_000_000_000)) * 100
+            measuredIdentities.insert(identity)
         }
 
         previousCounters = currentCounters
@@ -737,14 +745,26 @@ final class ProcessMonitor {
             guard !pids.isEmpty else { return nil }
 
             let cpu = pids.reduce(0) { $0 + cpuByPID[$1, default: 0] }
-            let isPlayingAudio = pids.contains(where: playingAudioProcessIdentifiers.contains)
+            let processSamples = pids.compactMap { pid -> ManagedProcessSample? in
+                guard let identity = rawByPID[pid]?.identity else { return nil }
+                return ManagedProcessSample(
+                    identity: identity,
+                    cpuPercent: cpuByPID[pid, default: 0],
+                    isMainProcess: bundle.mainPIDs.contains(pid),
+                    isPlayingAudio: playingAudioProcessIdentifiers.contains(pid),
+                    networkActivity: networkActivity(identity),
+                    hasCPUMeasurement: measuredIdentities.contains(identity)
+                )
+            }
+            let isPlayingAudio = processSamples.contains(where: \ManagedProcessSample.isPlayingAudio)
 
             return ManagedApp(
                 bundleIdentifier: bundle.identifier,
                 name: bundle.name,
                 bundleURL: bundle.url,
                 processIdentifiers: pids,
-                processIdentities: pids.compactMap { rawByPID[$0]?.identity },
+                processIdentities: processSamples.map(\.identity),
+                processSamples: processSamples,
                 launchedAt: bundle.mainPIDs
                     .compactMap { rawByPID[$0]?.identity }
                     .map {
@@ -752,7 +772,7 @@ final class ProcessMonitor {
                             timeIntervalSince1970: Double($0.startTimeMicroseconds) / 1_000_000
                         )
                     }
-                    .min(),
+                    .max(),
                 cpuPercent: max(0, cpu),
                 residentMemoryBytes: residentMemoryBytes(
                     for: pids,
@@ -774,7 +794,8 @@ final class ProcessMonitor {
             backgroundApps = makeBackgroundProcessGroups(
                 from: rawProcesses,
                 excluding: assignedPIDs,
-                cpuByPID: cpuByPID
+                cpuByPID: cpuByPID,
+                measuredIdentities: measuredIdentities
             )
         } else {
             backgroundApps = []
@@ -1082,7 +1103,8 @@ final class ProcessMonitor {
     private func makeBackgroundProcessGroups(
         from processes: [RawProcess],
         excluding assignedPIDs: Set<pid_t>,
-        cpuByPID: [pid_t: Double]
+        cpuByPID: [pid_t: Double],
+        measuredIdentities: Set<ProcessIdentity>
     ) -> [ManagedApp] {
         var groups: [String: BackgroundProcessGroup] = [:]
         let ownPID = getpid()
@@ -1107,6 +1129,13 @@ final class ProcessMonitor {
                 group.pids.append(process.pid)
                 if let identity = process.identity {
                     group.processIdentities.append(identity)
+                    group.processSamples.append(ManagedProcessSample(
+                        identity: identity,
+                        cpuPercent: cpuByPID[process.pid, default: 0],
+                        isMainProcess: true,
+                        networkActivity: networkActivity(identity),
+                        hasCPUMeasurement: measuredIdentities.contains(identity)
+                    ))
                 }
                 group.cpuPercent += cpuByPID[process.pid, default: 0]
                 group.residentMemoryBytes = Self.addingResidentMemory(
@@ -1124,6 +1153,15 @@ final class ProcessMonitor {
                     url: url,
                     pids: [process.pid],
                     processIdentities: process.identity.map { [$0] } ?? [],
+                    processSamples: process.identity.map { identity in
+                        [ManagedProcessSample(
+                            identity: identity,
+                            cpuPercent: cpuByPID[process.pid, default: 0],
+                            isMainProcess: true,
+                            networkActivity: networkActivity(identity),
+                            hasCPUMeasurement: measuredIdentities.contains(identity)
+                        )]
+                    } ?? [],
                     cpuPercent: cpuByPID[process.pid, default: 0],
                     residentMemoryBytes: process.residentMemoryBytes,
                     isSystemProcess: isSystemProcess
@@ -1138,6 +1176,7 @@ final class ProcessMonitor {
                 bundleURL: group.url,
                 processIdentifiers: group.pids.sorted(),
                 processIdentities: group.processIdentities.sorted { $0.pid < $1.pid },
+                processSamples: group.processSamples,
                 launchedAt: group.processIdentities.map {
                     Date(
                         timeIntervalSince1970: Double($0.startTimeMicroseconds) / 1_000_000

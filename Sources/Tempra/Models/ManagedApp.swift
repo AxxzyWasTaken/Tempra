@@ -5,9 +5,11 @@ enum ManagementStatus: Equatable, Sendable {
     case normal
     case waiting
     case limited(Double)
+    case limitedWithProtectedProcesses(Double)
     case paused
     case energyEfficient
     case audioProtected
+    case networkProtected
     case snoozed(Date)
     case disabled
     case notRunning
@@ -18,9 +20,11 @@ enum ManagementStatus: Equatable, Sendable {
         case .normal: "Normal"
         case .waiting: "Waiting"
         case .limited(let percent): "Limited to \(Int(percent))%"
+        case .limitedWithProtectedProcesses: "Limiting CPU-heavy processes"
         case .paused: "Paused"
         case .energyEfficient: "Power-saving cores"
         case .audioProtected: "Audio active"
+        case .networkProtected: "Network active"
         case .snoozed(let until): "Snoozed until \(until.formatted(date: .omitted, time: .shortened))"
         case .disabled: "Disabled"
         case .notRunning: "Not running"
@@ -33,9 +37,11 @@ enum ManagementStatus: Equatable, Sendable {
         case .normal: "circle.fill"
         case .waiting: "clock.fill"
         case .limited: "gauge.with.dots.needle.33percent"
+        case .limitedWithProtectedProcesses: "gauge.with.dots.needle.33percent"
         case .paused: "pause.circle.fill"
         case .energyEfficient: "leaf.fill"
         case .audioProtected: "speaker.wave.2.fill"
+        case .networkProtected: "network"
         case .snoozed: "moon.zzz.fill"
         case .disabled: "slash.circle.fill"
         case .notRunning: "app.dashed"
@@ -45,7 +51,8 @@ enum ManagementStatus: Equatable, Sendable {
 
     var isActiveManagement: Bool {
         switch self {
-        case .waiting, .limited, .paused, .energyEfficient, .audioProtected:
+        case .waiting, .limited, .limitedWithProtectedProcesses, .paused,
+                .energyEfficient, .audioProtected, .networkProtected:
             true
         case .normal, .snoozed, .disabled, .notRunning, .unavailable:
             false
@@ -54,20 +61,20 @@ enum ManagementStatus: Equatable, Sendable {
 
     var isActivelySavingPower: Bool {
         switch self {
-        case .limited, .paused, .energyEfficient:
+        case .limited, .limitedWithProtectedProcesses, .paused, .energyEfficient:
             true
-        case .normal, .waiting, .audioProtected, .snoozed, .disabled, .notRunning,
-                .unavailable:
+        case .normal, .waiting, .audioProtected, .networkProtected, .snoozed,
+                .disabled, .notRunning, .unavailable:
             false
         }
     }
 
     var isActivelyLimitingCPU: Bool {
         switch self {
-        case .limited, .paused:
+        case .limited, .limitedWithProtectedProcesses, .paused:
             true
-        case .normal, .waiting, .energyEfficient, .audioProtected, .snoozed,
-                .disabled, .notRunning, .unavailable:
+        case .normal, .waiting, .energyEfficient, .audioProtected, .networkProtected,
+                .snoozed, .disabled, .notRunning, .unavailable:
             false
         }
     }
@@ -79,6 +86,7 @@ struct ManagedApp: Identifiable, Sendable {
     let bundleURL: URL?
     let processIdentifiers: [pid_t]
     let processIdentities: [ProcessIdentity]
+    let processSamples: [ManagedProcessSample]
     let launchedAt: Date?
     let cpuPercent: Double
     let residentMemoryBytes: UInt64?
@@ -101,6 +109,7 @@ struct ManagedApp: Identifiable, Sendable {
         bundleURL: URL?,
         processIdentifiers: [pid_t],
         processIdentities: [ProcessIdentity] = [],
+        processSamples: [ManagedProcessSample]? = nil,
         launchedAt: Date? = nil,
         cpuPercent: Double,
         residentMemoryBytes: UInt64? = nil,
@@ -122,6 +131,21 @@ struct ManagedApp: Identifiable, Sendable {
         self.bundleURL = bundleURL
         self.processIdentifiers = processIdentifiers
         self.processIdentities = processIdentities
+        if let processSamples {
+            self.processSamples = processSamples.sorted { $0.identity.pid < $1.identity.pid }
+        } else {
+            let sampleCPU = processIdentities.isEmpty
+                ? 0
+                : max(0, cpuPercent) / Double(processIdentities.count)
+            self.processSamples = processIdentities.enumerated().map { index, identity in
+                ManagedProcessSample(
+                    identity: identity,
+                    cpuPercent: sampleCPU,
+                    isMainProcess: index == 0,
+                    isPlayingAudio: isPlayingAudio
+                )
+            }
+        }
         self.launchedAt = launchedAt
         self.cpuPercent = cpuPercent
         self.residentMemoryBytes = residentMemoryBytes

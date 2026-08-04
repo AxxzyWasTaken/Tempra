@@ -6,6 +6,7 @@ enum ActivityKind: String, Codable, Sendable {
     case paused
     case restored
     case audioProtected
+    case networkProtected
     case energyEfficient
     case hidden
     case quit
@@ -23,6 +24,7 @@ enum ActivityKind: String, Codable, Sendable {
         case .paused: "Paused"
         case .restored: "Restored"
         case .audioProtected: "Audio protected"
+        case .networkProtected: "Network protected"
         case .energyEfficient: "Power-saving cores"
         case .hidden: "App hidden"
         case .quit: "App force quit"
@@ -42,6 +44,7 @@ enum ActivityKind: String, Codable, Sendable {
         case .paused: "pause.circle.fill"
         case .restored: "play.circle.fill"
         case .audioProtected: "speaker.wave.2.fill"
+        case .networkProtected: "network"
         case .energyEfficient: "leaf.fill"
         case .hidden: "eye.slash.fill"
         case .quit: "xmark.circle.fill"

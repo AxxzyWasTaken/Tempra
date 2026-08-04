@@ -147,9 +147,16 @@ final class AppStore: ObservableObject {
         scheduleSuspensionExpiration()
 
         if startsMonitoring {
-            workspaceEventMonitor.start { [weak self] in
-                self?.refresh()
-            }
+            workspaceEventMonitor.start(
+                onApplicationActivated: { [weak self] bundleIdentifier in
+                    await self?.managementCoordinator.applicationDidActivate(
+                        bundleIdentifier: bundleIdentifier
+                    )
+                },
+                onChange: { [weak self] in
+                    self?.refresh()
+                }
+            )
             configureMonitoringDemand(refreshImmediately: false)
             refresh()
         }
@@ -158,9 +165,7 @@ final class AppStore: ObservableObject {
     func save(_ rule: AppRule) {
         var normalized = rule
         normalized.limitPercent = CPULimitRange.clamped(normalized.limitPercent)
-        if normalized.action == .limit {
-            normalized.runOnEfficiencyCores = true
-        } else if normalized.action == .pause {
+        if normalized.action == .limit || normalized.action == .pause {
             normalized.runOnEfficiencyCores = false
         }
         if normalized.applicationURL == nil {
@@ -204,9 +209,7 @@ final class AppStore: ObservableObject {
         rule.displayName = displayName
         rule.applicationURL = applicationURL ?? rule.applicationURL
         rule.action = action
-        if action == .limit {
-            rule.runOnEfficiencyCores = true
-        } else if action == .pause {
+        if action == .limit || action == .pause {
             rule.runOnEfficiencyCores = false
         }
         rule.limitPercent = limitPercent
@@ -902,6 +905,9 @@ final class AppStore: ObservableObject {
                 ? " and using power-saving core scheduling"
                 : ""
             detail = "Limited to \(Int(percent))% CPU\(cores)."
+        case .limitedWithProtectedProcesses:
+            kind = .limited
+            detail = "Limiting CPU-heavy processes while essential helpers remain active."
         case .paused:
             kind = .paused
             detail = "Paused while in the background."
@@ -911,6 +917,9 @@ final class AppStore: ObservableObject {
         case .audioProtected:
             kind = .audioProtected
             detail = "Rule held while audio is active."
+        case .networkProtected:
+            kind = .networkProtected
+            detail = "Rule held while this process has an active network connection."
         case .unavailable:
             kind = .error
             detail = "Tempra could not manage the process."
