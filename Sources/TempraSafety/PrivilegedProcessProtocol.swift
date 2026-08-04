@@ -41,15 +41,18 @@ public struct PrivilegedProcessRequest: Codable, Equatable, Sendable {
     public let action: PrivilegedProcessAction
     public let processIdentifiers: [Int32]
     public let processes: [PrivilegedProcessIdentity]
+    public let automaticResumeAfterMilliseconds: UInt32?
 
     public init(
         action: PrivilegedProcessAction,
         processIdentifiers: [Int32] = [],
-        processes: [PrivilegedProcessIdentity] = []
+        processes: [PrivilegedProcessIdentity] = [],
+        automaticResumeAfterMilliseconds: UInt32? = nil
     ) {
         self.action = action
         self.processIdentifiers = processIdentifiers
         self.processes = processes
+        self.automaticResumeAfterMilliseconds = automaticResumeAfterMilliseconds
     }
 }
 

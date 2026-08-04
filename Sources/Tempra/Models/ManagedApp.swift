@@ -20,7 +20,7 @@ enum ManagementStatus: Equatable, Sendable {
         case .normal: "Normal"
         case .waiting: "Waiting"
         case .limited(let percent): "Limited to \(Int(percent))%"
-        case .limitedWithProtectedProcesses: "Limiting CPU-heavy processes"
+        case .limitedWithProtectedProcesses: "Best-effort CPU limit"
         case .paused: "Paused"
         case .energyEfficient: "Power-saving cores"
         case .audioProtected: "Audio active"

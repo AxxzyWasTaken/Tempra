@@ -10,18 +10,44 @@ public struct WatchdogProcessIdentity: Codable, Hashable, Sendable {
     }
 }
 
+public enum WatchdogAcknowledgement {
+    public static let automaticResumeArmed: UInt8 = 0x41
+    public static let privilegedStateSynchronized: UInt8 = 0x50
+}
+
+public struct WatchdogResumeDeadline: Codable, Equatable, Sendable {
+    public let process: WatchdogProcessIdentity
+    public let resumeAfterMilliseconds: UInt32
+
+    public init(
+        process: WatchdogProcessIdentity,
+        resumeAfterMilliseconds: UInt32
+    ) {
+        self.process = process
+        self.resumeAfterMilliseconds = resumeAfterMilliseconds
+    }
+}
+
 public struct WatchdogCommand: Codable, Equatable, Sendable {
     public enum Action: String, Codable, Sendable {
         case update
+        case armResume
+        case synchronizeResume
         case disarm
     }
 
     public let action: Action
     public let processes: [WatchdogProcessIdentity]
+    public let resumeDeadlines: [WatchdogResumeDeadline]
 
-    public init(action: Action, processes: [WatchdogProcessIdentity]) {
+    public init(
+        action: Action,
+        processes: [WatchdogProcessIdentity],
+        resumeDeadlines: [WatchdogResumeDeadline] = []
+    ) {
         self.action = action
         self.processes = processes
+        self.resumeDeadlines = resumeDeadlines
     }
 }
 
@@ -61,8 +87,12 @@ public struct WatchdogCommandStream: Sendable {
             } catch {
                 throw WatchdogProtocolError.invalidCommand
             }
-            guard command.processes.count <= Self.maximumProcessCount else {
+            guard command.processes.count <= Self.maximumProcessCount,
+                  command.resumeDeadlines.count <= Self.maximumProcessCount else {
                 throw WatchdogProtocolError.tooManyProcesses
+            }
+            guard Self.isValid(command) else {
+                throw WatchdogProtocolError.invalidCommand
             }
             commands.append(command)
         }
@@ -72,6 +102,30 @@ public struct WatchdogCommandStream: Sendable {
     public func finish() throws {
         guard buffer.isEmpty else {
             throw WatchdogProtocolError.incompleteFrame
+        }
+    }
+
+    private static func isValid(_ command: WatchdogCommand) -> Bool {
+        let deadlineProcesses = command.resumeDeadlines.map(\.process)
+        let deadlinesAreUnique = Set(deadlineProcesses).count == deadlineProcesses.count
+        let deadlinesAreBounded = command.resumeDeadlines.allSatisfy {
+            $0.resumeAfterMilliseconds > 0
+                && $0.resumeAfterMilliseconds <= UInt32(Int32.max)
+        }
+        switch command.action {
+        case .update:
+            return command.resumeDeadlines.isEmpty
+        case .armResume:
+            return command.processes.isEmpty
+                && !command.resumeDeadlines.isEmpty
+                && deadlinesAreUnique
+                && deadlinesAreBounded
+        case .synchronizeResume:
+            return command.processes.isEmpty
+                && deadlinesAreUnique
+                && deadlinesAreBounded
+        case .disarm:
+            return command.processes.isEmpty && command.resumeDeadlines.isEmpty
         }
     }
 }

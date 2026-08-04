@@ -59,8 +59,8 @@ struct ProcessLimitTargetSelectorTests {
         #expect(!selection.targetIsReachable)
     }
 
-    @Test("A connected single-process app waits instead of being stopped")
-    func connectedSingleProcessIsProtected() {
+    @Test("A connected single-process app remains limitable")
+    func connectedSingleProcessIsSelected() {
         let onlineGame = sample(30, cpu: 80, main: true, network: .active)
 
         let selection = ProcessLimitTargetSelector.select(
@@ -68,9 +68,9 @@ struct ProcessLimitTargetSelectorTests {
             limitPercent: 10
         )
 
-        #expect(selection.controlledProcesses.isEmpty)
-        #expect(selection.alwaysRunningProcesses == [onlineGame.identity])
-        #expect(!selection.targetIsReachable)
+        #expect(selection.controlledProcesses == [onlineGame.identity])
+        #expect(selection.alwaysRunningProcesses.isEmpty)
+        #expect(selection.targetIsReachable)
     }
 
     @Test("An offline single-process app remains limitable")
@@ -102,18 +102,109 @@ struct ProcessLimitTargetSelectorTests {
         #expect(selection.controlledProcesses == [secondWorker.identity])
     }
 
-    @Test("A multi-process app always retains a coordinator lifeline")
-    func coordinatorLifelineIsRetained() {
-        let main = sample(60, cpu: 100, main: true)
-        let worker = sample(61, cpu: 100)
+    @Test("A CPU-heavy main process is selected instead of an idle helper")
+    func cpuHeavyMainProcessIsSelected() {
+        let player = sample(60, cpu: 114, main: true, network: .active)
+        let crashHandler = sample(61, cpu: 0.1)
 
         let selection = ProcessLimitTargetSelector.select(
-            samples: [main, worker],
-            limitPercent: 1
+            samples: [player, crashHandler],
+            limitPercent: 10
+        )
+
+        #expect(selection.controlledProcesses == [player.identity])
+        #expect(selection.alwaysRunningProcesses == [crashHandler.identity])
+        #expect(selection.targetIsReachable)
+    }
+
+    @Test("A network worker is selected when it is required to reach the target")
+    func requiredNetworkWorkerIsSelected() {
+        let main = sample(70, cpu: 2, main: true)
+        let networkWorker = sample(71, cpu: 30)
+        let renderer = sample(72, cpu: 60)
+
+        let selection = ProcessLimitTargetSelector.select(
+            samples: [main, networkWorker, renderer],
+            limitPercent: 10,
+            latencySensitiveProcesses: [networkWorker.identity]
+        )
+
+        #expect(selection.controlledProcesses == [networkWorker.identity, renderer.identity])
+        #expect(selection.alwaysRunningProcesses == [main.identity])
+        #expect(selection.targetIsReachable)
+    }
+
+    @Test("A low-CPU network helper stays running when another worker is sufficient")
+    func unnecessaryNetworkHelperIsNotSelected() {
+        let main = sample(73, cpu: 2, main: true)
+        let networkHelper = sample(74, cpu: 1)
+        let renderer = sample(75, cpu: 60)
+
+        let selection = ProcessLimitTargetSelector.select(
+            samples: [main, networkHelper, renderer],
+            limitPercent: 10,
+            latencySensitiveProcesses: [networkHelper.identity]
+        )
+
+        #expect(selection.controlledProcesses == [renderer.identity])
+        #expect(selection.alwaysRunningProcesses == [main.identity, networkHelper.identity])
+    }
+
+    @Test("Audio activity is limitable when audio protection is disabled")
+    func unprotectedAudioProcessIsSelected() {
+        let mediaProcess = sample(76, cpu: 80, main: true, audio: true)
+
+        let selection = ProcessLimitTargetSelector.select(
+            samples: [mediaProcess],
+            limitPercent: 10,
+            protectsAudio: false
+        )
+
+        #expect(selection.controlledProcesses == [mediaProcess.identity])
+    }
+
+    @Test("Audio activity remains protected when audio protection is enabled")
+    func protectedAudioProcessIsNotSelected() {
+        let mediaProcess = sample(77, cpu: 80, main: true, audio: true)
+
+        let selection = ProcessLimitTargetSelector.select(
+            samples: [mediaProcess],
+            limitPercent: 10,
+            protectsAudio: true
+        )
+
+        #expect(selection.controlledProcesses.isEmpty)
+        #expect(selection.alwaysRunningProcesses == [mediaProcess.identity])
+        #expect(!selection.targetIsReachable)
+    }
+
+    @Test("A process with critical file activity remains running")
+    func criticalFileActivityIsProtected() {
+        let downloader = sample(78, cpu: 20, main: true)
+        let worker = sample(79, cpu: 80)
+
+        let selection = ProcessLimitTargetSelector.select(
+            samples: [downloader, worker],
+            limitPercent: 10,
+            criticalActivityProcesses: [downloader.identity]
         )
 
         #expect(selection.controlledProcesses == [worker.identity])
-        #expect(selection.alwaysRunningProcesses == [main.identity])
+        #expect(selection.alwaysRunningProcesses == [downloader.identity])
+        #expect(!selection.targetIsReachable)
+    }
+
+    @Test("The responsiveness duty floor reports an unreachable exact limit")
+    func responsivenessDutyFloorCanMakeTargetUnreachable() {
+        let busyProcess = sample(80, cpu: 800, main: true)
+
+        let selection = ProcessLimitTargetSelector.select(
+            samples: [busyProcess],
+            limitPercent: 7,
+            minimumControlledDutyCycle: 0.05
+        )
+
+        #expect(selection.controlledProcesses == [busyProcess.identity])
         #expect(!selection.targetIsReachable)
     }
 
@@ -121,6 +212,7 @@ struct ProcessLimitTargetSelectorTests {
         _ pid: Int32,
         cpu: Double,
         main: Bool = false,
+        audio: Bool = false,
         network: ProcessNetworkActivity = .inactive,
         measured: Bool = true
     ) -> ManagedProcessSample {
@@ -131,6 +223,7 @@ struct ProcessLimitTargetSelectorTests {
             ),
             cpuPercent: cpu,
             isMainProcess: main,
+            isPlayingAudio: audio,
             networkActivity: network,
             hasCPUMeasurement: measured
         )

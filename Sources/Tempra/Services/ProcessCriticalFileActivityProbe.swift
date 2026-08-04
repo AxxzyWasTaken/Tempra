@@ -2,27 +2,28 @@ import Darwin
 import Dispatch
 import Foundation
 
-enum ProcessNetworkActivity: Equatable, Sendable {
+enum ProcessCriticalFileActivity: Equatable, Sendable {
     case inactive
-    case active
+    case activeDownload
     case unknown
-
-    var isLatencySensitive: Bool {
-        self != .inactive
-    }
 }
 
-struct ProcessNetworkActivityProbe: Sendable {
+struct ProcessCriticalFileActivityProbe: Sendable {
     private static let maximumFileDescriptorCount = 4_096
     private static let descriptorGrowthAllowance = 16
+    private static let downloadExtensions: Set<String> = [
+        "crdownload",
+        "download",
+        "part",
+    ]
     private static let queue = DispatchQueue(
-        label: "io.github.temperapp.Temper.network-probe",
+        label: "io.github.temperapp.Temper.file-activity-probe",
         qos: .utility
     )
 
     func activityWithoutBlockingController(
         for identity: ProcessIdentity
-    ) async -> ProcessNetworkActivity {
+    ) async -> ProcessCriticalFileActivity {
         await withCheckedContinuation { continuation in
             Self.queue.async {
                 continuation.resume(returning: activity(for: identity))
@@ -30,7 +31,7 @@ struct ProcessNetworkActivityProbe: Sendable {
         }
     }
 
-    func activity(for identity: ProcessIdentity) -> ProcessNetworkActivity {
+    func activity(for identity: ProcessIdentity) -> ProcessCriticalFileActivity {
         guard Self.identityIsCurrent(identity) else { return .unknown }
 
         let descriptorSize = MemoryLayout<proc_fdinfo>.stride
@@ -39,13 +40,7 @@ struct ProcessNetworkActivityProbe: Sendable {
         }
 
         errno = 0
-        let requiredBytes = proc_pidinfo(
-            identity.pid,
-            PROC_PIDLISTFDS,
-            0,
-            nil,
-            0
-        )
+        let requiredBytes = proc_pidinfo(identity.pid, PROC_PIDLISTFDS, 0, nil, 0)
         guard requiredBytes > 0 else {
             return errno == 0 ? .inactive : .unknown
         }
@@ -95,50 +90,49 @@ struct ProcessNetworkActivityProbe: Sendable {
         }
 
         let returnedCount = Int(bytesRead) / descriptorSize
-        var socketInspectionFailed = false
+        var vnodeInspectionFailed = false
         for descriptor in descriptors.prefix(returnedCount)
-            where descriptor.proc_fdtype == PROX_FDTYPE_SOCKET {
-            var socketInfo = socket_fdinfo()
+            where descriptor.proc_fdtype == PROX_FDTYPE_VNODE {
+            var vnodeInfo = vnode_fdinfowithpath()
             errno = 0
-            let socketBytesRead = withUnsafeMutablePointer(to: &socketInfo) { pointer in
+            let vnodeBytesRead = withUnsafeMutablePointer(to: &vnodeInfo) { pointer in
                 proc_pidfdinfo(
                     identity.pid,
                     descriptor.proc_fd,
-                    PROC_PIDFDSOCKETINFO,
+                    PROC_PIDFDVNODEPATHINFO,
                     pointer,
-                    Int32(MemoryLayout<socket_fdinfo>.size)
+                    Int32(MemoryLayout<vnode_fdinfowithpath>.size)
                 )
             }
-            guard socketBytesRead == Int32(MemoryLayout<socket_fdinfo>.size) else {
-                socketInspectionFailed = true
+            guard vnodeBytesRead == Int32(MemoryLayout<vnode_fdinfowithpath>.size) else {
+                vnodeInspectionFailed = true
                 continue
             }
-            if Self.isLatencySensitive(socketInfo: socketInfo) {
-                return .active
+            let path = withUnsafePointer(to: &vnodeInfo.pvip.vip_path) { pointer in
+                pointer.withMemoryRebound(to: CChar.self, capacity: Int(MAXPATHLEN)) {
+                    let length = strnlen($0, Int(MAXPATHLEN))
+                    let bytes = UnsafeRawBufferPointer(start: $0, count: length)
+                    return String(decoding: bytes, as: UTF8.self)
+                }
+            }
+            if Self.isActiveDownload(
+                path: path,
+                openFlags: vnodeInfo.pfi.fi_openflags
+            ) {
+                return .activeDownload
             }
         }
 
         guard Self.identityIsCurrent(identity) else { return .unknown }
         let descriptorListMayBeTruncated = returnedCount == descriptorCount
-        return socketInspectionFailed || descriptorListMayBeTruncated ? .unknown : .inactive
+        return vnodeInspectionFailed || descriptorListMayBeTruncated ? .unknown : .inactive
     }
 
-    static func isLatencySensitive(socketInfo: socket_fdinfo) -> Bool {
-        let socket = socketInfo.psi
-        guard socket.soi_family == AF_INET || socket.soi_family == AF_INET6 else {
-            return false
-        }
-
-        if socket.soi_protocol == IPPROTO_UDP {
-            return true
-        }
-        guard socket.soi_protocol == IPPROTO_TCP else { return false }
-
-        let connectedStates = Int32(SOI_S_ISCONNECTED | SOI_S_ISCONNECTING)
-        if Int32(socket.soi_state) & connectedStates != 0 {
-            return true
-        }
-        return socket.soi_proto.pri_tcp.tcpsi_state >= TCPS_SYN_SENT
+    static func isActiveDownload(path: String, openFlags: UInt32) -> Bool {
+        let accessMode = Int32(bitPattern: openFlags) & O_ACCMODE
+        guard accessMode == O_WRONLY || accessMode == O_RDWR else { return false }
+        let pathExtension = URL(fileURLWithPath: path).pathExtension.lowercased()
+        return downloadExtensions.contains(pathExtension)
     }
 
     private static func identityIsCurrent(_ identity: ProcessIdentity) -> Bool {

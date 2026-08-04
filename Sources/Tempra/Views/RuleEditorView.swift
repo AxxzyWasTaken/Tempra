@@ -107,12 +107,10 @@ struct RuleEditorView: View {
                     if item.canLimitCPU {
                         Button("Gentle · 50%") {
                             draft.action = .limit
-                            draft.runOnEfficiencyCores = false
                             draft.limitPercent = 50
                         }
                         Button("Strict · 20%") {
                             draft.action = .limit
-                            draft.runOnEfficiencyCores = false
                             draft.limitPercent = 20
                         }
                     }
@@ -368,7 +366,6 @@ struct RuleEditorView: View {
         }
         .toggleStyle(TempraCheckboxToggleStyle())
         .controlSize(.small)
-        .disabled(draft.action == .limit)
     }
 
     private var limitToggle: some View {
@@ -376,9 +373,6 @@ struct RuleEditorView: View {
             get: { draft.action == .limit },
             set: { enabled in
                 draft.action = enabled ? .limit : .none
-                if enabled {
-                    draft.runOnEfficiencyCores = false
-                }
             }
         ))
         .toggleStyle(TempraCheckboxToggleStyle())

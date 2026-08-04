@@ -131,4 +131,75 @@ enum ProcessLimitSchedulerModel {
             return first.identifier < second.identifier
         }
     }
+
+    struct PulseArbiter: Sendable {
+        struct Request: Sendable {
+            let identifier: String
+            let generation: UInt64
+            let requestedAt: ContinuousClock.Instant
+            let latestStart: ContinuousClock.Instant
+            let isLatencySensitive: Bool
+        }
+
+        enum Decision: Sendable {
+            case start(overlapsExistingPulse: Bool)
+            case deferUntil(ContinuousClock.Instant)
+        }
+
+        private struct Lease: Sendable {
+            let generation: UInt64
+            let expectedEnd: ContinuousClock.Instant
+        }
+
+        private var leases: [String: Lease] = [:]
+
+        var activeCount: Int {
+            leases.count
+        }
+
+        mutating func decision(
+            for request: Request,
+            minimumGap: Duration
+        ) -> Decision {
+            guard leases[request.identifier] == nil else {
+                return .start(overlapsExistingPulse: leases.count > 1)
+            }
+            guard let latestExpectedEnd = leases.values.lazy.map(\.expectedEnd).max() else {
+                return .start(overlapsExistingPulse: false)
+            }
+
+            let nextOrdinaryStart = max(
+                request.requestedAt.advanced(by: minimumGap),
+                latestExpectedEnd.advanced(by: minimumGap)
+            )
+            if request.isLatencySensitive, nextOrdinaryStart > request.latestStart {
+                return .start(overlapsExistingPulse: true)
+            }
+            return .deferUntil(nextOrdinaryStart)
+        }
+
+        mutating func acquire(
+            identifier: String,
+            generation: UInt64,
+            expectedEnd: ContinuousClock.Instant
+        ) {
+            leases[identifier] = Lease(
+                generation: generation,
+                expectedEnd: expectedEnd
+            )
+        }
+
+        mutating func release(identifier: String, generation: UInt64) {
+            guard leases[identifier]?.generation == generation else { return }
+            leases.removeValue(forKey: identifier)
+        }
+
+        mutating func release(identifier: String) {
+            leases.removeValue(forKey: identifier)
+        }
+
+        mutating func removeAll() {
+            leases.removeAll(keepingCapacity: true)
+        }
+    }
 }

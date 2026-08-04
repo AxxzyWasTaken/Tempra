@@ -13,6 +13,22 @@ actor ProcessController {
     private typealias LimitRuntime = ProcessLimitSchedulerModel.Runtime
     private typealias LimitDeadline = ProcessLimitSchedulerModel.Deadline
     private typealias LimitDeadlineQueue = ProcessLimitSchedulerModel.DeadlineQueue
+    private typealias LimitPulseArbiter = ProcessLimitSchedulerModel.PulseArbiter
+
+    private struct CriticalFileActivityCacheEntry: Sendable {
+        let activity: ProcessCriticalFileActivity
+        let expiresAt: ContinuousClock.Instant
+    }
+
+    private struct AutomaticResumeChange: Sendable {
+        let previousIntervals: [ProcessIdentity: TimeInterval]
+        let addedProcesses: Set<ProcessIdentity>
+
+        static let empty = AutomaticResumeChange(
+            previousIntervals: [:],
+            addedProcesses: []
+        )
+    }
 
     private let system: any ProcessSystemControlling
     private let crashWatchdog: any ProcessCrashWatchdogControlling
@@ -24,10 +40,14 @@ actor ProcessController {
     private let controlInterval: TimeInterval
     private let minimumRunDuration: TimeInterval
     private let clock: ProcessControlClock
+    private let signalTelemetry: ProcessControlSignalTelemetry
     private let failureRetryInterval: TimeInterval = 1
     private let minimumLimitFrameDuration: TimeInterval = 0.1
     private let minimumLimitRestDuration: TimeInterval = 0.001
-    private let maximumLimitStopDuration: TimeInterval = 0.35
+    private let networkMaximumLimitStopDuration: TimeInterval = 0.1
+    private let offlineMaximumLimitStopDuration: TimeInterval = 0.5
+    private let criticalFileActivityProbeInterval: TimeInterval = 2
+    private let networkSensitivityReleaseDelay: TimeInterval = 5
     private let limitObservationInterval: TimeInterval = 1
     private let userActivationProbeDuration: TimeInterval = 0.4
     private let foregroundActivationProtectionDuration: TimeInterval = 1
@@ -47,6 +67,14 @@ actor ProcessController {
     private var pausedBaselineCPU: [String: Double] = [:]
     private var pauseActivationProbeUntil: [String: Date] = [:]
     private var foregroundActivationProtectionUntil: [String: ContinuousClock.Instant] = [:]
+    private var foregroundActivationMinimumRevision: [String: UInt64] = [:]
+    private var networkSensitiveProcesses: [String: Set<ProcessIdentity>] = [:]
+    private var networkSensitiveUntil: [String: [ProcessIdentity: ContinuousClock.Instant]] = [:]
+    private var downloadProtectedProcesses: [String: Set<ProcessIdentity>] = [:]
+    private var criticalFileActivityCache: [ProcessIdentity: CriticalFileActivityCacheEntry] = [:]
+    private var automaticResumeIntervals: [ProcessIdentity: TimeInterval] = [:]
+    private var automaticResumeStopOperations: [UUID: Set<ProcessIdentity>] = [:]
+    private var signalStoppedAt: [ProcessIdentity: ContinuousClock.Instant] = [:]
     private var audioProtection = AudioProtectionTracker()
     private var hideRequested: Set<String> = []
     private var quitRequested: Set<String> = []
@@ -61,6 +89,7 @@ actor ProcessController {
     private var reconciliationWaiters: [CheckedContinuation<Void, Never>] = []
     private var tickTask: Task<Void, Never>?
     private var limitDeadlines = LimitDeadlineQueue()
+    private var limitPulseArbiter = LimitPulseArbiter()
     private var limitSchedulerTask: Task<Void, Never>?
     private var scheduledLimitDeadline: ContinuousClock.Instant?
     private var limitSchedulerGeneration: UInt64 = 0
@@ -101,8 +130,9 @@ actor ProcessController {
             WindowVisibilitySnapshot.capture()
         },
         controlInterval: TimeInterval = 0.5,
-        minimumRunDuration: TimeInterval = 0.001,
-        clock: ProcessControlClock = .continuous
+        minimumRunDuration: TimeInterval = 0.005,
+        clock: ProcessControlClock = .continuous,
+        signalTelemetry: ProcessControlSignalTelemetry = ProcessControlSignalTelemetry()
     ) {
         self.system = system
         self.crashWatchdog = crashWatchdog
@@ -114,6 +144,7 @@ actor ProcessController {
         self.controlInterval = controlInterval
         self.minimumRunDuration = minimumRunDuration
         self.clock = clock
+        self.signalTelemetry = signalTelemetry
     }
 
     func setEventHandler(_ handler: @escaping EventHandler) {
@@ -144,7 +175,19 @@ actor ProcessController {
             limitDeadlines.remove(identifier: identifier)
             limitRuntimes.removeValue(forKey: identifier)
             limitSelections.removeValue(forKey: identifier)
+            networkSensitiveProcesses.removeValue(forKey: identifier)
+            networkSensitiveUntil.removeValue(forKey: identifier)
+            downloadProtectedProcesses.removeValue(forKey: identifier)
+            limitPulseArbiter.release(identifier: identifier)
         }
+        if !isEnabled {
+            networkSensitiveProcesses.removeAll()
+            networkSensitiveUntil.removeAll()
+            downloadProtectedProcesses.removeAll()
+            criticalFileActivityCache.removeAll()
+            limitPulseArbiter.removeAll()
+        }
+        refreshNetworkSensitivity()
 
         needsStateReconciliation = true
         await drainReconciliationQueue()
@@ -273,15 +316,38 @@ actor ProcessController {
             || limitRuntimes[bundleIdentifier] != nil
         guard isManaged else { return snapshot() }
 
+        foregroundActivationMinimumRevision[bundleIdentifier] = revision == .max
+            ? .max
+            : revision + 1
         foregroundActivationProtectionUntil[bundleIdentifier] = clock.now().advanced(
             by: ProcessControlMath.duration(foregroundActivationProtectionDuration)
         )
 
-        if await restore(
+        let activationStartedAt = clock.now()
+        let restored = await restore(
             identifier: bundleIdentifier,
             resetDelay: true,
-            attempts: restorationAttempts
-        ) {
+            attempts: restorationAttempts,
+            resumeReason: .applicationActivation
+        )
+        let activationDuration = max(
+            0,
+            ProcessControlMath.timeInterval(activationStartedAt.duration(to: clock.now()))
+        )
+        await signalTelemetry.recordMeasurement(ProcessLimitMeasurement(
+            date: Date(),
+            bundleIdentifier: bundleIdentifier,
+            kind: .activation,
+            requestedLimitPercent: rules[bundleIdentifier]?.limitPercent,
+            measuredCPUPercent: nil,
+            cpuDeltaNanoseconds: nil,
+            wallDuration: activationDuration,
+            deadlineLateness: nil,
+            activePulseCount: limitPulseArbiter.activeCount,
+            serviceGap: nil
+        ))
+
+        if restored {
             await setStatus(.normal, for: bundleIdentifier)
         } else {
             await markUnavailable(
@@ -398,6 +464,7 @@ actor ProcessController {
         guard workIsCurrent else { return restorationResult() }
         let result = restorationResult()
         if result.succeeded {
+            automaticResumeIntervals.removeAll()
             await crashWatchdog.disarm()
         }
         return result
@@ -408,7 +475,11 @@ actor ProcessController {
         let until = Date().addingTimeInterval(userActivationProbeDuration)
         for identifier in Array(stoppedByTempra.keys) where rules[identifier]?.action == .pause {
             let stopped = stoppedByTempra[identifier, default: []]
-            let result = await system.resume(stopped)
+            let result = await resumeProcesses(
+                stopped,
+                identifier: identifier,
+                reason: .userActivationProbe
+            )
             let synchronized = await setStoppedProcesses(result.failed, for: identifier)
             if !synchronized {
                 await markUnavailable(
@@ -427,6 +498,20 @@ actor ProcessController {
 
     func currentSnapshot() -> ProcessControlSnapshot {
         snapshot()
+    }
+
+    func recentSignalEvents() async -> [ProcessControlSignalEvent] {
+        await signalTelemetry.snapshot()
+    }
+
+    func recentLimitMeasurements() async -> [ProcessLimitMeasurement] {
+        await signalTelemetry.measurementSnapshot()
+    }
+
+    func recentLimitTelemetrySummary(
+        since date: Date
+    ) async -> ProcessLimitTelemetrySummary {
+        await signalTelemetry.summary(since: date)
     }
 
     @discardableResult
@@ -451,6 +536,186 @@ actor ProcessController {
             .union(pauseActivationProbeUntil.keys)
     }
 
+    private func minimumControlledDutyCycle(
+        maximumStopDuration: TimeInterval
+    ) -> Double {
+        let cycleDuration = minimumRunDuration + maximumStopDuration
+        guard cycleDuration > 0 else { return 0 }
+        return min(1, max(0, minimumRunDuration / cycleDuration))
+    }
+
+    private func refreshNetworkSensitivity() {
+        guard isEnabled else { return }
+        let now = clock.now()
+        let trackedNetworkIdentifiers = Set(networkSensitiveProcesses.keys)
+            .union(networkSensitiveUntil.keys)
+        for identifier in trackedNetworkIdentifiers {
+            guard rules[identifier]?.action == .limit,
+                  let currentProcesses = groups[identifier]?.processIdentities else {
+                networkSensitiveProcesses.removeValue(forKey: identifier)
+                networkSensitiveUntil.removeValue(forKey: identifier)
+                continue
+            }
+            var deadlines = networkSensitiveUntil[identifier, default: [:]].filter {
+                currentProcesses.contains($0.key) && $0.value > now
+            }
+            for sample in groups[identifier]?.processSamples ?? [] {
+                if sample.networkActivity == .active {
+                    deadlines[sample.identity] = now.advanced(
+                        by: ProcessControlMath.duration(networkSensitivityReleaseDelay)
+                    )
+                }
+            }
+            let retainedSensitive = Set(deadlines.keys)
+            if retainedSensitive.isEmpty {
+                networkSensitiveProcesses.removeValue(forKey: identifier)
+                networkSensitiveUntil.removeValue(forKey: identifier)
+            } else {
+                networkSensitiveProcesses[identifier] = retainedSensitive
+                networkSensitiveUntil[identifier] = deadlines
+            }
+        }
+
+        for (identifier, app) in groups where rules[identifier]?.action == .limit {
+            let activeProcesses = Set(app.processSamples.compactMap { sample in
+                sample.networkActivity == .active ? sample.identity : nil
+            })
+            guard !activeProcesses.isEmpty else { continue }
+            markNetworkSensitive(activeProcesses, for: identifier, now: now)
+        }
+
+        for identifier in Array(foregroundActivationMinimumRevision.keys)
+            where groups[identifier] == nil || rules[identifier]?.hasBehavior != true {
+            foregroundActivationMinimumRevision.removeValue(forKey: identifier)
+            foregroundActivationProtectionUntil.removeValue(forKey: identifier)
+        }
+    }
+
+    private func markNetworkSensitive(
+        _ processes: Set<ProcessIdentity>,
+        for identifier: String,
+        now: ContinuousClock.Instant? = nil
+    ) {
+        guard !processes.isEmpty else { return }
+        let expiresAt = (now ?? clock.now()).advanced(
+            by: ProcessControlMath.duration(networkSensitivityReleaseDelay)
+        )
+        networkSensitiveProcesses[identifier, default: []].formUnion(processes)
+        for process in processes {
+            networkSensitiveUntil[identifier, default: [:]][process] = expiresAt
+        }
+    }
+
+    private func latencySensitiveProcesses(
+        for app: ProcessControlTarget
+    ) -> Set<ProcessIdentity> {
+        var processes = networkSensitiveProcesses[app.bundleIdentifier, default: []]
+        processes.formUnion(app.processSamples.compactMap { sample in
+            sample.networkActivity.isLatencySensitive ? sample.identity : nil
+        })
+        return processes.intersection(app.processIdentities)
+    }
+
+    private func maximumLimitStopDuration(
+        for identifier: String,
+        processes: Set<ProcessIdentity>
+    ) -> TimeInterval {
+        guard let app = groups[identifier] else {
+            return networkMaximumLimitStopDuration
+        }
+        return latencySensitiveProcesses(for: app).isDisjoint(with: processes)
+            ? offlineMaximumLimitStopDuration
+            : networkMaximumLimitStopDuration
+    }
+
+    private func refreshCriticalFileProtection() async {
+        let currentProcesses = groups.values.reduce(into: Set<ProcessIdentity>()) {
+            $0.formUnion($1.processIdentities)
+        }
+        criticalFileActivityCache = criticalFileActivityCache.filter {
+            currentProcesses.contains($0.key)
+        }
+
+        for identifier in Array(downloadProtectedProcesses.keys).sorted() {
+            guard workIsCurrent else { return }
+            guard rules[identifier]?.action == .limit,
+                  let app = groups[identifier] else {
+                downloadProtectedProcesses.removeValue(forKey: identifier)
+                continue
+            }
+            var protected = downloadProtectedProcesses[identifier, default: []]
+                .intersection(app.processIdentities)
+            for process in protected.sorted(by: { $0.pid < $1.pid }) {
+                let activity = await criticalFileActivity(for: process)
+                guard workIsCurrent else { return }
+                if activity == .inactive {
+                    protected.remove(process)
+                }
+            }
+            if protected.isEmpty {
+                downloadProtectedProcesses.removeValue(forKey: identifier)
+            } else {
+                downloadProtectedProcesses[identifier] = protected
+            }
+        }
+    }
+
+    private func criticalFileActivity(
+        for process: ProcessIdentity
+    ) async -> ProcessCriticalFileActivity {
+        let now = clock.now()
+        if let cached = criticalFileActivityCache[process], cached.expiresAt > now {
+            return cached.activity
+        }
+        let activity = await system.criticalFileActivity(for: process)
+        guard workIsCurrent else { return .unknown }
+        criticalFileActivityCache[process] = CriticalFileActivityCacheEntry(
+            activity: activity,
+            expiresAt: clock.now().advanced(
+                by: ProcessControlMath.duration(criticalFileActivityProbeInterval)
+            )
+        )
+        return activity
+    }
+
+    private func selectLimitTargets(
+        for app: ProcessControlTarget,
+        limitPercent: Double
+    ) -> ProcessLimitSelection {
+        let previousControlledProcesses = limitSelections[app.bundleIdentifier]?
+            .controlledProcesses ?? []
+        let sensitiveProcesses = latencySensitiveProcesses(for: app)
+        let criticalProcesses = downloadProtectedProcesses[
+            app.bundleIdentifier,
+            default: []
+        ]
+        let offlineSelection = ProcessLimitTargetSelector.select(
+            samples: app.processSamples,
+            limitPercent: limitPercent,
+            previousControlledProcesses: previousControlledProcesses,
+            latencySensitiveProcesses: sensitiveProcesses,
+            criticalActivityProcesses: criticalProcesses,
+            protectsAudio: rules[app.bundleIdentifier]?.protectAudio == true,
+            minimumControlledDutyCycle: minimumControlledDutyCycle(
+                maximumStopDuration: offlineMaximumLimitStopDuration
+            )
+        )
+        guard !offlineSelection.controlledProcesses.isDisjoint(with: sensitiveProcesses) else {
+            return offlineSelection
+        }
+        return ProcessLimitTargetSelector.select(
+            samples: app.processSamples,
+            limitPercent: limitPercent,
+            previousControlledProcesses: previousControlledProcesses,
+            latencySensitiveProcesses: sensitiveProcesses,
+            criticalActivityProcesses: criticalProcesses,
+            protectsAudio: rules[app.bundleIdentifier]?.protectAudio == true,
+            minimumControlledDutyCycle: minimumControlledDutyCycle(
+                maximumStopDuration: networkMaximumLimitStopDuration
+            )
+        )
+    }
+
     private func tick(trigger: ProcessControlTickTrigger) async {
         if trigger == .cadence {
             tickTask = nil
@@ -462,8 +727,11 @@ actor ProcessController {
             return
         }
         let now = Date()
+        refreshNetworkSensitivity()
         if trigger == .cadence {
             refreshWindowVisibility()
+            await refreshCriticalFileProtection()
+            guard workIsCurrent else { return }
         }
 
         for (identifier, rule) in rules where rule.hasBehavior {
@@ -706,15 +974,19 @@ actor ProcessController {
             }
         case .limit:
             pausedBaselineCPU.removeValue(forKey: identifier)
-            guard await restoreBackgroundPriority(
-                for: identifier,
-                attempts: restorationAttempts
-            ) else {
-                await markUnavailable(
-                    identifier,
-                    detail: "Tempra could not restore normal process priority before limiting CPU."
-                )
-                return
+            if rule.usesEfficiencyCoreScheduling {
+                guard await applyBackgroundPriority(to: app) else { return }
+            } else {
+                guard await restoreBackgroundPriority(
+                    for: identifier,
+                    attempts: restorationAttempts
+                ) else {
+                    await markUnavailable(
+                        identifier,
+                        detail: "Tempra could not restore normal process priority before limiting CPU."
+                    )
+                    return
+                }
             }
             guard workIsCurrent else { return }
             if advancesLimitCycle || limitRuntimes[identifier] == nil {
@@ -792,14 +1064,22 @@ actor ProcessController {
             return false
         }
         guard workIsCurrent else { return false }
-        let result = await system.stop(processesToStop)
+        let result = await stopProcesses(
+            processesToStop,
+            identifier: identifier,
+            reason: .backgroundPause
+        )
         if !workIsCurrent {
             let stopped = existing.union(result.applied)
             _ = await setStoppedProcesses(stopped, for: identifier)
             return false
         }
         guard result.failed.isEmpty else {
-            let rollback = await system.resume(existing.union(result.applied))
+            let rollback = await resumeProcesses(
+                existing.union(result.applied),
+                identifier: identifier,
+                reason: .stopRollback
+            )
             _ = await setStoppedProcesses(rollback.failed, for: identifier)
             pausedBaselineCPU.removeValue(forKey: identifier)
             await markUnavailable(identifier, detail: "Tempra could not pause every process.")
@@ -819,10 +1099,37 @@ actor ProcessController {
     private func applyBackgroundPriority(to app: ProcessControlTarget) async -> Bool {
         guard workIsCurrent else { return false }
         let identifier = app.bundleIdentifier
-        let existing = backgroundedByTempra[identifier, default: []]
+        var existing = backgroundedByTempra[identifier, default: []]
             .intersection(app.processIdentities)
+        var protectedProcesses = latencySensitiveProcesses(for: app)
+        protectedProcesses.formUnion(
+            downloadProtectedProcesses[identifier, default: []]
+        )
+        protectedProcesses.formUnion(app.processSamples.compactMap { sample in
+            sample.isPlayingAudio ? sample.identity : nil
+        })
+        let desired = app.processIdentities.subtracting(protectedProcesses)
+
+        let noLongerDesired = existing.subtracting(desired)
+        if !noLongerDesired.isEmpty {
+            let restoreResult = await system.restorePriority(noLongerDesired)
+            existing.subtract(restoreResult.applied.union(restoreResult.stale))
+            guard workIsCurrent else {
+                backgroundedByTempra[identifier] = existing
+                return false
+            }
+            guard restoreResult.failed.isEmpty else {
+                backgroundedByTempra[identifier] = existing.union(restoreResult.failed)
+                await markUnavailable(
+                    identifier,
+                    detail: "Tempra could not restore network or critical-activity processes to normal priority."
+                )
+                return false
+            }
+        }
+
         let result = await system.setBackgroundPriority(
-            app.processIdentities.subtracting(existing)
+            desired.subtracting(existing)
         )
         if !workIsCurrent {
             backgroundedByTempra[identifier] = existing.union(result.applied)
@@ -838,13 +1145,12 @@ actor ProcessController {
             return false
         }
 
-        let backgrounded = existing.union(result.applied)
-        guard !backgrounded.isEmpty else {
+        let backgrounded = existing.union(result.applied).intersection(desired)
+        if backgrounded.isEmpty {
             backgroundedByTempra.removeValue(forKey: identifier)
-            await setStatus(.normal, for: identifier)
-            return false
+        } else {
+            backgroundedByTempra[identifier] = backgrounded
         }
-        backgroundedByTempra[identifier] = backgrounded
         return true
     }
 
@@ -854,18 +1160,30 @@ actor ProcessController {
     ) async {
         guard workIsCurrent else { return }
         let identifier = app.bundleIdentifier
-        let selection = ProcessLimitTargetSelector.select(
-            samples: app.processSamples,
-            limitPercent: requestedLimitPercent,
-            previousControlledProcesses: limitSelections[identifier]?.controlledProcesses ?? []
+        let selection = selectLimitTargets(
+            for: app,
+            limitPercent: requestedLimitPercent
         )
         limitSelections[identifier] = selection
         let controlledProcesses = selection.controlledProcesses
+        await signalTelemetry.recordMeasurement(ProcessLimitMeasurement(
+            date: Date(),
+            bundleIdentifier: identifier,
+            kind: .observation,
+            requestedLimitPercent: requestedLimitPercent,
+            measuredCPUPercent: selection.controlledCPUPercent,
+            cpuDeltaNanoseconds: nil,
+            wallDuration: nil,
+            deadlineLateness: nil,
+            activePulseCount: limitPulseArbiter.activeCount,
+            serviceGap: nil
+        ))
 
         let stoppedOutsideSelection = stoppedByTempra[identifier, default: []]
             .subtracting(controlledProcesses)
         if !stoppedOutsideSelection.isEmpty
             || limitRuntimes[identifier]?.processIdentities != controlledProcesses {
+            limitPulseArbiter.release(identifier: identifier)
             limitDeadlines.remove(identifier: identifier)
             limitRuntimes.removeValue(forKey: identifier)
             guard await resumeStoppedProcesses(
@@ -881,19 +1199,18 @@ actor ProcessController {
         }
 
         guard !controlledProcesses.isEmpty else {
+            limitPulseArbiter.release(identifier: identifier)
             limitDeadlines.remove(identifier: identifier)
             limitRuntimes.removeValue(forKey: identifier)
-            let hasProtectedNetwork = app.processSamples.contains {
-                $0.networkActivity.protectsFromLimiting
-            }
-            await setStatus(
-                hasProtectedNetwork ? .networkProtected : .normal,
-                for: identifier
-            )
+            await setStatus(selection.targetIsReachable ? .normal : .waiting, for: identifier)
             return
         }
 
         let limitPercent = selection.controlledLimitPercent
+        let maximumStopDuration = maximumLimitStopDuration(
+            for: identifier,
+            processes: controlledProcesses
+        )
         let now = clock.now()
         guard let nowCPU = await readCPUTime(
             for: controlledProcesses,
@@ -906,7 +1223,8 @@ actor ProcessController {
         let initialEstimate = max(selection.controlledCPUPercent, limitPercent, 1)
         let initialCredit = initialLimitCredit(
             estimatedFullSpeedCPU: initialEstimate,
-            limitPercent: limitPercent
+            limitPercent: limitPercent,
+            maximumStopDuration: maximumStopDuration
         )
         var runtime = limitRuntimes[identifier] ?? LimitRuntime(
             lastCPUNanoseconds: nowCPU,
@@ -945,7 +1263,8 @@ actor ProcessController {
                 runtime: &runtime,
                 nowCPU: nowCPU,
                 now: now,
-                limitPercent: limitPercent
+                limitPercent: limitPercent,
+                maximumStopDuration: maximumStopDuration
             )
         }
 
@@ -1000,12 +1319,14 @@ actor ProcessController {
             return
         }
 
+        let wasStopped = runtime.phase == .stopped
         let estimatedCPUPerWallSecond = max(runtime.estimatedFullSpeedCPU / 100, 0.01)
         let affordableRunDuration = max(0, runtime.cpuCreditNanoseconds)
             / (estimatedCPUPerWallSecond * 1_000_000_000)
         let frameDuration = limitFrameDuration(
             estimatedFullSpeedCPU: runtime.estimatedFullSpeedCPU,
-            limitPercent: limitPercent
+            limitPercent: limitPercent,
+            maximumStopDuration: maximumStopDuration
         )
         let maximumPulseDuration = min(
             frameDuration,
@@ -1016,7 +1337,7 @@ actor ProcessController {
             let stoppedAt = runtime.stoppedAt ?? now
             runtime.stoppedAt = stoppedAt
             if now >= stoppedAt.advanced(
-                by: ProcessControlMath.duration(maximumLimitStopDuration)
+                by: ProcessControlMath.duration(maximumStopDuration)
             ) {
                 runDuration = minimumRunDuration
             }
@@ -1050,7 +1371,62 @@ actor ProcessController {
             return
         }
 
+        if wasStopped {
+            guard await prepareLimitStop(
+                controlledProcesses,
+                identifier: identifier,
+                generation: generation,
+                requestedLimitPercent: requestedLimitPercent
+            ) else {
+                scheduleLimitScheduler()
+                return
+            }
+
+            let arbitrationNow = clock.now()
+            let expectedEnd = arbitrationNow.advanced(
+                by: ProcessControlMath.duration(runDuration)
+            )
+            let stoppedAt = runtime.stoppedAt ?? now
+            let latestStart = stoppedAt.advanced(
+                by: ProcessControlMath.duration(maximumStopDuration)
+            )
+            let decision = limitPulseArbiter.decision(
+                for: .init(
+                    identifier: identifier,
+                    generation: generation,
+                    requestedAt: arbitrationNow,
+                    latestStart: latestStart,
+                    isLatencySensitive: maximumStopDuration
+                        <= networkMaximumLimitStopDuration
+                ),
+                minimumGap: ProcessControlMath.duration(minimumLimitRestDuration)
+            )
+            if case .deferUntil(let deferredUntil) = decision {
+                limitRuntimes[identifier] = runtime
+                limitDeadlines.upsert(LimitDeadline(
+                    identifier: identifier,
+                    deadline: deferredUntil,
+                    generation: generation,
+                    limitPercent: limitPercent,
+                    processIdentities: controlledProcesses,
+                    kind: .evaluate
+                ))
+                scheduleLimitScheduler()
+                await setStatus(
+                    limitStatus(for: identifier, fallback: requestedLimitPercent),
+                    for: identifier
+                )
+                return
+            }
+            limitPulseArbiter.acquire(
+                identifier: identifier,
+                generation: generation,
+                expectedEnd: expectedEnd
+            )
+        }
+
         guard await resumeStoppedProcesses(for: identifier, attempts: restorationAttempts) else {
+            limitPulseArbiter.release(identifier: identifier, generation: generation)
             await markUnavailable(identifier, detail: "Tempra could not resume every process.")
             return
         }
@@ -1058,7 +1434,10 @@ actor ProcessController {
         guard let resumedCPUTime = await readCPUTime(
             for: controlledProcesses,
             identifier: identifier
-        ) else { return }
+        ) else {
+            limitPulseArbiter.release(identifier: identifier, generation: generation)
+            return
+        }
         runtime.lastCPUNanoseconds = resumedCPUTime
         runtime.lastAccountingAt = clock.now()
         runtime.runStartedAt = runtime.lastAccountingAt
@@ -1068,6 +1447,11 @@ actor ProcessController {
 
         let stopDeadline = runtime.lastAccountingAt.advanced(
             by: ProcessControlMath.duration(runDuration)
+        )
+        limitPulseArbiter.acquire(
+            identifier: identifier,
+            generation: generation,
+            expectedEnd: stopDeadline
         )
         limitRuntimes[identifier] = runtime
         limitDeadlines.upsert(LimitDeadline(
@@ -1086,7 +1470,8 @@ actor ProcessController {
         runtime: inout LimitRuntime,
         nowCPU: UInt64,
         now: ContinuousClock.Instant,
-        limitPercent: Double
+        limitPercent: Double,
+        maximumStopDuration: TimeInterval
     ) -> Double? {
         let elapsed = max(
             0,
@@ -1121,7 +1506,8 @@ actor ProcessController {
             * 1_000_000_000
         let allowedFrameCredit = limitFrameDuration(
             estimatedFullSpeedCPU: runtime.estimatedFullSpeedCPU,
-            limitPercent: limitPercent
+            limitPercent: limitPercent,
+            maximumStopDuration: maximumStopDuration
         ) * allowedCPUPerSecond
         let maximumCredit = max(
             allowedFrameCredit,
@@ -1161,6 +1547,10 @@ actor ProcessController {
         limitPercent: Double,
         now: ContinuousClock.Instant
     ) {
+        let maximumStopDuration = maximumLimitStopDuration(
+            for: identifier,
+            processes: runtime.processIdentities
+        )
         let estimatedCPUPerWallSecond = max(runtime.estimatedFullSpeedCPU / 100, 0.01)
         let minimumSliceCost = minimumRunDuration
             * estimatedCPUPerWallSecond
@@ -1169,10 +1559,11 @@ actor ProcessController {
         let allowedCPUPerSecond = max(0, limitPercent) / 100 * 1_000_000_000
         let creditWait = allowedCPUPerSecond > 0
             ? creditNeeded / allowedCPUPerSecond
-            : maximumLimitStopDuration
+            : maximumStopDuration
         let frameDuration = limitFrameDuration(
             estimatedFullSpeedCPU: runtime.estimatedFullSpeedCPU,
-            limitPercent: limitPercent
+            limitPercent: limitPercent,
+            maximumStopDuration: maximumStopDuration
         )
         let estimatedDemand = max(runtime.estimatedFullSpeedCPU, 0.01)
         let targetDutyCycle = min(1, max(0, limitPercent) / estimatedDemand)
@@ -1182,7 +1573,7 @@ actor ProcessController {
             frameDuration - targetRunDuration
         )
         let stopDuration = min(
-            maximumLimitStopDuration,
+            maximumStopDuration,
             max(targetRestDuration, creditWait)
         )
         limitDeadlines.upsert(LimitDeadline(
@@ -1197,19 +1588,21 @@ actor ProcessController {
 
     private func limitFrameDuration(
         estimatedFullSpeedCPU: Double,
-        limitPercent: Double
+        limitPercent: Double,
+        maximumStopDuration: TimeInterval
     ) -> TimeInterval {
         let normalizedLimit = max(limitPercent, CPULimitRange.minimumPercent)
         let demandRatio = max(estimatedFullSpeedCPU, normalizedLimit) / normalizedLimit
         return min(
-            maximumLimitStopDuration,
+            maximumStopDuration,
             max(minimumLimitFrameDuration, minimumRunDuration * demandRatio)
         )
     }
 
     private func initialLimitCredit(
         estimatedFullSpeedCPU: Double,
-        limitPercent: Double
+        limitPercent: Double,
+        maximumStopDuration: TimeInterval
     ) -> Double {
         let estimatedCPUPerWallSecond = max(estimatedFullSpeedCPU / 100, 0.01)
         let minimumSliceCost = minimumRunDuration
@@ -1218,9 +1611,236 @@ actor ProcessController {
         let allowedCPUPerSecond = max(0, limitPercent) / 100 * 1_000_000_000
         let frameCredit = limitFrameDuration(
             estimatedFullSpeedCPU: estimatedFullSpeedCPU,
-            limitPercent: limitPercent
+            limitPercent: limitPercent,
+            maximumStopDuration: maximumStopDuration
         ) * allowedCPUPerSecond
         return max(frameCredit, minimumSliceCost)
+    }
+
+    private func prepareLimitStop(
+        _ processes: Set<ProcessIdentity>,
+        identifier: String,
+        generation: UInt64,
+        requestedLimitPercent: Double
+    ) async -> Bool {
+        var activeProcesses: Set<ProcessIdentity> = []
+        var unavailableProcesses: Set<ProcessIdentity> = []
+        var activeDownloadProcesses: Set<ProcessIdentity> = []
+        var inactiveDownloadProcesses: Set<ProcessIdentity> = []
+
+        for process in processes.sorted(by: { $0.pid < $1.pid }) {
+            let activity = await system.networkActivity(for: process)
+            guard workIsCurrent,
+                  limitControlIsCurrent(
+                    identifier: identifier,
+                    generation: generation,
+                    processIdentities: processes
+                  ) else {
+                return false
+            }
+            switch activity {
+            case .active:
+                activeProcesses.insert(process)
+            case .unknown:
+                unavailableProcesses.insert(process)
+            case .inactive:
+                break
+            }
+
+            let fileActivity = await criticalFileActivity(for: process)
+            guard workIsCurrent,
+                  limitControlIsCurrent(
+                    identifier: identifier,
+                    generation: generation,
+                    processIdentities: processes
+                  ) else {
+                return false
+            }
+            switch fileActivity {
+            case .activeDownload:
+                activeDownloadProcesses.insert(process)
+            case .inactive:
+                inactiveDownloadProcesses.insert(process)
+            case .unknown:
+                break
+            }
+        }
+
+        if !inactiveDownloadProcesses.isEmpty {
+            downloadProtectedProcesses[identifier]?.subtract(inactiveDownloadProcesses)
+            if downloadProtectedProcesses[identifier]?.isEmpty == true {
+                downloadProtectedProcesses.removeValue(forKey: identifier)
+            }
+        }
+
+        guard !activeProcesses.isEmpty
+                || !unavailableProcesses.isEmpty
+                || !activeDownloadProcesses.isEmpty else {
+            return true
+        }
+
+        let sensitiveProcesses = activeProcesses.union(unavailableProcesses)
+        markNetworkSensitive(sensitiveProcesses, for: identifier)
+        downloadProtectedProcesses[identifier, default: []].formUnion(
+            activeDownloadProcesses
+        )
+
+        guard workIsCurrent,
+              let app = groups[identifier],
+              rules[identifier]?.action == .limit else {
+            return false
+        }
+
+        let revisedSelection = selectLimitTargets(
+            for: app,
+            limitPercent: requestedLimitPercent
+        )
+        limitSelections[identifier] = revisedSelection
+        if revisedSelection.controlledProcesses != processes {
+            if !activeProcesses.isEmpty {
+                await recordPreventedStop(
+                    activeProcesses,
+                    identifier: identifier,
+                    reason: .networkActive
+                )
+            }
+            if !unavailableProcesses.isEmpty {
+                await recordPreventedStop(
+                    unavailableProcesses,
+                    identifier: identifier,
+                    reason: .networkProbeUnavailable
+                )
+            }
+            if !activeDownloadProcesses.isEmpty {
+                await recordPreventedStop(
+                    activeDownloadProcesses,
+                    identifier: identifier,
+                    reason: .criticalFileActivity
+                )
+            }
+            limitDeadlines.remove(identifier: identifier)
+            limitRuntimes.removeValue(forKey: identifier)
+            await runLimitCycle(for: app, limitPercent: requestedLimitPercent)
+            return false
+        }
+        return true
+    }
+
+    private func stopProcesses(
+        _ processes: Set<ProcessIdentity>,
+        identifier: String,
+        reason: ProcessControlSignalReason
+    ) async -> ProcessOperationResult {
+        guard !processes.isEmpty else { return ProcessOperationResult() }
+        let automaticResumeOperationID: UUID?
+        if reason == .cpuLimitPulse {
+            let operationID = UUID()
+            automaticResumeStopOperations[operationID] = processes
+            automaticResumeOperationID = operationID
+        } else {
+            automaticResumeOperationID = nil
+        }
+        let automaticResumeAfter = reason == .cpuLimitPulse
+            ? maximumLimitStopDuration(for: identifier, processes: processes)
+            : nil
+        let result = await system.stop(
+            processes,
+            automaticResumeAfter: automaticResumeAfter
+        )
+        if reason == .cpuLimitPulse {
+            if let automaticResumeOperationID {
+                automaticResumeStopOperations.removeValue(forKey: automaticResumeOperationID)
+            }
+            let stillPending = automaticResumeStopOperations.values.reduce(
+                into: Set<ProcessIdentity>()
+            ) { pending, operationProcesses in
+                pending.formUnion(operationProcesses)
+            }
+            for process in result.failed.union(result.stale).subtracting(stillPending) {
+                automaticResumeIntervals.removeValue(forKey: process)
+            }
+        }
+        let stoppedAt = clock.now()
+        for process in result.applied where signalStoppedAt[process] == nil {
+            signalStoppedAt[process] = stoppedAt
+        }
+        await signalTelemetry.record(ProcessControlSignalEvent(
+            date: Date(),
+            bundleIdentifier: identifier,
+            operation: .stop,
+            reason: reason,
+            requested: processes,
+            result: result,
+            stoppedDurations: [:]
+        ))
+        return result
+    }
+
+    private func resumeProcesses(
+        _ processes: Set<ProcessIdentity>,
+        identifier: String?,
+        reason: ProcessControlSignalReason
+    ) async -> ProcessOperationResult {
+        guard !processes.isEmpty else { return ProcessOperationResult() }
+        let result = await system.resume(processes)
+        let stillPending = automaticResumeStopOperations.values.reduce(
+            into: Set<ProcessIdentity>()
+        ) { pending, operationProcesses in
+            pending.formUnion(operationProcesses)
+        }
+        for process in result.applied.union(result.stale).subtracting(stillPending) {
+            automaticResumeIntervals.removeValue(forKey: process)
+        }
+        let resumedAt = clock.now()
+        var durations: [ProcessIdentity: TimeInterval] = [:]
+        for process in result.applied.union(result.stale) {
+            if let stoppedAt = signalStoppedAt.removeValue(forKey: process) {
+                durations[process] = max(
+                    0,
+                    ProcessControlMath.timeInterval(stoppedAt.duration(to: resumedAt))
+                )
+            }
+        }
+        await signalTelemetry.record(ProcessControlSignalEvent(
+            date: Date(),
+            bundleIdentifier: identifier,
+            operation: .resume,
+            reason: reason,
+            requested: processes,
+            result: result,
+            stoppedDurations: durations
+        ))
+        if let identifier, let maximumGap = durations.values.max() {
+            await signalTelemetry.recordMeasurement(ProcessLimitMeasurement(
+                date: Date(),
+                bundleIdentifier: identifier,
+                kind: .serviceGap,
+                requestedLimitPercent: rules[identifier]?.limitPercent,
+                measuredCPUPercent: nil,
+                cpuDeltaNanoseconds: nil,
+                wallDuration: nil,
+                deadlineLateness: nil,
+                activePulseCount: limitPulseArbiter.activeCount,
+                serviceGap: maximumGap
+            ))
+        }
+        return result
+    }
+
+    private func recordPreventedStop(
+        _ processes: Set<ProcessIdentity>,
+        identifier: String,
+        reason: ProcessControlSignalReason
+    ) async {
+        await signalTelemetry.record(ProcessControlSignalEvent(
+            date: Date(),
+            bundleIdentifier: identifier,
+            operation: .stopPrevented,
+            reason: reason,
+            requested: processes,
+            result: ProcessOperationResult(),
+            stoppedDurations: [:]
+        ))
     }
 
     private func maintainLimitCycle(
@@ -1229,16 +1849,16 @@ actor ProcessController {
     ) async {
         guard workIsCurrent else { return }
         let identifier = app.bundleIdentifier
-        let selection = ProcessLimitTargetSelector.select(
-            samples: app.processSamples,
-            limitPercent: requestedLimitPercent,
-            previousControlledProcesses: limitSelections[identifier]?.controlledProcesses ?? []
+        let selection = selectLimitTargets(
+            for: app,
+            limitPercent: requestedLimitPercent
         )
         limitSelections[identifier] = selection
         guard let runtime = limitRuntimes[identifier] else { return }
         let generation = runtime.generation
 
         if runtime.processIdentities != selection.controlledProcesses {
+            limitPulseArbiter.release(identifier: identifier)
             limitDeadlines.remove(identifier: identifier)
             limitRuntimes.removeValue(forKey: identifier)
             await runLimitCycle(for: app, limitPercent: requestedLimitPercent)
@@ -1259,14 +1879,36 @@ actor ProcessController {
             limitRuntimes.removeValue(forKey: identifier)
             return
         }
+        guard await prepareLimitStop(
+            runtime.processIdentities,
+            identifier: identifier,
+            generation: generation,
+            requestedLimitPercent: requestedLimitPercent
+        ) else {
+            return
+        }
+        guard let newlyArmedProcesses = await armWatchdogAutomaticResume(
+            runtime.processIdentities,
+            for: identifier
+        ) else {
+            return
+        }
         guard limitControlIsCurrent(
             identifier: identifier,
             generation: generation,
             processIdentities: runtime.processIdentities
         ) else {
+            await cancelWatchdogAutomaticResume(
+                newlyArmedProcesses,
+                for: identifier
+            )
             return
         }
-        let result = await system.stop(runtime.processIdentities)
+        let result = await stopProcesses(
+            runtime.processIdentities,
+            identifier: identifier,
+            reason: .cpuLimitPulse
+        )
         guard workIsCurrent else {
             await trackStoppedProcessesFromStaleWork(result.applied, for: identifier)
             return
@@ -1280,7 +1922,11 @@ actor ProcessController {
             return
         }
         guard result.failed.isEmpty else {
-            let rollback = await system.resume(result.applied)
+            let rollback = await resumeProcesses(
+                result.applied,
+                identifier: identifier,
+                reason: .stopRollback
+            )
             limitRuntimes.removeValue(forKey: identifier)
             _ = await setStoppedProcesses(rollback.failed, for: identifier)
             let priorityRollback = await system.restorePriority(
@@ -1323,6 +1969,9 @@ actor ProcessController {
               runtime.processIdentities == processIdentities else {
             return
         }
+        defer {
+            limitPulseArbiter.release(identifier: identifier, generation: generation)
+        }
         guard isEnabled,
               let app = groups[identifier],
               processIdentities.isSubset(of: app.processIdentities),
@@ -1360,15 +2009,39 @@ actor ProcessController {
             scheduleNextTick()
             return
         }
+        guard await prepareLimitStop(
+            processIdentities,
+            identifier: identifier,
+            generation: generation,
+            requestedLimitPercent: rules[identifier]?.limitPercent ?? limitPercent
+        ) else {
+            scheduleNextTick()
+            return
+        }
+        guard let newlyArmedProcesses = await armWatchdogAutomaticResume(
+            processIdentities,
+            for: identifier
+        ) else {
+            scheduleNextTick()
+            return
+        }
         guard limitControlIsCurrent(
             identifier: identifier,
             generation: generation,
             processIdentities: processIdentities
         ) else {
+            await cancelWatchdogAutomaticResume(
+                newlyArmedProcesses,
+                for: identifier
+            )
             scheduleNextTick()
             return
         }
-        let result = await system.stop(processIdentities)
+        let result = await stopProcesses(
+            processIdentities,
+            identifier: identifier,
+            reason: .cpuLimitPulse
+        )
         guard workIsCurrent else {
             await trackStoppedProcessesFromStaleWork(result.applied, for: identifier)
             return
@@ -1383,7 +2056,11 @@ actor ProcessController {
             return
         }
         guard result.failed.isEmpty else {
-            let rollback = await system.resume(result.applied)
+            let rollback = await resumeProcesses(
+                result.applied,
+                identifier: identifier,
+                reason: .stopRollback
+            )
             limitRuntimes.removeValue(forKey: identifier)
             _ = await setStoppedProcesses(rollback.failed, for: identifier)
             let priorityRollback = await system.restorePriority(
@@ -1413,6 +2090,8 @@ actor ProcessController {
         guard workIsCurrent else { return }
         if var runtime = limitRuntimes[identifier], runtime.generation == generation {
             let stoppedAt = clock.now()
+            let pulseStartedAt = runtime.runStartedAt
+            let pulseStartingCPUTime = runtime.lastCPUNanoseconds
             guard let stoppedCPUTime = await readCPUTime(
                 for: processIdentities,
                 identifier: identifier
@@ -1422,12 +2101,34 @@ actor ProcessController {
                 scheduleNextTick()
                 return
             }
+            let pulseWallDuration = pulseStartedAt.map {
+                max(0, ProcessControlMath.timeInterval($0.duration(to: stoppedAt)))
+            }
+            let pulseCPUDelta = stoppedCPUTime >= pulseStartingCPUTime
+                ? stoppedCPUTime - pulseStartingCPUTime
+                : nil
             let measuredCPU = updateLimitAccounting(
                 runtime: &runtime,
                 nowCPU: stoppedCPUTime,
                 now: stoppedAt,
-                limitPercent: limitPercent
+                limitPercent: limitPercent,
+                maximumStopDuration: maximumLimitStopDuration(
+                    for: identifier,
+                    processes: processIdentities
+                )
             )
+            await signalTelemetry.recordMeasurement(ProcessLimitMeasurement(
+                date: Date(),
+                bundleIdentifier: identifier,
+                kind: .pulse,
+                requestedLimitPercent: limitPercent,
+                measuredCPUPercent: measuredCPU,
+                cpuDeltaNanoseconds: pulseCPUDelta,
+                wallDuration: pulseWallDuration,
+                deadlineLateness: nil,
+                activePulseCount: limitPulseArbiter.activeCount,
+                serviceGap: nil
+            ))
             if let measuredCPU,
                measuredCPU <= ProcessControlMath.releaseThreshold(for: limitPercent) {
                 guard await resumeStoppedProcesses(
@@ -1461,7 +2162,11 @@ actor ProcessController {
                 runtime.runStartedAt = observationStartedAt
                 runtime.cpuCreditNanoseconds = initialLimitCredit(
                     estimatedFullSpeedCPU: runtime.estimatedFullSpeedCPU,
-                    limitPercent: limitPercent
+                    limitPercent: limitPercent,
+                    maximumStopDuration: maximumLimitStopDuration(
+                        for: identifier,
+                        processes: processIdentities
+                    )
                 )
                 runtime.stoppedAt = nil
                 runtime.phase = .observing
@@ -1519,6 +2224,10 @@ actor ProcessController {
               runtime.processIdentities == processIdentities else {
             return false
         }
+        if let minimumRevision = foregroundActivationMinimumRevision[identifier],
+           revision < minimumRevision {
+            return false
+        }
         if let protectionUntil = foregroundActivationProtectionUntil[identifier],
            clock.now() < protectionUntil {
             return false
@@ -1531,7 +2240,11 @@ actor ProcessController {
         for identifier: String
     ) async {
         guard !processes.isEmpty else { return }
-        let result = await system.resume(processes)
+        let result = await resumeProcesses(
+            processes,
+            identifier: identifier,
+            reason: .obsoleteLimit
+        )
         let remaining = stoppedByTempra[identifier, default: []]
             .subtracting(result.applied.union(result.stale))
             .union(result.failed)
@@ -1552,7 +2265,11 @@ actor ProcessController {
 
             let retiredStopped = stoppedByTempra[identifier, default: []].subtracting(current)
             if !retiredStopped.isEmpty {
-                let result = await system.resume(retiredStopped)
+                let result = await resumeProcesses(
+                    retiredStopped,
+                    identifier: identifier,
+                    reason: .processReconciliation
+                )
                 let remaining = stoppedByTempra[identifier, default: []]
                     .subtracting(result.applied.union(result.stale))
                 _ = await setStoppedProcesses(remaining, for: identifier)
@@ -1573,9 +2290,14 @@ actor ProcessController {
     private func restore(
         identifier: String,
         resetDelay: Bool,
-        attempts: Int
+        attempts: Int,
+        resumeReason: ProcessControlSignalReason = .restoration
     ) async -> Bool {
-        let resumed = await restoreDisruptiveControl(identifier: identifier, attempts: attempts)
+        let resumed = await restoreDisruptiveControl(
+            identifier: identifier,
+            attempts: attempts,
+            resumeReason: resumeReason
+        )
         guard workIsCurrent else { return false }
         let priorityRestored = await restoreBackgroundPriority(
             for: identifier,
@@ -1600,13 +2322,22 @@ actor ProcessController {
         return resumed && priorityRestored && workIsCurrent
     }
 
-    private func restoreDisruptiveControl(identifier: String, attempts: Int) async -> Bool {
+    private func restoreDisruptiveControl(
+        identifier: String,
+        attempts: Int,
+        resumeReason: ProcessControlSignalReason = .restoration
+    ) async -> Bool {
         guard workIsCurrent else { return false }
+        limitPulseArbiter.release(identifier: identifier)
         limitDeadlines.remove(identifier: identifier)
         limitRuntimes.removeValue(forKey: identifier)
         pausedBaselineCPU.removeValue(forKey: identifier)
         pauseActivationProbeUntil.removeValue(forKey: identifier)
-        return await resumeStoppedProcesses(for: identifier, attempts: attempts)
+        return await resumeStoppedProcesses(
+            for: identifier,
+            attempts: attempts,
+            reason: resumeReason
+        )
     }
 
     private func prepareForDeferredAction(
@@ -1641,11 +2372,17 @@ actor ProcessController {
         return workIsCurrent
     }
 
-    private func resumeStoppedProcesses(for identifier: String, attempts: Int) async -> Bool {
+    private func resumeStoppedProcesses(
+        for identifier: String,
+        attempts: Int,
+        reason: ProcessControlSignalReason = .restoration
+    ) async -> Bool {
         let unresolved = await performWithRetries(
             stoppedByTempra[identifier, default: []],
             attempts: attempts,
-            operation: { await system.resume($0) }
+            operation: {
+                await resumeProcesses($0, identifier: identifier, reason: reason)
+            }
         )
         let synchronized = await setStoppedProcesses(unresolved, for: identifier)
         return unresolved.isEmpty && synchronized && workIsCurrent
@@ -1667,10 +2404,16 @@ actor ProcessController {
     }
 
     private var allWatchdogProtectedProcesses: Set<ProcessIdentity> {
-        limitRuntimes.values.reduce(into: allStoppedProcesses) { processes, runtime in
+        limitRuntimes.values.reduce(
+            into: Set(allStoppedProcesses.lazy.filter {
+                !$0.requiresPrivilegedControl
+            }).union(automaticResumeIntervals.keys)
+        ) { processes, runtime in
             switch runtime.phase {
             case .running, .stopped:
-                processes.formUnion(runtime.processIdentities)
+                processes.formUnion(runtime.processIdentities.lazy.filter {
+                    !$0.requiresPrivilegedControl
+                })
             case .observing:
                 break
             }
@@ -1682,9 +2425,12 @@ actor ProcessController {
         for identifier: String
     ) async -> Bool {
         guard workIsCurrent else { return false }
-        guard !processes.isEmpty else { return true }
+        let userOwnedProcesses = Set(processes.lazy.filter {
+            !$0.requiresPrivilegedControl
+        })
+        guard !userOwnedProcesses.isEmpty else { return true }
         do {
-            try await crashWatchdog.prepareToStop(processes)
+            try await crashWatchdog.prepareToStop(userOwnedProcesses)
             guard workIsCurrent else {
                 _ = await setStoppedProcesses(
                     stoppedByTempra[identifier, default: []],
@@ -1699,6 +2445,77 @@ actor ProcessController {
         }
     }
 
+    private func armWatchdogAutomaticResume(
+        _ processes: Set<ProcessIdentity>,
+        for identifier: String
+    ) async -> AutomaticResumeChange? {
+        guard workIsCurrent, !processes.isEmpty else { return nil }
+        let userOwnedProcesses = Set(processes.lazy.filter {
+            !$0.requiresPrivilegedControl
+        })
+        guard !userOwnedProcesses.isEmpty else { return .empty }
+        let interval = maximumLimitStopDuration(
+            for: identifier,
+            processes: processes
+        )
+        let processesToArm = Set(userOwnedProcesses.filter {
+            automaticResumeIntervals[$0] != interval
+        })
+        guard !processesToArm.isEmpty else { return .empty }
+        let previousIntervals = automaticResumeIntervals.filter {
+            processesToArm.contains($0.key)
+        }
+        let addedProcesses = processesToArm.subtracting(previousIntervals.keys)
+        for process in processesToArm {
+            automaticResumeIntervals[process] = interval
+        }
+        let change = AutomaticResumeChange(
+            previousIntervals: previousIntervals,
+            addedProcesses: addedProcesses
+        )
+        do {
+            try await crashWatchdog.armAutomaticResume(
+                Dictionary(uniqueKeysWithValues: processesToArm.map { ($0, interval) })
+            )
+            guard workIsCurrent else {
+                await cancelWatchdogAutomaticResume(change, for: identifier)
+                return nil
+            }
+            return change
+        } catch {
+            restoreAutomaticResumeIntervals(change)
+            await markUnavailable(identifier, detail: error.localizedDescription)
+            return nil
+        }
+    }
+
+    private func cancelWatchdogAutomaticResume(
+        _ change: AutomaticResumeChange,
+        for identifier: String
+    ) async {
+        restoreAutomaticResumeIntervals(change)
+        do {
+            try await crashWatchdog.synchronizeAutomaticResume(
+                automaticResumeIntervals
+            )
+            try await crashWatchdog.synchronize(allWatchdogProtectedProcesses)
+        } catch {
+            await markUnavailable(identifier, detail: error.localizedDescription)
+        }
+    }
+
+    private func restoreAutomaticResumeIntervals(
+        _ change: AutomaticResumeChange
+    ) {
+        for process in change.addedProcesses {
+            automaticResumeIntervals.removeValue(forKey: process)
+        }
+        automaticResumeIntervals.merge(
+            change.previousIntervals,
+            uniquingKeysWith: { _, previousValue in previousValue }
+        )
+    }
+
     private func setStoppedProcesses(
         _ processes: Set<ProcessIdentity>,
         for identifier: String
@@ -1711,10 +2528,17 @@ actor ProcessController {
 
         do {
             try await crashWatchdog.synchronize(allWatchdogProtectedProcesses)
+            try await crashWatchdog.synchronizeAutomaticResume(
+                automaticResumeIntervals
+            )
             return true
         } catch {
             let pending = allStoppedProcesses
-            let emergencyResult = await system.resume(pending)
+            let emergencyResult = await resumeProcesses(
+                pending,
+                identifier: nil,
+                reason: .emergencyRestoration
+            )
             for trackedIdentifier in Array(stoppedByTempra.keys) {
                 let unresolved = stoppedByTempra[trackedIdentifier, default: []]
                     .intersection(emergencyResult.failed)
@@ -1784,6 +2608,10 @@ actor ProcessController {
     }
 
     private func isFrontmost(_ app: ProcessControlTarget) async -> Bool {
+        if let minimumRevision = foregroundActivationMinimumRevision[app.bundleIdentifier] {
+            guard revision >= minimumRevision else { return true }
+            foregroundActivationMinimumRevision.removeValue(forKey: app.bundleIdentifier)
+        }
         if let protectionUntil = foregroundActivationProtectionUntil[app.bundleIdentifier] {
             if clock.now() < protectionUntil {
                 return true
@@ -1920,6 +2748,22 @@ actor ProcessController {
 
         for deadline in dueDeadlines {
             guard workIsCurrent else { return }
+            let deadlineLateness = max(
+                0,
+                ProcessControlMath.timeInterval(deadline.deadline.duration(to: clock.now()))
+            )
+            await signalTelemetry.recordMeasurement(ProcessLimitMeasurement(
+                date: Date(),
+                bundleIdentifier: deadline.identifier,
+                kind: .deadline,
+                requestedLimitPercent: deadline.limitPercent,
+                measuredCPUPercent: nil,
+                cpuDeltaNanoseconds: nil,
+                wallDuration: nil,
+                deadlineLateness: deadlineLateness,
+                activePulseCount: limitPulseArbiter.activeCount,
+                serviceGap: nil
+            ))
             switch deadline.kind {
             case .stop:
                 await finishLimitCycle(
@@ -1952,6 +2796,7 @@ actor ProcessController {
             after: limitSchedulerGeneration
         )
         limitDeadlines.removeAll()
+        limitPulseArbiter.removeAll()
     }
 
     private func evaluateLimitDeadline(_ deadline: LimitDeadline) async {

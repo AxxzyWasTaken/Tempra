@@ -18,6 +18,7 @@ private enum PrivilegedHelperFailure: LocalizedError {
 private struct PrivilegedWatchdogState: Codable {
     let stopped: [WatchdogProcessIdentity]
     let backgrounded: [WatchdogProcessIdentity]
+    let automaticResumeDeadlines: [WatchdogResumeDeadline]
 }
 
 private struct PrivilegedWatchdogStream {
@@ -37,7 +38,18 @@ private struct PrivilegedWatchdogStream {
             guard !frame.isEmpty else { continue }
             let state = try JSONDecoder().decode(PrivilegedWatchdogState.self, from: frame)
             guard state.stopped.count <= PrivilegedProcessProtocol.maximumProcessCount,
-                  state.backgrounded.count <= PrivilegedProcessProtocol.maximumProcessCount else {
+                  state.backgrounded.count <= PrivilegedProcessProtocol.maximumProcessCount,
+                  state.automaticResumeDeadlines.count
+                    <= PrivilegedProcessProtocol.maximumProcessCount,
+                  Set(state.automaticResumeDeadlines.map(\.process)).count
+                    == state.automaticResumeDeadlines.count,
+                  Set(state.automaticResumeDeadlines.map(\.process)).isSubset(
+                    of: Set(state.stopped)
+                  ),
+                  state.automaticResumeDeadlines.allSatisfy({
+                    $0.resumeAfterMilliseconds > 0
+                        && $0.resumeAfterMilliseconds <= UInt32(Int32.max)
+                  }) else {
                 throw PrivilegedHelperFailure.invalidRequest(
                     "The safety frame contains too many processes."
                 )
@@ -55,9 +67,11 @@ private struct PrivilegedWatchdogStream {
 }
 
 private final class PrivilegedSafetyWatchdog {
+    private static let acknowledgementTimeoutMilliseconds: Int32 = 1_000
     private let executableURL: URL
     private var process: Process?
     private var inputHandle: FileHandle?
+    private var outputHandle: FileHandle?
 
     init(executableURL: URL) {
         self.executableURL = executableURL
@@ -65,7 +79,9 @@ private final class PrivilegedSafetyWatchdog {
 
     func synchronize(
         stopped: Set<PrivilegedProcessIdentity>,
-        backgrounded: Set<PrivilegedProcessIdentity>
+        backgrounded: Set<PrivilegedProcessIdentity>,
+        automaticResumeMillisecondsByProcess:
+            [PrivilegedProcessIdentity: UInt32]
     ) throws {
         if stopped.isEmpty, backgrounded.isEmpty, process == nil {
             return
@@ -73,7 +89,16 @@ private final class PrivilegedSafetyWatchdog {
         try ensureRunning()
         let state = PrivilegedWatchdogState(
             stopped: stopped.map(Self.watchdogIdentity).sorted(by: Self.identityOrder),
-            backgrounded: backgrounded.map(Self.watchdogIdentity).sorted(by: Self.identityOrder)
+            backgrounded: backgrounded.map(Self.watchdogIdentity).sorted(by: Self.identityOrder),
+            automaticResumeDeadlines: automaticResumeMillisecondsByProcess.map {
+                process, milliseconds in
+                WatchdogResumeDeadline(
+                    process: Self.watchdogIdentity(process),
+                    resumeAfterMilliseconds: milliseconds
+                )
+            }.sorted {
+                Self.identityOrder($0.process, $1.process)
+            }
         )
         let encoded = try JSONEncoder().encode(state)
         guard encoded.count < PrivilegedProcessProtocol.maximumFrameBytes else {
@@ -85,6 +110,7 @@ private final class PrivilegedSafetyWatchdog {
         frame.append(0x0A)
         do {
             try inputHandle?.write(contentsOf: frame)
+            try awaitAcknowledgement()
         } catch {
             close()
             throw PrivilegedHelperFailure.safetyHelper(error.localizedDescription)
@@ -93,26 +119,36 @@ private final class PrivilegedSafetyWatchdog {
 
     func disarm() {
         inputHandle?.closeFile()
+        outputHandle?.closeFile()
         inputHandle = nil
+        outputHandle = nil
         process = nil
     }
 
     func triggerRecovery() {
         inputHandle?.closeFile()
+        outputHandle?.closeFile()
         inputHandle = nil
+        outputHandle = nil
         process = nil
     }
 
     private func ensureRunning() throws {
-        if let process, process.isRunning, inputHandle != nil { return }
+        if let process,
+           process.isRunning,
+           inputHandle != nil,
+           outputHandle != nil {
+            return
+        }
         close()
 
-        let pipe = Pipe()
+        let inputPipe = Pipe()
+        let outputPipe = Pipe()
         let process = Process()
         process.executableURL = executableURL
         process.arguments = ["--watchdog"]
-        process.standardInput = pipe
-        process.standardOutput = FileHandle.nullDevice
+        process.standardInput = inputPipe
+        process.standardOutput = outputPipe
         process.standardError = FileHandle.nullDevice
         do {
             try process.run()
@@ -122,22 +158,68 @@ private final class PrivilegedSafetyWatchdog {
                     + error.localizedDescription
             )
         }
-        let handle = pipe.fileHandleForWriting
-        guard fcntl(handle.fileDescriptor, F_SETNOSIGPIPE, 1) == 0 else {
+        let inputHandle = inputPipe.fileHandleForWriting
+        let outputHandle = outputPipe.fileHandleForReading
+        guard fcntl(inputHandle.fileDescriptor, F_SETNOSIGPIPE, 1) == 0 else {
             let detail = String(cString: strerror(errno))
-            handle.closeFile()
+            inputHandle.closeFile()
+            outputHandle.closeFile()
             throw PrivilegedHelperFailure.safetyHelper(
                 "Tempra could not configure the privileged safety connection: \(detail)"
             )
         }
         self.process = process
-        inputHandle = handle
+        self.inputHandle = inputHandle
+        self.outputHandle = outputHandle
     }
 
     private func close() {
         inputHandle?.closeFile()
+        outputHandle?.closeFile()
         inputHandle = nil
+        outputHandle = nil
         process = nil
+    }
+
+    private func awaitAcknowledgement() throws {
+        guard let outputHandle else {
+            throw PrivilegedHelperFailure.safetyHelper(
+                "The privileged safety acknowledgement channel is unavailable."
+            )
+        }
+        var descriptor = pollfd(
+            fd: outputHandle.fileDescriptor,
+            events: Int16(POLLIN | POLLHUP | POLLERR),
+            revents: 0
+        )
+        let pollResult = poll(
+            &descriptor,
+            1,
+            Self.acknowledgementTimeoutMilliseconds
+        )
+        guard pollResult > 0,
+              descriptor.revents & Int16(POLLIN) != 0 else {
+            let detail = pollResult == 0
+                ? "The privileged safety process did not acknowledge its state."
+                : "The privileged safety acknowledgement channel failed."
+            throw PrivilegedHelperFailure.safetyHelper(detail)
+        }
+
+        var acknowledgement: UInt8 = 0
+        let readCount = withUnsafeMutableBytes(of: &acknowledgement) { buffer in
+            guard let baseAddress = buffer.baseAddress else { return -1 }
+            return Darwin.read(
+                outputHandle.fileDescriptor,
+                baseAddress,
+                buffer.count
+            )
+        }
+        guard readCount == 1,
+              acknowledgement == WatchdogAcknowledgement.privilegedStateSynchronized else {
+            throw PrivilegedHelperFailure.safetyHelper(
+                "The privileged safety process sent an invalid acknowledgement."
+            )
+        }
     }
 
     private static func watchdogIdentity(
@@ -165,6 +247,8 @@ private final class PrivilegedProcessSession: NSObject, PrivilegedProcessXPCProt
     private let watchdog: PrivilegedSafetyWatchdog
     private var stopped: Set<PrivilegedProcessIdentity> = []
     private var backgrounded: Set<PrivilegedProcessIdentity> = []
+    private var automaticResumeMillisecondsByProcess:
+        [PrivilegedProcessIdentity: UInt32] = [:]
     private var isInvalidated = false
 
     init(executableURL: URL) {
@@ -192,6 +276,7 @@ private final class PrivilegedProcessSession: NSObject, PrivilegedProcessXPCProt
             watchdog.triggerRecovery()
             stopped.removeAll()
             backgrounded.removeAll()
+            automaticResumeMillisecondsByProcess.removeAll()
         }
     }
 
@@ -209,6 +294,15 @@ private final class PrivilegedProcessSession: NSObject, PrivilegedProcessXPCProt
         guard request.processIdentifiers.count <= PrivilegedProcessProtocol.maximumProcessCount,
               request.processes.count <= PrivilegedProcessProtocol.maximumProcessCount else {
             return failure(.tooManyProcesses, "The request contains too many processes.")
+        }
+        guard request.action == .stop || request.automaticResumeAfterMilliseconds == nil,
+              request.automaticResumeAfterMilliseconds.map({
+                $0 > 0 && $0 <= UInt32(Int32.max)
+              }) != false else {
+            return failure(
+                .invalidRequest,
+                "The automatic-resume deadline is invalid for this request."
+            )
         }
 
         switch request.action {
@@ -271,16 +365,36 @@ private final class PrivilegedProcessSession: NSObject, PrivilegedProcessXPCProt
         }
         let current = Set(identities.filter { Self.currentIdentity(for: $0.pid) == $0 })
         let proposedStopped = stopped.union(current)
+        var proposedAutomaticResume = automaticResumeMillisecondsByProcess
+        for process in current {
+            if let interval = request.automaticResumeAfterMilliseconds {
+                proposedAutomaticResume[process] = interval
+            } else {
+                proposedAutomaticResume.removeValue(forKey: process)
+            }
+        }
         do {
-            try watchdog.synchronize(stopped: proposedStopped, backgrounded: backgrounded)
+            try watchdog.synchronize(
+                stopped: proposedStopped,
+                backgrounded: backgrounded,
+                automaticResumeMillisecondsByProcess: proposedAutomaticResume
+            )
         } catch {
             return failure(.safetyHelperFailed, error.localizedDescription)
         }
 
         var result = apply(identities) { kill($0, SIGSTOP) }
         stopped.formUnion(result.applied)
+        automaticResumeMillisecondsByProcess = proposedAutomaticResume.filter {
+            stopped.contains($0.key)
+        }
         do {
-            try watchdog.synchronize(stopped: stopped, backgrounded: backgrounded)
+            try watchdog.synchronize(
+                stopped: stopped,
+                backgrounded: backgrounded,
+                automaticResumeMillisecondsByProcess:
+                    automaticResumeMillisecondsByProcess
+            )
         } catch {
             emergencyRecover()
             result.failed.formUnion(result.applied)
@@ -300,6 +414,9 @@ private final class PrivilegedProcessSession: NSObject, PrivilegedProcessXPCProt
         }
         let result = apply(identities) { kill($0, SIGCONT) }
         stopped.subtract(result.applied)
+        for process in result.applied.union(result.stale) {
+            automaticResumeMillisecondsByProcess.removeValue(forKey: process)
+        }
         return finishStateChange(result)
     }
 
@@ -312,7 +429,12 @@ private final class PrivilegedProcessSession: NSObject, PrivilegedProcessXPCProt
         let current = Set(identities.filter { Self.currentIdentity(for: $0.pid) == $0 })
         let proposedBackgrounded = backgrounded.union(current)
         do {
-            try watchdog.synchronize(stopped: stopped, backgrounded: proposedBackgrounded)
+            try watchdog.synchronize(
+                stopped: stopped,
+                backgrounded: proposedBackgrounded,
+                automaticResumeMillisecondsByProcess:
+                    automaticResumeMillisecondsByProcess
+            )
         } catch {
             return failure(.safetyHelperFailed, error.localizedDescription)
         }
@@ -321,7 +443,12 @@ private final class PrivilegedProcessSession: NSObject, PrivilegedProcessXPCProt
         }
         backgrounded.formUnion(result.applied)
         do {
-            try watchdog.synchronize(stopped: stopped, backgrounded: backgrounded)
+            try watchdog.synchronize(
+                stopped: stopped,
+                backgrounded: backgrounded,
+                automaticResumeMillisecondsByProcess:
+                    automaticResumeMillisecondsByProcess
+            )
         } catch {
             emergencyRecover()
             result.failed.formUnion(result.applied)
@@ -363,6 +490,7 @@ private final class PrivilegedProcessSession: NSObject, PrivilegedProcessXPCProt
                 continue
             }
             stopped.remove(process)
+            automaticResumeMillisecondsByProcess.removeValue(forKey: process)
             if kill(process.pid, PrivilegedProcessProtocol.forceQuitSignal) == 0 {
                 result.applied.insert(process)
                 backgrounded.remove(process)
@@ -375,7 +503,12 @@ private final class PrivilegedProcessSession: NSObject, PrivilegedProcessXPCProt
 
     private func finishStateChange(_ result: OperationResult) -> PrivilegedProcessResponse {
         do {
-            try watchdog.synchronize(stopped: stopped, backgrounded: backgrounded)
+            try watchdog.synchronize(
+                stopped: stopped,
+                backgrounded: backgrounded,
+                automaticResumeMillisecondsByProcess:
+                    automaticResumeMillisecondsByProcess
+            )
             if stopped.isEmpty, backgrounded.isEmpty {
                 watchdog.disarm()
             }
@@ -399,6 +532,7 @@ private final class PrivilegedProcessSession: NSObject, PrivilegedProcessXPCProt
         }
         stopped.removeAll()
         backgrounded.removeAll()
+        automaticResumeMillisecondsByProcess.removeAll()
         watchdog.triggerRecovery()
     }
 
@@ -624,6 +758,12 @@ private final class PrivilegedHelperListenerDelegate: NSObject, NSXPCListenerDel
 
 @main
 private enum TempraPrivilegedHelperMain {
+    private struct AutomaticResumeState {
+        let deadline: ContinuousClock.Instant
+        let intervalMilliseconds: UInt32
+    }
+
+    private static let watchdogReadChunkSize = 4_096
     private static let logger = Logger(
         subsystem: PrivilegedProcessProtocol.applicationIdentifier,
         category: "PrivilegedHelper"
@@ -668,14 +808,53 @@ private enum TempraPrivilegedHelperMain {
 
     private static func runWatchdog() -> Int32 {
         var stream = PrivilegedWatchdogStream()
-        var state = PrivilegedWatchdogState(stopped: [], backgrounded: [])
+        var state = PrivilegedWatchdogState(
+            stopped: [],
+            backgrounded: [],
+            automaticResumeDeadlines: []
+        )
+        var automaticResumeStates: [WatchdogProcessIdentity: AutomaticResumeState] = [:]
+        var inputBytes = [UInt8](repeating: 0, count: watchdogReadChunkSize)
+        let clock = ContinuousClock()
         while true {
-            let data: Data
-            do {
-                data = try FileHandle.standardInput.read(upToCount: 4_096) ?? Data()
-            } catch {
+            guard resumeExpiredProcesses(
+                in: &automaticResumeStates,
+                now: clock.now
+            ) else {
                 return recover(state) ? EXIT_FAILURE : 3
             }
+
+            var input = pollfd(
+                fd: STDIN_FILENO,
+                events: Int16(POLLIN | POLLHUP | POLLERR),
+                revents: 0
+            )
+            let pollResult = poll(
+                &input,
+                1,
+                pollTimeoutMilliseconds(for: automaticResumeStates, now: clock.now)
+            )
+            if pollResult < 0 {
+                if errno == EINTR { continue }
+                return recover(state) ? EXIT_FAILURE : 3
+            }
+            if pollResult == 0 { continue }
+            if input.revents & Int16(POLLNVAL) != 0 {
+                return recover(state) ? EXIT_FAILURE : 3
+            }
+
+            let readCount = inputBytes.withUnsafeMutableBytes { buffer -> Int in
+                guard let baseAddress = buffer.baseAddress else { return -1 }
+                return Darwin.read(STDIN_FILENO, baseAddress, buffer.count)
+            }
+            if readCount < 0 {
+                if errno == EINTR { continue }
+                return recover(state) ? EXIT_FAILURE : 3
+            }
+            guard readCount <= inputBytes.count else {
+                return recover(state) ? EXIT_FAILURE : 3
+            }
+            let data = Data(inputBytes.prefix(readCount))
             guard !data.isEmpty else {
                 do {
                     try stream.finish()
@@ -687,11 +866,91 @@ private enum TempraPrivilegedHelperMain {
             do {
                 for update in try stream.append(data) {
                     state = update
+                    let synchronizedAt = clock.now
+                    let requestedProcesses = Set(
+                        update.automaticResumeDeadlines.map(\.process)
+                    )
+                    automaticResumeStates = automaticResumeStates.filter {
+                        requestedProcesses.contains($0.key)
+                    }
+                    for entry in update.automaticResumeDeadlines {
+                        if let existing = automaticResumeStates[entry.process] {
+                            automaticResumeStates[entry.process] = AutomaticResumeState(
+                                deadline: existing.deadline,
+                                intervalMilliseconds: entry.resumeAfterMilliseconds
+                            )
+                        } else {
+                            automaticResumeStates[entry.process] = AutomaticResumeState(
+                                deadline: synchronizedAt.advanced(
+                                    by: .milliseconds(
+                                        Int64(entry.resumeAfterMilliseconds)
+                                    )
+                                ),
+                                intervalMilliseconds: entry.resumeAfterMilliseconds
+                            )
+                        }
+                    }
+                    guard acknowledgeWatchdogState() else {
+                        return recover(state) ? EXIT_FAILURE : 3
+                    }
                 }
             } catch {
                 return recover(state) ? EXIT_FAILURE : 3
             }
         }
+    }
+
+    private static func resumeExpiredProcesses(
+        in states: inout [WatchdogProcessIdentity: AutomaticResumeState],
+        now: ContinuousClock.Instant
+    ) -> Bool {
+        let expired = states.compactMap { process, state in
+            state.deadline <= now ? process : nil
+        }
+        guard !expired.isEmpty else { return true }
+
+        for process in expired {
+            guard currentIdentity(for: process.pid) == process else {
+                states.removeValue(forKey: process)
+                continue
+            }
+            guard kill(process.pid, SIGCONT) == 0 else { return false }
+            guard let state = states[process] else { continue }
+            states[process] = AutomaticResumeState(
+                deadline: now.advanced(
+                    by: .milliseconds(Int64(state.intervalMilliseconds))
+                ),
+                intervalMilliseconds: state.intervalMilliseconds
+            )
+        }
+        return true
+    }
+
+    private static func acknowledgeWatchdogState() -> Bool {
+        var acknowledgement = WatchdogAcknowledgement.privilegedStateSynchronized
+        let writeCount = withUnsafeBytes(of: &acknowledgement) { buffer in
+            guard let baseAddress = buffer.baseAddress else { return -1 }
+            return Darwin.write(STDOUT_FILENO, baseAddress, buffer.count)
+        }
+        return writeCount == 1
+    }
+
+    private static func pollTimeoutMilliseconds(
+        for states: [WatchdogProcessIdentity: AutomaticResumeState],
+        now: ContinuousClock.Instant
+    ) -> Int32 {
+        guard let deadline = states.values.lazy.map(\.deadline).min() else { return -1 }
+        let remaining = now.duration(to: deadline)
+        guard remaining > .zero else { return 0 }
+
+        let components = remaining.components
+        let seconds = Double(components.seconds)
+            + Double(components.attoseconds) / 1_000_000_000_000_000_000
+        let milliseconds = ceil(seconds * 1_000)
+        guard milliseconds.isFinite, milliseconds < Double(Int32.max) else {
+            return Int32.max
+        }
+        return max(1, Int32(milliseconds))
     }
 
     private static func recover(_ state: PrivilegedWatchdogState) -> Bool {

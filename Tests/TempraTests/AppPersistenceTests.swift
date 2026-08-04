@@ -110,24 +110,25 @@ struct AppPersistenceTests {
         }
     }
 
-    @Test("Saved CPU-limit rules discard background priority")
-    func cpuLimitRulesUseNormalPriority() throws {
+    @Test("CPU-limit rules preserve power-saving scheduling")
+    func cpuLimitRulesPreservePowerSavingScheduling() throws {
         try withDefaults { defaults in
             let persistence = AppPersistence(defaults: defaults)
-            var legacyRule = AppRule(
+            let combinedRule = AppRule(
                 bundleIdentifier: "example.game",
                 displayName: "Example Game",
                 action: .limit,
+                runOnEfficiencyCores: true,
                 limitPercent: 7
             )
-            legacyRule.runOnEfficiencyCores = true
-            try persistence.saveRules([legacyRule.bundleIdentifier: legacyRule])
+            #expect(combinedRule.runOnEfficiencyCores)
+            try persistence.saveRules([combinedRule.bundleIdentifier: combinedRule])
 
             let loadedRule = try #require(
-                persistence.loadRules()[legacyRule.bundleIdentifier]
+                persistence.loadRules()[combinedRule.bundleIdentifier]
             )
             #expect(loadedRule.action == .limit)
-            #expect(!loadedRule.runOnEfficiencyCores)
+            #expect(loadedRule.runOnEfficiencyCores)
 
             let store = try AppStore(
                 persistence: persistence,
@@ -137,15 +138,41 @@ struct AppPersistenceTests {
                 startsMonitoring: false,
                 persistenceErrorHandler: { _ in }
             )
-            var attemptedRule = loadedRule
-            attemptedRule.runOnEfficiencyCores = true
-            store.save(attemptedRule)
+            #expect(store.rules[combinedRule.bundleIdentifier]?.action == .limit)
+            #expect(store.rules[combinedRule.bundleIdentifier]?.runOnEfficiencyCores == true)
 
-            #expect(store.rules[legacyRule.bundleIdentifier]?.action == .limit)
-            #expect(store.rules[legacyRule.bundleIdentifier]?.runOnEfficiencyCores == false)
+            store.applyQuickRule(
+                bundleIdentifier: combinedRule.bundleIdentifier,
+                displayName: combinedRule.displayName,
+                applicationURL: nil,
+                action: .limit,
+                limitPercent: 20,
+                delaySeconds: 0
+            )
+            #expect(store.rules[combinedRule.bundleIdentifier]?.limitPercent == 20)
+            #expect(store.rules[combinedRule.bundleIdentifier]?.runOnEfficiencyCores == true)
+
+            store.setEfficiencyCoreScheduling(
+                bundleIdentifier: combinedRule.bundleIdentifier,
+                displayName: combinedRule.displayName,
+                applicationURL: nil,
+                enabled: false
+            )
+            #expect(store.rules[combinedRule.bundleIdentifier]?.action == .limit)
+            #expect(store.rules[combinedRule.bundleIdentifier]?.runOnEfficiencyCores == false)
+
+            store.setEfficiencyCoreScheduling(
+                bundleIdentifier: combinedRule.bundleIdentifier,
+                displayName: combinedRule.displayName,
+                applicationURL: nil,
+                enabled: true
+            )
+
+            #expect(store.rules[combinedRule.bundleIdentifier]?.action == .limit)
+            #expect(store.rules[combinedRule.bundleIdentifier]?.runOnEfficiencyCores == true)
             #expect(
-                try persistence.loadRules()[legacyRule.bundleIdentifier]?
-                    .runOnEfficiencyCores == false
+                try persistence.loadRules()[combinedRule.bundleIdentifier]?
+                    .runOnEfficiencyCores == true
             )
         }
     }

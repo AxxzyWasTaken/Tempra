@@ -797,19 +797,17 @@ struct MenuBarView: View {
                 }
             }
 
-            if item.rule?.action != .limit {
-                Button(item.rule?.runOnEfficiencyCores == true
-                       ? "Stop Using Power-Saving Cores"
-                       : "Run on Power-Saving Cores") {
-                    store.setEfficiencyCoreScheduling(
-                        bundleIdentifier: item.bundleIdentifier,
-                        displayName: item.name,
-                        applicationURL: item.applicationURL,
-                        enabled: item.rule?.runOnEfficiencyCores != true,
-                        delaySeconds: 0
-                    )
-                    requestPrivilegedControlIfNeeded(for: item)
-                }
+            Button(item.rule?.runOnEfficiencyCores == true
+                   ? "Stop Using Power-Saving Cores"
+                   : "Run on Power-Saving Cores") {
+                store.setEfficiencyCoreScheduling(
+                    bundleIdentifier: item.bundleIdentifier,
+                    displayName: item.name,
+                    applicationURL: item.applicationURL,
+                    enabled: item.rule?.runOnEfficiencyCores != true,
+                    delaySeconds: 0
+                )
+                requestPrivilegedControlIfNeeded(for: item)
             }
 
             Button("Pause after 30 seconds") {

@@ -16,10 +16,24 @@ struct WatchdogProtocolTests {
             action: .update,
             processes: [WatchdogProcessIdentity(pid: 42, startTimeMicroseconds: 100)]
         )
-        let second = WatchdogCommand(action: .disarm, processes: [])
-        let firstFrame = try JSONEncoder().encode(first) + Data([0x0A])
-        let secondFrame = try JSONEncoder().encode(second) + Data([0x0A])
-        let combined = firstFrame + secondFrame
+        let second = WatchdogCommand(
+            action: .armResume,
+            processes: [],
+            resumeDeadlines: [WatchdogResumeDeadline(
+                process: first.processes[0],
+                resumeAfterMilliseconds: 100
+            )]
+        )
+        let third = WatchdogCommand(
+            action: .synchronizeResume,
+            processes: [],
+            resumeDeadlines: []
+        )
+        let fourth = WatchdogCommand(action: .disarm, processes: [])
+        let combined = try [first, second, third, fourth].reduce(into: Data()) {
+            $0.append(try JSONEncoder().encode($1))
+            $0.append(0x0A)
+        }
         let splitIndex = combined.index(combined.startIndex, offsetBy: combined.count / 2)
 
         var stream = WatchdogCommandStream()
@@ -27,7 +41,57 @@ struct WatchdogProtocolTests {
         let remaining = try stream.append(combined[splitIndex...])
         try stream.finish()
 
-        #expect(initial + remaining == [first, second])
+        #expect(initial + remaining == [first, second, third, fourth])
+    }
+
+    @Test("Automatic-resume commands require a bounded positive deadline")
+    func automaticResumeCommandsRequireDeadline() throws {
+        let process = WatchdogProcessIdentity(pid: 42, startTimeMicroseconds: 100)
+        let zeroDeadline = WatchdogResumeDeadline(
+            process: process,
+            resumeAfterMilliseconds: 0
+        )
+        let excessiveDeadline = WatchdogResumeDeadline(
+            process: process,
+            resumeAfterMilliseconds: UInt32(Int32.max) + 1
+        )
+        let validDeadline = WatchdogResumeDeadline(
+            process: process,
+            resumeAfterMilliseconds: 100
+        )
+        let invalidCommands = [
+            WatchdogCommand(action: .armResume, processes: [process]),
+            WatchdogCommand(
+                action: .armResume,
+                processes: [],
+                resumeDeadlines: [zeroDeadline]
+            ),
+            WatchdogCommand(
+                action: .synchronizeResume,
+                processes: [],
+                resumeDeadlines: [excessiveDeadline]
+            ),
+            WatchdogCommand(
+                action: .armResume,
+                processes: [],
+                resumeDeadlines: [validDeadline, validDeadline]
+            ),
+            WatchdogCommand(
+                action: .update,
+                processes: [process],
+                resumeDeadlines: [validDeadline]
+            ),
+            WatchdogCommand(action: .disarm, processes: [process]),
+        ]
+
+        for command in invalidCommands {
+            var frame = try JSONEncoder().encode(command)
+            frame.append(0x0A)
+            var stream = WatchdogCommandStream()
+            #expect(throws: WatchdogProtocolError.invalidCommand) {
+                try stream.append(frame)
+            }
+        }
     }
 
     @Test("Oversized and incomplete commands are rejected")
@@ -70,13 +134,15 @@ struct WatchdogProtocolTests {
         )
         let request = PrivilegedProcessRequest(
             action: .stop,
-            processes: [identity]
+            processes: [identity],
+            automaticResumeAfterMilliseconds: 100
         )
         let decodedRequest = try JSONDecoder().decode(
             PrivilegedProcessRequest.self,
             from: JSONEncoder().encode(request)
         )
         #expect(decodedRequest == request)
+        #expect(decodedRequest.automaticResumeAfterMilliseconds == 100)
 
         let response = PrivilegedProcessResponse(
             applied: [identity],

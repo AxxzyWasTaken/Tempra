@@ -165,7 +165,7 @@ final class AppStore: ObservableObject {
     func save(_ rule: AppRule) {
         var normalized = rule
         normalized.limitPercent = CPULimitRange.clamped(normalized.limitPercent)
-        if normalized.action == .limit || normalized.action == .pause {
+        if normalized.action == .pause {
             normalized.runOnEfficiencyCores = false
         }
         if normalized.applicationURL == nil {
@@ -209,7 +209,7 @@ final class AppStore: ObservableObject {
         rule.displayName = displayName
         rule.applicationURL = applicationURL ?? rule.applicationURL
         rule.action = action
-        if action == .limit || action == .pause {
+        if action == .pause {
             rule.runOnEfficiencyCores = false
         }
         rule.limitPercent = limitPercent
@@ -907,7 +907,7 @@ final class AppStore: ObservableObject {
             detail = "Limited to \(Int(percent))% CPU\(cores)."
         case .limitedWithProtectedProcesses:
             kind = .limited
-            detail = "Limiting CPU-heavy processes while essential helpers remain active."
+            detail = "Limiting as much as possible while responsive processes remain active."
         case .paused:
             kind = .paused
             detail = "Paused while in the background."

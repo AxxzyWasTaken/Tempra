@@ -22,9 +22,16 @@ enum ProcessLimitTargetSelector {
     static func select(
         samples: [ManagedProcessSample],
         limitPercent: Double,
-        previousControlledProcesses: Set<ProcessIdentity> = []
+        previousControlledProcesses: Set<ProcessIdentity> = [],
+        latencySensitiveProcesses: Set<ProcessIdentity> = [],
+        criticalActivityProcesses: Set<ProcessIdentity> = [],
+        protectsAudio: Bool = true,
+        minimumControlledDutyCycle: Double = 0
     ) -> ProcessLimitSelection {
         let requestedLimit = limitPercent.isFinite ? max(0, limitPercent) : 0
+        let normalizedMinimumDutyCycle = minimumControlledDutyCycle.isFinite
+            ? min(1, max(0, minimumControlledDutyCycle))
+            : 0
         let samplesByIdentity = samples.reduce(into: [ProcessIdentity: ManagedProcessSample]()) {
             result, sample in
             result[sample.identity] = sample
@@ -34,13 +41,19 @@ enum ProcessLimitTargetSelector {
         }
         guard !normalizedSamples.isEmpty else { return .empty }
 
-        var alwaysRunning = Set(normalizedSamples.compactMap { sample in
-            sample.isPlayingAudio
-                || sample.networkActivity.protectsFromLimiting
-                || !sample.hasCPUMeasurement
+        let hardProtectedProcesses = Set(normalizedSamples.compactMap { sample in
+            !sample.hasCPUMeasurement
+                || (protectsAudio && sample.isPlayingAudio)
+                || criticalActivityProcesses.contains(sample.identity)
                 ? sample.identity
                 : nil
         })
+        var softProtectedProcesses = Set(normalizedSamples.compactMap { sample in
+            sample.networkActivity.isLatencySensitive ? sample.identity : nil
+        })
+        softProtectedProcesses.formUnion(
+            latencySensitiveProcesses.intersection(samplesByIdentity.keys)
+        )
 
         if normalizedSamples.count > 1 {
             let mainLifeline = normalizedSamples
@@ -48,7 +61,7 @@ enum ProcessLimitTargetSelector {
                 .min(by: sampleOrderByCPUThenIdentity)
                 ?? normalizedSamples.min(by: sampleOrderByCPUThenIdentity)
             if let mainLifeline {
-                alwaysRunning.insert(mainLifeline.identity)
+                softProtectedProcesses.insert(mainLifeline.identity)
             }
         }
 
@@ -58,18 +71,20 @@ enum ProcessLimitTargetSelector {
             return makeSelection(
                 controlled: [],
                 samples: normalizedSamples,
-                requestedLimit: requestedLimit
+                requestedLimit: requestedLimit,
+                minimumControlledDutyCycle: normalizedMinimumDutyCycle
             )
         }
 
         let eligible = normalizedSamples.filter {
-            !alwaysRunning.contains($0.identity) && $0.cpuPercent > 0
+            !hardProtectedProcesses.contains($0.identity) && $0.cpuPercent > 0
         }
         guard !eligible.isEmpty else {
             return makeSelection(
                 controlled: [],
                 samples: normalizedSamples,
-                requestedLimit: requestedLimit
+                requestedLimit: requestedLimit,
+                minimumControlledDutyCycle: normalizedMinimumDutyCycle
             )
         }
 
@@ -77,30 +92,81 @@ enum ProcessLimitTargetSelector {
             return makeSelection(
                 controlled: [onlyProcess.identity],
                 samples: normalizedSamples,
-                requestedLimit: requestedLimit
+                requestedLimit: requestedLimit,
+                minimumControlledDutyCycle: normalizedMinimumDutyCycle
             )
         }
 
-        let previousEligible = previousControlledProcesses.intersection(
-            Set(eligible.map(\.identity))
+        let hardProtectedCPU = normalizedSamples.reduce(0) { result, sample in
+            result + (hardProtectedProcesses.contains(sample.identity) ? sample.cpuPercent : 0)
+        }
+        let selectionThreshold = ProcessControlMath.activationThreshold(
+            for: max(requestedLimit, hardProtectedCPU)
         )
+        let preferredCandidates = eligible.filter {
+            !softProtectedProcesses.contains($0.identity)
+        }
+        let preferredControlled = selectCandidates(
+            preferredCandidates,
+            totalCPU: totalCPU,
+            stopThreshold: selectionThreshold,
+            previousControlledProcesses: previousControlledProcesses,
+            softProtectedProcesses: softProtectedProcesses
+        )
+        let preferredControlledCPU = normalizedSamples.reduce(0) { result, sample in
+            result + (preferredControlled.contains(sample.identity) ? sample.cpuPercent : 0)
+        }
+        if totalCPU - preferredControlledCPU <= selectionThreshold {
+            return makeSelection(
+                controlled: preferredControlled,
+                samples: normalizedSamples,
+                requestedLimit: requestedLimit,
+                minimumControlledDutyCycle: normalizedMinimumDutyCycle
+            )
+        }
+
+        let controlled = selectCandidates(
+            eligible,
+            totalCPU: totalCPU,
+            stopThreshold: selectionThreshold,
+            previousControlledProcesses: previousControlledProcesses,
+            softProtectedProcesses: softProtectedProcesses
+        )
+
+        return makeSelection(
+            controlled: controlled,
+            samples: normalizedSamples,
+            requestedLimit: requestedLimit,
+            minimumControlledDutyCycle: normalizedMinimumDutyCycle
+        )
+    }
+
+    private static func selectCandidates(
+        _ candidates: [ManagedProcessSample],
+        totalCPU: Double,
+        stopThreshold: Double,
+        previousControlledProcesses: Set<ProcessIdentity>,
+        softProtectedProcesses: Set<ProcessIdentity>
+    ) -> Set<ProcessIdentity> {
+        let candidateIdentities = Set(candidates.map(\.identity))
+        let previousEligible = previousControlledProcesses.intersection(candidateIdentities)
         if !previousEligible.isEmpty {
-            let previousControlledCPU = eligible.reduce(0) { result, sample in
+            let previousControlledCPU = candidates.reduce(0) { result, sample in
                 result + (previousEligible.contains(sample.identity) ? sample.cpuPercent : 0)
             }
-            let previousAlwaysRunningCPU = max(0, totalCPU - previousControlledCPU)
-            if previousAlwaysRunningCPU <= activationThreshold {
-                return makeSelection(
-                    controlled: previousEligible,
-                    samples: normalizedSamples,
-                    requestedLimit: requestedLimit
-                )
+            if totalCPU - previousControlledCPU <= stopThreshold {
+                return previousEligible
             }
         }
 
-        let orderedCandidates = eligible.sorted { first, second in
+        let orderedCandidates = candidates.sorted { first, second in
             if first.cpuPercent != second.cpuPercent {
                 return first.cpuPercent > second.cpuPercent
+            }
+            let firstIsSoftProtected = softProtectedProcesses.contains(first.identity)
+            let secondIsSoftProtected = softProtectedProcesses.contains(second.identity)
+            if firstIsSoftProtected != secondIsSoftProtected {
+                return !firstIsSoftProtected
             }
             let firstWasControlled = previousControlledProcesses.contains(first.identity)
             let secondWasControlled = previousControlledProcesses.contains(second.identity)
@@ -113,22 +179,18 @@ enum ProcessLimitTargetSelector {
         var controlled: Set<ProcessIdentity> = []
         var controlledCPU = 0.0
         for sample in orderedCandidates {
-            guard totalCPU - controlledCPU > requestedLimit else { break }
+            guard totalCPU - controlledCPU > stopThreshold else { break }
             controlled.insert(sample.identity)
             controlledCPU += sample.cpuPercent
         }
-
-        return makeSelection(
-            controlled: controlled,
-            samples: normalizedSamples,
-            requestedLimit: requestedLimit
-        )
+        return controlled
     }
 
     private static func makeSelection(
         controlled: Set<ProcessIdentity>,
         samples: [ManagedProcessSample],
-        requestedLimit: Double
+        requestedLimit: Double,
+        minimumControlledDutyCycle: Double
     ) -> ProcessLimitSelection {
         let controlledCPU = samples.reduce(0) { result, sample in
             result + (controlled.contains(sample.identity) ? sample.cpuPercent : 0)
@@ -140,13 +202,14 @@ enum ProcessLimitTargetSelector {
             controlledCPU,
             max(0, requestedLimit - alwaysRunningCPU)
         )
+        let minimumControlledCPU = controlledCPU * minimumControlledDutyCycle
         return ProcessLimitSelection(
             controlledProcesses: controlled,
             alwaysRunningProcesses: allIdentities.subtracting(controlled),
             controlledCPUPercent: controlledCPU,
             alwaysRunningCPUPercent: alwaysRunningCPU,
             controlledLimitPercent: controlledLimit,
-            targetIsReachable: alwaysRunningCPU <= requestedLimit
+            targetIsReachable: alwaysRunningCPU + minimumControlledCPU <= requestedLimit
         )
     }
 

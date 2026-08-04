@@ -22,7 +22,14 @@ private enum ProcessSystemControllerError: LocalizedError {
 
 protocol ProcessSystemControlling: Sendable {
     func totalCPUTime(for processes: Set<ProcessIdentity>) async throws -> UInt64
-    func stop(_ processes: Set<ProcessIdentity>) async -> ProcessOperationResult
+    func networkActivity(for process: ProcessIdentity) async -> ProcessNetworkActivity
+    func criticalFileActivity(
+        for process: ProcessIdentity
+    ) async -> ProcessCriticalFileActivity
+    func stop(
+        _ processes: Set<ProcessIdentity>,
+        automaticResumeAfter: TimeInterval?
+    ) async -> ProcessOperationResult
     func resume(_ processes: Set<ProcessIdentity>) async -> ProcessOperationResult
     func setBackgroundPriority(_ processes: Set<ProcessIdentity>) async -> ProcessOperationResult
     func restorePriority(_ processes: Set<ProcessIdentity>) async -> ProcessOperationResult
@@ -46,7 +53,20 @@ struct LiveProcessSystemController: ProcessSystemControlling {
         return total
     }
 
-    func stop(_ processes: Set<ProcessIdentity>) async -> ProcessOperationResult {
+    func networkActivity(for process: ProcessIdentity) async -> ProcessNetworkActivity {
+        await ProcessNetworkActivityProbe().activityWithoutBlockingController(for: process)
+    }
+
+    func criticalFileActivity(
+        for process: ProcessIdentity
+    ) async -> ProcessCriticalFileActivity {
+        await ProcessCriticalFileActivityProbe().activityWithoutBlockingController(for: process)
+    }
+
+    func stop(
+        _ processes: Set<ProcessIdentity>,
+        automaticResumeAfter: TimeInterval?
+    ) async -> ProcessOperationResult {
         apply(processes) { kill($0, SIGSTOP) }
     }
 
@@ -173,8 +193,27 @@ struct RoutedProcessSystemController: ProcessSystemControlling {
         return sum.partialValue
     }
 
-    func stop(_ processes: Set<ProcessIdentity>) async -> ProcessOperationResult {
-        await apply(.stop, to: processes) { await local.stop($0) }
+    func networkActivity(for process: ProcessIdentity) async -> ProcessNetworkActivity {
+        await local.networkActivity(for: process)
+    }
+
+    func criticalFileActivity(
+        for process: ProcessIdentity
+    ) async -> ProcessCriticalFileActivity {
+        await local.criticalFileActivity(for: process)
+    }
+
+    func stop(
+        _ processes: Set<ProcessIdentity>,
+        automaticResumeAfter: TimeInterval?
+    ) async -> ProcessOperationResult {
+        await apply(
+            .stop,
+            to: processes,
+            automaticResumeAfter: automaticResumeAfter
+        ) {
+            await local.stop($0, automaticResumeAfter: automaticResumeAfter)
+        }
     }
 
     func resume(_ processes: Set<ProcessIdentity>) async -> ProcessOperationResult {
@@ -204,6 +243,7 @@ struct RoutedProcessSystemController: ProcessSystemControlling {
     private func apply(
         _ action: PrivilegedProcessAction,
         to processes: Set<ProcessIdentity>,
+        automaticResumeAfter: TimeInterval? = nil,
         localOperation: (Set<ProcessIdentity>) async -> ProcessOperationResult
     ) async -> ProcessOperationResult {
         let (localProcesses, privilegedProcesses) = partition(processes)
@@ -212,7 +252,8 @@ struct RoutedProcessSystemController: ProcessSystemControlling {
         do {
             let privilegedResult = try await privileged.perform(
                 action,
-                processes: privilegedProcesses
+                processes: privilegedProcesses,
+                automaticResumeAfter: automaticResumeAfter
             )
             result.applied.formUnion(privilegedResult.applied)
             result.stale.formUnion(privilegedResult.stale)

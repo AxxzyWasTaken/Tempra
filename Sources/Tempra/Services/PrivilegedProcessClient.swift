@@ -164,16 +164,24 @@ actor PrivilegedProcessClient {
 
     func totalCPUTime(for processes: Set<ProcessIdentity>) async throws -> UInt64 {
         try validateOperationProcesses(processes)
-        let response = try await send(operationRequest(.totalCPUTime, processes: processes))
+        let response = try await send(try operationRequest(
+            .totalCPUTime,
+            processes: processes
+        ))
         return response.totalCPUTimeNanoseconds
     }
 
     func perform(
         _ action: PrivilegedProcessAction,
-        processes: Set<ProcessIdentity>
+        processes: Set<ProcessIdentity>,
+        automaticResumeAfter: TimeInterval? = nil
     ) async throws -> ProcessOperationResult {
         try validateOperationProcesses(processes)
-        let response = try await send(operationRequest(action, processes: processes))
+        let response = try await send(try operationRequest(
+            action,
+            processes: processes,
+            automaticResumeAfter: automaticResumeAfter
+        ))
         let originals = Dictionary(uniqueKeysWithValues: processes.map {
             (PrivilegedProcessIdentity(
                 pid: Int32($0.pid),
@@ -202,9 +210,32 @@ actor PrivilegedProcessClient {
 
     private func operationRequest(
         _ action: PrivilegedProcessAction,
-        processes: Set<ProcessIdentity>
-    ) -> PrivilegedProcessRequest {
-        PrivilegedProcessRequest(
+        processes: Set<ProcessIdentity>,
+        automaticResumeAfter: TimeInterval? = nil
+    ) throws -> PrivilegedProcessRequest {
+        guard action == .stop || automaticResumeAfter == nil else {
+            throw PrivilegedProcessClientError.remoteFailure(
+                "Only a stop request can contain an automatic-resume deadline."
+            )
+        }
+        let automaticResumeMilliseconds: UInt32?
+        if let automaticResumeAfter {
+            guard automaticResumeAfter.isFinite, automaticResumeAfter > 0 else {
+                throw PrivilegedProcessClientError.remoteFailure(
+                    "The automatic-resume deadline is invalid."
+                )
+            }
+            let milliseconds = ceil(automaticResumeAfter * 1_000)
+            guard milliseconds <= Double(Int32.max) else {
+                throw PrivilegedProcessClientError.remoteFailure(
+                    "The automatic-resume deadline is outside the supported range."
+                )
+            }
+            automaticResumeMilliseconds = UInt32(milliseconds)
+        } else {
+            automaticResumeMilliseconds = nil
+        }
+        return PrivilegedProcessRequest(
             action: action,
             processes: processes.map {
                 PrivilegedProcessIdentity(
@@ -214,7 +245,8 @@ actor PrivilegedProcessClient {
             }.sorted {
                 if $0.pid != $1.pid { return $0.pid < $1.pid }
                 return $0.startTimeMicroseconds < $1.startTimeMicroseconds
-            }
+            },
+            automaticResumeAfterMilliseconds: automaticResumeMilliseconds
         )
     }
 

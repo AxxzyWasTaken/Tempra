@@ -5,7 +5,7 @@ import Testing
 @Suite("Process network activity probe")
 struct ProcessNetworkActivityProbeTests {
     @Test("Connected TCP sockets are latency-sensitive")
-    func connectedTCPSocketIsProtected() {
+    func connectedTCPSocketIsLatencySensitive() {
         var socket = socket_fdinfo()
         socket.psi.soi_family = AF_INET
         socket.psi.soi_protocol = IPPROTO_TCP
@@ -16,7 +16,7 @@ struct ProcessNetworkActivityProbeTests {
     }
 
     @Test("Listening TCP sockets do not imply active traffic")
-    func listeningTCPSocketIsNotProtected() {
+    func listeningTCPSocketIsNotLatencySensitive() {
         var socket = socket_fdinfo()
         socket.psi.soi_family = AF_INET6
         socket.psi.soi_protocol = IPPROTO_TCP
@@ -26,7 +26,7 @@ struct ProcessNetworkActivityProbeTests {
     }
 
     @Test("Internet UDP sockets are treated conservatively")
-    func udpSocketIsProtected() {
+    func udpSocketIsLatencySensitive() {
         var socket = socket_fdinfo()
         socket.psi.soi_family = AF_INET
         socket.psi.soi_protocol = IPPROTO_UDP
@@ -35,14 +35,14 @@ struct ProcessNetworkActivityProbeTests {
     }
 
     @Test("Local IPC sockets are not classified as network activity")
-    func localSocketIsNotProtected() {
+    func localSocketIsNotLatencySensitive() {
         var socket = socket_fdinfo()
         socket.psi.soi_family = AF_UNIX
 
         #expect(!ProcessNetworkActivityProbe.isLatencySensitive(socketInfo: socket))
     }
 
-    @Test("A stale or missing identity is protected")
+    @Test("A stale or missing identity has unknown network activity")
     func staleIdentityIsUnknown() {
         let identity = ProcessIdentity(
             pid: Int32.max,

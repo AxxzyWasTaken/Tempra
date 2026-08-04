@@ -119,7 +119,7 @@ enum SystemProcessRulePolicy {
         }
 
         var normalized = rule
-        if normalized.action == .limit || normalized.action == .pause {
+        if normalized.action == .pause {
             normalized.runOnEfficiencyCores = false
         }
         return normalized
@@ -161,7 +161,7 @@ struct AppRule: Codable, Equatable, Identifiable, Sendable {
         self.bundleIdentifier = bundleIdentifier
         self.displayName = displayName
         self.action = action
-        self.runOnEfficiencyCores = action == .none && runOnEfficiencyCores
+        self.runOnEfficiencyCores = action != .pause && runOnEfficiencyCores
         self.limitPercent = limitPercent
         self.delaySeconds = delaySeconds
         self.protectAudio = protectAudio
@@ -210,7 +210,7 @@ struct AppRule: Codable, Equatable, Identifiable, Sendable {
             Bool.self,
             forKey: .runOnEfficiencyCores
         ) ?? isLegacyEfficiencyRule
-        if action == .limit || action == .pause {
+        if action == .pause {
             runOnEfficiencyCores = false
         }
         limitPercent = try container.decodeIfPresent(Double.self, forKey: .limitPercent) ?? 50
