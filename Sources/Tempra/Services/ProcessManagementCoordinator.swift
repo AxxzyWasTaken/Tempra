@@ -9,11 +9,86 @@ final class ProcessManagementCoordinator {
     ) -> Void
     typealias ChangeHandler = @MainActor @Sendable (ProcessChangeNotification) -> Void
 
+    private struct AudioProtectionCandidate: Equatable {
+        let bundleIdentifier: String
+        let applicationURL: URL?
+
+        init(_ app: ManagedApp) {
+            bundleIdentifier = app.bundleIdentifier
+            applicationURL = app.bundleURL
+        }
+    }
+
+    private struct ProcessSampleConfiguration: Equatable {
+        let identity: ProcessIdentity
+        let isMainProcess: Bool
+        let isPlayingAudio: Bool
+        let networkActivity: ProcessNetworkActivity
+        let hasCPUMeasurement: Bool
+
+        init(_ sample: ManagedProcessSample) {
+            identity = sample.identity
+            isMainProcess = sample.isMainProcess
+            isPlayingAudio = sample.isPlayingAudio
+            networkActivity = sample.networkActivity
+            hasCPUMeasurement = sample.hasCPUMeasurement
+        }
+    }
+
+    private struct TargetConfiguration: Equatable {
+        let bundleIdentifier: String
+        let processIdentities: Set<ProcessIdentity>
+        let processSamples: [ProcessSampleConfiguration]
+        let usesApplicationCommands: Bool
+        let launchedAt: Date?
+        let isFrontmost: Bool
+        let isHidden: Bool
+        let isPlayingAudio: Bool
+        let windowVisibility: AppWindowVisibility
+        let isProtectedByForegroundOverlay: Bool
+        let isProtectedAudioInfrastructure: Bool
+
+        init(_ target: ProcessControlTarget) {
+            bundleIdentifier = target.bundleIdentifier
+            processIdentities = target.processIdentities
+            processSamples = target.processSamples.map(ProcessSampleConfiguration.init)
+            usesApplicationCommands = target.usesApplicationCommands
+            launchedAt = target.launchedAt
+            isFrontmost = target.isFrontmost
+            isHidden = target.isHidden
+            isPlayingAudio = target.isPlayingAudio
+            windowVisibility = target.windowVisibility
+            isProtectedByForegroundOverlay = target.isProtectedByForegroundOverlay
+            isProtectedAudioInfrastructure = target.isProtectedAudioInfrastructure
+        }
+    }
+
+    private struct ControlConfiguration: Equatable {
+        let targets: [TargetConfiguration]
+        let rules: [String: AppRule]
+        let isEnabled: Bool
+
+        init(
+            targets: [ProcessControlTarget],
+            rules: [String: AppRule],
+            isEnabled: Bool
+        ) {
+            self.targets = targets
+                .map(TargetConfiguration.init)
+                .sorted { $0.bundleIdentifier < $1.bundleIdentifier }
+            self.rules = rules
+            self.isEnabled = isEnabled
+        }
+    }
+
     private let controller: ProcessController
     private let processWatcher: ManagedProcessWatcher
     private var revision: UInt64 = 0
+    private var controlConfiguration: ControlConfiguration?
     private var acceptsControllerResults = true
     private var updateTask: Task<Void, Never>?
+    private var audioProtectionCandidates: [AudioProtectionCandidate] = []
+    private var cachedProtectedAudioIdentifiers: Set<String> = []
     private var pauseActivationEventMonitor: Any?
     private var eventHandler: EventHandler?
     private var stateHandler: StateHandler?
@@ -61,13 +136,7 @@ final class ProcessManagementCoordinator {
         onProcessChange: @escaping ChangeHandler
     ) {
         guard acceptsControllerResults, revision < .max else { return }
-        revision += 1
-        let protectedAudioIdentifiers = Set(apps.compactMap { app in
-            SoundSourceCompatibilityPolicy.isProtected(
-                bundleIdentifier: app.bundleIdentifier,
-                applicationURL: app.bundleURL
-            ) ? app.bundleIdentifier : nil
-        })
+        let protectedAudioIdentifiers = resolveProtectedAudioIdentifiers(for: apps)
         let effectiveRules = rules.compactMapValues { rule -> AppRule? in
             guard rule.isEnabled,
                   !protectedAudioIdentifiers.contains(rule.bundleIdentifier),
@@ -88,7 +157,6 @@ final class ProcessManagementCoordinator {
             onChange: onProcessChange
         )
 
-        let requestRevision = revision
         let targets = apps.lazy.map {
             ProcessControlTarget(
                 bundleIdentifier: $0.bundleIdentifier,
@@ -109,17 +177,52 @@ final class ProcessManagementCoordinator {
             )
         }
         let targetSnapshot = Array(targets)
+        let configuration = ControlConfiguration(
+            targets: targetSnapshot,
+            rules: effectiveRules,
+            isEnabled: isEnabled
+        )
+        let requiresReconciliation = configuration != controlConfiguration
+        if requiresReconciliation {
+            revision += 1
+            controlConfiguration = configuration
+        }
         updateTask?.cancel()
+        let requestRevision = revision
         updateTask = Task { [weak self, controller] in
-            let snapshot = await controller.update(
-                targets: targetSnapshot,
-                rules: effectiveRules,
-                isEnabled: isEnabled,
-                revision: requestRevision
-            )
+            let snapshot = if requiresReconciliation {
+                await controller.update(
+                    targets: targetSnapshot,
+                    rules: effectiveRules,
+                    isEnabled: isEnabled,
+                    revision: requestRevision
+                )
+            } else {
+                await controller.updateMeasurements(targets: targetSnapshot)
+            }
             guard !Task.isCancelled else { return }
             self?.apply(snapshot)
         }
+    }
+
+    private func resolveProtectedAudioIdentifiers(
+        for apps: [ManagedApp]
+    ) -> Set<String> {
+        let candidates = apps
+            .map(AudioProtectionCandidate.init)
+            .sorted { $0.bundleIdentifier < $1.bundleIdentifier }
+        guard candidates != audioProtectionCandidates else {
+            return cachedProtectedAudioIdentifiers
+        }
+
+        audioProtectionCandidates = candidates
+        cachedProtectedAudioIdentifiers = Set(candidates.compactMap { candidate in
+            SoundSourceCompatibilityPolicy.isProtected(
+                bundleIdentifier: candidate.bundleIdentifier,
+                applicationURL: candidate.applicationURL
+            ) ? candidate.bundleIdentifier : nil
+        })
+        return cachedProtectedAudioIdentifiers
     }
 
     func shutdown() async -> ProcessRestorationResult {
@@ -203,8 +306,8 @@ final class ProcessManagementCoordinator {
             } else {
                 activeCPULimitSessionIdentifiers.remove(identifier)
             }
-            stateHandler?(statuses, estimatedSavedCPUByIdentifier)
             eventHandler?(event)
+            stateHandler?(statuses, estimatedSavedCPUByIdentifier)
         case .activity(let eventRevision, _, _, _):
             guard eventRevision == revision else { return }
             eventHandler?(event)
@@ -216,11 +319,18 @@ final class ProcessManagementCoordinator {
 
     private func apply(_ snapshot: ProcessControlSnapshot) {
         guard acceptsControllerResults, snapshot.revision == revision else { return }
+        let publishesState = statuses != snapshot.statuses
+            || estimatedSavedCPUByIdentifier != snapshot.estimatedSavedCPUByIdentifier
+            || activeCPULimitSessionIdentifiers
+                != snapshot.activeCPULimitSessionIdentifiers
+            || protectionReasonsByIdentifier != snapshot.protectionReasonsByIdentifier
         statuses = snapshot.statuses
         estimatedSavedCPUByIdentifier = snapshot.estimatedSavedCPUByIdentifier
         activeCPULimitSessionIdentifiers = snapshot.activeCPULimitSessionIdentifiers
         protectionReasonsByIdentifier = snapshot.protectionReasonsByIdentifier
-        stateHandler?(statuses, estimatedSavedCPUByIdentifier)
+        if publishesState {
+            stateHandler?(statuses, estimatedSavedCPUByIdentifier)
+        }
     }
 
     private func setPauseWakeMonitoringEnabled(_ enabled: Bool) {

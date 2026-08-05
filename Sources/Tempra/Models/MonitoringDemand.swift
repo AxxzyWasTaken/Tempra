@@ -12,9 +12,9 @@ enum MonitoringDemand: Equatable {
         switch self {
         case .dormant:
             nil
-        case .menuBar, .continuous:
+        case .menuBar, .management, .continuous, .continuousManagement:
             5
-        case .management, .liveUI, .continuousManagement:
+        case .liveUI:
             1
         }
     }
@@ -30,7 +30,22 @@ enum MonitoringDemand: Equatable {
         }
     }
 
+    var processTableRefreshInterval: TimeInterval {
+        switch self {
+        case .liveUI:
+            5
+        case .continuous, .continuousManagement:
+            15
+        case .dormant, .menuBar, .management:
+            30
+        }
+    }
+
     var samplesPower: Bool {
+        self == .liveUI
+    }
+
+    var refreshesAudioActivity: Bool {
         self == .liveUI
     }
 

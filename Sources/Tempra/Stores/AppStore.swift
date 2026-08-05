@@ -56,7 +56,7 @@ final class AppStore: ObservableObject {
     private let workspaceEventMonitor = WorkspaceEventMonitor()
     private var highCPUDetector = HighCPUDetector()
     var runtimeMetrics = RuntimeMetrics()
-    private var isPresentationActive = false
+    private(set) var isPresentationActive = false
     private var hasBegunShutdown = false
     private var hasShutDown = false
     private var persistedEnabled: Bool
@@ -70,6 +70,7 @@ final class AppStore: ObservableObject {
     private var lifecycleSuspensions: Set<ManagementLifecycleSuspension> = []
     private var lifecycleResumeTask: Task<Void, Never>?
     private var lifecycleResumeID: UUID?
+    private var recordedCPULimitSessionIdentifiers: Set<String> = []
     private let lifecycleReapplyGracePeriod: TimeInterval = 5
     var historyFocusBundleIdentifier: String?
     var appCPUHistoryIndicesByIdentifier: [String: [Int]] = [:]
@@ -709,6 +710,9 @@ final class AppStore: ObservableObject {
     func setPresentationActive(_ isActive: Bool) {
         guard isPresentationActive != isActive else { return }
         isPresentationActive = isActive
+        if isActive {
+            rebuildDisplayItems()
+        }
         configureMonitoringDemand(refreshImmediately: isActive)
     }
 
@@ -756,16 +760,21 @@ final class AppStore: ObservableObject {
     }
 
     private var requiresApplicationMonitoring: Bool {
-        guard isEnabled, !isManagementPaused else { return false }
-        return rules.values.contains { rule in
+        !managedLimitIdentifiers.isEmpty
+    }
+
+    private var managedLimitIdentifiers: Set<String> {
+        guard isEnabled, !isManagementPaused else { return [] }
+        return Set(rules.values.compactMap { rule in
             guard rule.isEnabled,
                   suspensions[rule.bundleIdentifier]?.isActive != true else {
-                return false
+                return nil
             }
-            return SystemProcessRulePolicy.normalized(
+            let normalized = SystemProcessRulePolicy.normalized(
                 effectiveManagementProfile?.applying(to: rule) ?? rule
-            ).action == .limit
-        }
+            )
+            return normalized.action == .limit ? normalized.bundleIdentifier : nil
+        })
     }
 
     private func configureMonitoringDemand(refreshImmediately: Bool) {
@@ -787,7 +796,8 @@ final class AppStore: ObservableObject {
         monitoringCoordinator.configure(
             demand: demand,
             refreshImmediately: refreshImmediately,
-            includesEssentialSystemProcesses: includesBackgroundAndSystemProcesses
+            includesEssentialSystemProcesses: includesBackgroundAndSystemProcesses,
+            networkActivityBundleIdentifiers: managedLimitIdentifiers
         )
 
         if previousDemand != demand {
@@ -799,6 +809,7 @@ final class AppStore: ObservableObject {
 
     func refresh() {
         guard !hasBegunShutdown else { return }
+        monitoringCoordinator.invalidateApplicationInventory()
         if purgeExpiredSuspensions() {
             scheduleSuspensionExpiration()
             configureMonitoringDemand(refreshImmediately: false)
@@ -946,7 +957,8 @@ final class AppStore: ObservableObject {
     }
 
     private var includesBackgroundAndSystemProcesses: Bool {
-        preferences.includesEssentialSystemProcesses
+        (preferences.includesEssentialSystemProcesses
+            && (isPresentationActive || preferences.continuousMonitoringEnabled))
             || rules.keys.contains(where: BackgroundProcessPolicy.isMonitorOnlyIdentifier)
     }
 
@@ -1149,31 +1161,36 @@ final class AppStore: ObservableObject {
 
     private func handleControllerEvent(_ event: ProcessControllerEvent) {
         switch event {
-        case .statusTransition(_, let identifier, let previous, let current, _):
-            let displayName = apps.first { $0.bundleIdentifier == identifier }?.name
-                ?? rules[identifier]?.displayName
-                ?? identifier
-            let applicationURL = apps.first { $0.bundleIdentifier == identifier }?.bundleURL
-                ?? rules[identifier]?.applicationURL
-            let isInternalLimitPhaseChange = ManagementMetricCategory(status: previous) == .limited
-                && ManagementMetricCategory(status: current) == .limited
-            if !isInternalLimitPhaseChange {
-                do {
-                    try managementLedger.transition(
-                        bundleIdentifier: identifier,
-                        displayName: displayName,
-                        applicationURL: applicationURL,
-                        status: current
-                    )
-                } catch {
-                    reportPersistenceError(error)
+        case .statusTransition(
+            _,
+            let identifier,
+            let previous,
+            let current,
+            let isCPULimitSessionActive
+        ):
+            if isCPULimitSessionActive {
+                guard recordedCPULimitSessionIdentifiers.insert(identifier).inserted else {
+                    return
                 }
-                recordControllerTransition(
+                recordManagementTransition(
                     bundleIdentifier: identifier,
                     previous: previous,
+                    current: activeLimitStatus(for: identifier)
+                )
+                return
+            } else if recordedCPULimitSessionIdentifiers.remove(identifier) != nil {
+                recordManagementTransition(
+                    bundleIdentifier: identifier,
+                    previous: activeLimitStatus(for: identifier),
                     current: current
                 )
+                return
             }
+            recordManagementTransition(
+                bundleIdentifier: identifier,
+                previous: previous,
+                current: current
+            )
         case .activity(_, let identifier, let kind, let detail):
             recordActivity(bundleIdentifier: identifier, kind: kind, detail: detail)
         case .pauseWakeMonitoringChanged:
@@ -1185,12 +1202,62 @@ final class AppStore: ObservableObject {
         statuses: [String: ManagementStatus],
         savedCPU: [String: Double]
     ) {
-        apps = apps.map { app in
-            var updated = app
-            updated.status = statuses[app.bundleIdentifier] ?? .normal
-            return updated
+        if apps.contains(where: {
+            $0.status != (statuses[$0.bundleIdentifier] ?? .normal)
+        }) {
+            apps = apps.map { app in
+                var updated = app
+                updated.status = statuses[app.bundleIdentifier] ?? .normal
+                return updated
+            }
+        }
+        let endedLimitSessions = recordedCPULimitSessionIdentifiers.subtracting(
+            managementCoordinator.activeCPULimitSessionIdentifiers
+        )
+        for identifier in endedLimitSessions {
+            recordedCPULimitSessionIdentifiers.remove(identifier)
+            recordManagementTransition(
+                bundleIdentifier: identifier,
+                previous: activeLimitStatus(for: identifier),
+                current: statuses[identifier] ?? .normal
+            )
         }
         rebuildDisplayItems()
+    }
+
+    private func activeLimitStatus(for bundleIdentifier: String) -> ManagementStatus {
+        .limited(rules[bundleIdentifier]?.limitPercent ?? CPULimitRange.minimumPercent)
+    }
+
+    private func recordManagementTransition(
+        bundleIdentifier: String,
+        previous: ManagementStatus,
+        current: ManagementStatus
+    ) {
+        guard ManagementMetricCategory(status: previous)
+                != ManagementMetricCategory(status: current) else {
+            return
+        }
+        let displayName = apps.first { $0.bundleIdentifier == bundleIdentifier }?.name
+            ?? rules[bundleIdentifier]?.displayName
+            ?? bundleIdentifier
+        let applicationURL = apps.first { $0.bundleIdentifier == bundleIdentifier }?.bundleURL
+            ?? rules[bundleIdentifier]?.applicationURL
+        do {
+            try managementLedger.transition(
+                bundleIdentifier: bundleIdentifier,
+                displayName: displayName,
+                applicationURL: applicationURL,
+                status: current
+            )
+        } catch {
+            reportPersistenceError(error)
+        }
+        recordControllerTransition(
+            bundleIdentifier: bundleIdentifier,
+            previous: previous,
+            current: current
+        )
     }
 
     private func recordControllerTransition(

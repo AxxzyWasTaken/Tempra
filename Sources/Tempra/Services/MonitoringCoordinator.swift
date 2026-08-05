@@ -5,6 +5,7 @@ final class MonitoringCoordinator {
     typealias SampleHandler = @MainActor @Sendable (MonitoringSample) -> Void
 
     private let service: any MonitoringServicing
+    private let inventoryReader = ApplicationInventoryReader()
     private let onSample: SampleHandler
     private var timer: Timer?
     private var configurationTask: Task<Void, Never>?
@@ -12,6 +13,7 @@ final class MonitoringCoordinator {
     private var pendingRequest: MonitoringRequest?
     private var deferredProcessChange: ProcessChangeNotification?
     private var applicationBaselineGeneration: UInt64?
+    private var networkActivityBundleIdentifiers: Set<String> = []
     private var generation: UInt64 = 0
     private(set) var demand: MonitoringDemand = .dormant
     private var isStopped = false
@@ -27,11 +29,13 @@ final class MonitoringCoordinator {
     func configure(
         demand: MonitoringDemand,
         refreshImmediately: Bool,
-        includesEssentialSystemProcesses: Bool
+        includesEssentialSystemProcesses: Bool,
+        networkActivityBundleIdentifiers: Set<String> = []
     ) {
         guard !isStopped else { return }
         let previousDemand = self.demand
         self.demand = demand
+        self.networkActivityBundleIdentifiers = networkActivityBundleIdentifiers
         generation &+= 1
         if !previousDemand.samplesApplications, demand.samplesApplications {
             applicationBaselineGeneration = generation
@@ -61,7 +65,8 @@ final class MonitoringCoordinator {
 
         if refreshImmediately, demand != .dormant {
             requestPeriodicRefresh(
-                includesEssentialSystemProcesses: includesEssentialSystemProcesses
+                includesEssentialSystemProcesses: includesEssentialSystemProcesses,
+                isLatencySensitive: true
             )
         }
 
@@ -69,7 +74,8 @@ final class MonitoringCoordinator {
             let timer = Timer(timeInterval: interval, repeats: true) { [weak self] _ in
                 MainActor.assumeIsolated {
                     self?.requestPeriodicRefresh(
-                        includesEssentialSystemProcesses: includesEssentialSystemProcesses
+                        includesEssentialSystemProcesses: includesEssentialSystemProcesses,
+                        isLatencySensitive: false
                     )
                 }
             }
@@ -89,8 +95,13 @@ final class MonitoringCoordinator {
             samplesApplications: true,
             includesEssentialSystemProcesses: includesEssentialSystemProcesses,
             samplesPower: demand.samplesPower,
+            isLatencySensitive: true,
             processChange: processChange
         ))
+    }
+
+    func invalidateApplicationInventory() {
+        inventoryReader.invalidate()
     }
 
     func shutdown() async {
@@ -108,7 +119,10 @@ final class MonitoringCoordinator {
         await service.shutdown()
     }
 
-    private func requestPeriodicRefresh(includesEssentialSystemProcesses: Bool) {
+    private func requestPeriodicRefresh(
+        includesEssentialSystemProcesses: Bool,
+        isLatencySensitive: Bool
+    ) {
         switch demand {
         case .dormant:
             break
@@ -118,6 +132,7 @@ final class MonitoringCoordinator {
                 samplesApplications: false,
                 includesEssentialSystemProcesses: false,
                 samplesPower: false,
+                isLatencySensitive: isLatencySensitive,
                 processChange: nil
             ))
         case .management, .liveUI, .continuous, .continuousManagement:
@@ -126,6 +141,7 @@ final class MonitoringCoordinator {
                 samplesApplications: true,
                 includesEssentialSystemProcesses: includesEssentialSystemProcesses,
                 samplesPower: demand.samplesPower,
+                isLatencySensitive: isLatencySensitive,
                 processChange: nil
             ))
         }
@@ -136,15 +152,20 @@ final class MonitoringCoordinator {
         samplesApplications: Bool,
         includesEssentialSystemProcesses: Bool,
         samplesPower: Bool,
+        isLatencySensitive: Bool,
         processChange: ProcessChangeNotification?
     ) -> MonitoringRequest {
         MonitoringRequest(
             generation: generation,
-            inventory: samplesApplications ? .capture() : nil,
+            inventory: samplesApplications ? inventoryReader.capture() : nil,
             samplesSystemCPU: samplesSystemCPU,
             samplesApplications: samplesApplications,
             includesEssentialSystemProcesses: includesEssentialSystemProcesses,
+            processTableRefreshInterval: demand.processTableRefreshInterval,
             samplesPower: samplesPower,
+            networkActivityBundleIdentifiers: networkActivityBundleIdentifiers,
+            refreshesAudioActivity: demand.refreshesAudioActivity,
+            isLatencySensitive: isLatencySensitive,
             processChange: processChange
         )
     }
@@ -158,12 +179,16 @@ final class MonitoringCoordinator {
         )
         deferredProcessChange = nil
         guard samplingTask == nil else {
-            pendingRequest = request.replacingProcessChange(
+            var mergedRequest = request.replacingProcessChange(
                 with: ProcessChangeNotification.coalescing(
                     pendingRequest?.processChange,
                     request.processChange
                 )
             )
+            if pendingRequest?.isLatencySensitive == true {
+                mergedRequest = mergedRequest.requiringLatencySensitiveSampling()
+            }
+            pendingRequest = mergedRequest
             return
         }
         start(request)
@@ -171,7 +196,8 @@ final class MonitoringCoordinator {
 
     private func start(_ request: MonitoringRequest) {
         let configurationTask = configurationTask
-        samplingTask = Task { [weak self, service, onSample] in
+        let priority: TaskPriority = request.isLatencySensitive ? .userInitiated : .utility
+        samplingTask = Task(priority: priority) { [weak self, service, onSample] in
             await configurationTask?.value
             guard !Task.isCancelled else { return }
             let sample = await service.sample(request)

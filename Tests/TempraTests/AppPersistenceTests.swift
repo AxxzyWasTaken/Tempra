@@ -577,8 +577,8 @@ struct AppPersistenceTests {
         }
     }
 
-    @Test("One limiting session does not persist each internal phase change")
-    func limitPhaseChangesUseHeartbeatPersistence() throws {
+    @Test("Management transitions batch persistence until the heartbeat")
+    func managementTransitionsUseHeartbeatPersistence() throws {
         try withDefaults { defaults in
             let ledger = try ManagementLedger(defaults: defaults)
             let startedAt = Date(timeIntervalSince1970: 100)
@@ -589,6 +589,8 @@ struct AppPersistenceTests {
                 status: .limited(10),
                 at: startedAt
             )
+            #expect(defaults.data(forKey: ManagementLedger.storageKey) == nil)
+            try ledger.heartbeat(at: startedAt.addingTimeInterval(1))
             let initialData = try #require(
                 defaults.data(forKey: ManagementLedger.storageKey)
             )
@@ -614,6 +616,8 @@ struct AppPersistenceTests {
                 status: .normal,
                 at: startedAt.addingTimeInterval(20)
             )
+            #expect(defaults.data(forKey: ManagementLedger.storageKey) == initialData)
+            try ledger.heartbeat(at: startedAt.addingTimeInterval(21))
             #expect(defaults.data(forKey: ManagementLedger.storageKey) != initialData)
         }
     }

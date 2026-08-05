@@ -118,7 +118,7 @@ enum BackgroundProcessPolicy {
     static func displayName(command: String, pid: pid_t) -> String {
         guard !command.isEmpty else { return "Process \(pid)" }
         if command.contains("/") {
-            let name = URL(fileURLWithPath: command).lastPathComponent
+            let name = (command as NSString).lastPathComponent
             if !name.isEmpty { return name }
         }
         return command
@@ -167,6 +167,101 @@ struct ApplicationInventory: Sendable {
             },
             frontmostBundleIdentifier: NSWorkspace.shared.frontmostApplication?.bundleIdentifier,
             ownBundleIdentifier: Bundle.main.bundleIdentifier
+        )
+    }
+}
+
+@MainActor
+final class ApplicationInventoryReader {
+    private struct CachedApplication {
+        let application: NSRunningApplication
+        let processIdentifier: pid_t
+        let bundleIdentifier: String
+        let localizedName: String?
+        let bundleURL: URL
+        let activationPolicyRawValue: Int
+        let isHidden: Bool
+    }
+
+    private var applicationsByObjectIdentifier: [ObjectIdentifier: CachedApplication] = [:]
+    private let ownBundleIdentifier = Bundle.main.bundleIdentifier
+    private let uptime: () -> TimeInterval
+    private var lastFullRefreshTime: TimeInterval = 0
+    private let fullRefreshInterval: TimeInterval = 60
+
+    init(uptime: @escaping () -> TimeInterval = {
+        ProcessInfo.processInfo.systemUptime
+    }) {
+        self.uptime = uptime
+    }
+
+    func invalidate() {
+        applicationsByObjectIdentifier.removeAll(keepingCapacity: true)
+        lastFullRefreshTime = uptime()
+    }
+
+    func capture() -> ApplicationInventory {
+        let now = uptime()
+        if lastFullRefreshTime == 0
+            || now < lastFullRefreshTime
+            || now - lastFullRefreshTime >= fullRefreshInterval {
+            applicationsByObjectIdentifier.removeAll(keepingCapacity: true)
+            lastFullRefreshTime = now
+        }
+        let workspace = NSWorkspace.shared
+        let runningApplications = workspace.runningApplications
+        var currentObjectIdentifiers: Set<ObjectIdentifier> = []
+        var descriptors: [RunningApplicationDescriptor] = []
+        descriptors.reserveCapacity(runningApplications.count)
+
+        for application in runningApplications {
+            let objectIdentifier = ObjectIdentifier(application)
+            currentObjectIdentifiers.insert(objectIdentifier)
+
+            let cached: CachedApplication
+            if let existing = applicationsByObjectIdentifier[objectIdentifier],
+               existing.application === application {
+                cached = existing
+            } else {
+                guard let bundleIdentifier = application.bundleIdentifier,
+                      let bundleURL = application.bundleURL else {
+                    applicationsByObjectIdentifier.removeValue(forKey: objectIdentifier)
+                    continue
+                }
+                cached = CachedApplication(
+                    application: application,
+                    processIdentifier: application.processIdentifier,
+                    bundleIdentifier: bundleIdentifier,
+                    localizedName: application.localizedName,
+                    bundleURL: bundleURL,
+                    activationPolicyRawValue: application.activationPolicy.rawValue,
+                    isHidden: application.isHidden
+                )
+                applicationsByObjectIdentifier[objectIdentifier] = cached
+            }
+
+            descriptors.append(RunningApplicationDescriptor(
+                bundleIdentifier: cached.bundleIdentifier,
+                localizedName: cached.localizedName,
+                bundleURL: cached.bundleURL,
+                processIdentifier: cached.processIdentifier,
+                activationPolicyRawValue: cached.activationPolicyRawValue,
+                isHidden: cached.isHidden
+            ))
+        }
+
+        applicationsByObjectIdentifier = applicationsByObjectIdentifier.filter {
+            currentObjectIdentifiers.contains($0.key)
+        }
+        let frontmostApplication = workspace.frontmostApplication
+        let frontmostBundleIdentifier = frontmostApplication.flatMap { application in
+            applicationsByObjectIdentifier[ObjectIdentifier(application)]?.bundleIdentifier
+                ?? application.bundleIdentifier
+        }
+        return ApplicationInventory(
+            applications: descriptors,
+            frontmostBundleIdentifier: frontmostBundleIdentifier,
+            ownBundleIdentifier: ownBundleIdentifier
         )
     }
 }
@@ -297,7 +392,7 @@ struct LiveProcessSnapshotReader: ProcessSnapshotReading {
             parentPID: pid_t(info.pbsd.pbi_ppid),
             userID: info.pbsd.pbi_uid,
             executableName: executableName,
-            executablePath: executablePath(for: pid) ?? "",
+            executablePath: "",
             totalCPUTimeNanoseconds: totalCPUTimeNanoseconds,
             residentMemoryBytes: info.ptinfo.pti_resident_size
         )
@@ -614,7 +709,7 @@ final class ProcessMonitor {
     private var metadataCache = ProcessMetadataCache()
     private var cachedProcessTableEntries: [ProcessTableEntry] = []
     private var processTableRefreshTime: TimeInterval = 0
-    private let processTableRefreshInterval: TimeInterval = 3
+    private let backgroundSampleReuseInterval: TimeInterval = 5
     private var cachedBackgroundSample: [ManagedApp] = []
     private var backgroundSampleTime: TimeInterval = 0
     private var lastIncludedBackgroundProcesses = false
@@ -677,7 +772,9 @@ final class ProcessMonitor {
     func sample(
         inventory: ApplicationInventory,
         includingEssentialSystemProcesses: Bool = false,
-        refreshesAudioActivity: Bool = true
+        processTableRefreshInterval: TimeInterval = 5,
+        refreshesAudioActivity: Bool = true,
+        networkActivityBundleIdentifiers: Set<String>? = nil
     ) async -> [ManagedApp] {
         let now = uptime()
         let inclusionChanged = includingEssentialSystemProcesses != lastIncludedBackgroundProcesses
@@ -685,7 +782,7 @@ final class ProcessMonitor {
         if includingEssentialSystemProcesses,
            !inclusionChanged,
            !cachedBackgroundSample.isEmpty,
-           now - backgroundSampleTime < processTableRefreshInterval {
+           now - backgroundSampleTime < backgroundSampleReuseInterval {
             didRefreshLastSample = false
             if refreshesAudioActivity {
                 let playingAudioProcessIdentifiers = audioProcessIdentifiers()
@@ -708,7 +805,8 @@ final class ProcessMonitor {
         let hadSamplingBaseline = hasSamplingBaseline
         let elapsed = max(now - previousSampleTime, 0.001)
         let rawProcesses = await readProcesses(
-            includingBackgroundProcesses: includingEssentialSystemProcesses
+            includingBackgroundProcesses: includingEssentialSystemProcesses,
+            processTableRefreshInterval: processTableRefreshInterval
         )
         let rawByPID = Dictionary(uniqueKeysWithValues: rawProcesses.map { ($0.pid, $0) })
         let bundles = runningBundles(
@@ -756,6 +854,9 @@ final class ProcessMonitor {
             guard !pids.isEmpty else { return nil }
 
             let cpu = pids.reduce(0) { $0 + cpuByPID[$1, default: 0] }
+            let probesNetworkActivity = networkActivityBundleIdentifiers?.contains(
+                bundle.identifier
+            ) != false
             let processSamples = pids.compactMap { pid -> ManagedProcessSample? in
                 guard let identity = rawByPID[pid]?.identity else { return nil }
                 return ManagedProcessSample(
@@ -763,7 +864,9 @@ final class ProcessMonitor {
                     cpuPercent: cpuByPID[pid, default: 0],
                     isMainProcess: bundle.mainPIDs.contains(pid),
                     isPlayingAudio: playingAudioProcessIdentifiers.contains(pid),
-                    networkActivity: networkActivity(identity),
+                    networkActivity: probesNetworkActivity
+                        ? networkActivity(identity)
+                        : .inactive,
                     hasCPUMeasurement: measuredIdentities.contains(identity)
                 )
             }
@@ -806,7 +909,8 @@ final class ProcessMonitor {
                 from: rawProcesses,
                 excluding: assignedPIDs,
                 cpuByPID: cpuByPID,
-                measuredIdentities: measuredIdentities
+                measuredIdentities: measuredIdentities,
+                networkActivityBundleIdentifiers: networkActivityBundleIdentifiers
             )
         } else {
             backgroundApps = []
@@ -893,17 +997,20 @@ final class ProcessMonitor {
         metadataCache.invalidate(notification.invalidatedMetadata)
         cachedBackgroundSample.removeAll()
         backgroundSampleTime = 0
-        if notification.processTableChanged {
-            cachedProcessTableEntries.removeAll()
-            processTableRefreshTime = 0
-        }
     }
 
-    private func readProcesses(includingBackgroundProcesses: Bool) async -> [RawProcess] {
+    private func readProcesses(
+        includingBackgroundProcesses: Bool,
+        processTableRefreshInterval requestedRefreshInterval: TimeInterval
+    ) async -> [RawProcess] {
         guard includingBackgroundProcesses else {
             privilegedAccessError = nil
             return readAccessibleProcesses().filter(isIncludedProcess)
         }
+
+        let processTableRefreshInterval = requestedRefreshInterval.isFinite
+            ? max(1, requestedRefreshInterval)
+            : backgroundSampleReuseInterval
 
         let accessibleProcesses = readAccessibleProcesses().filter(isIncludedProcess)
         let accessibleByPID = Dictionary(
@@ -941,7 +1048,7 @@ final class ProcessMonitor {
             }
         }
 
-        return cachedProcessTableEntries.compactMap { entry in
+        var processes = cachedProcessTableEntries.compactMap { entry in
             if let accessible = accessibleByPID[entry.pid] {
                 return isIncludedProcess(accessible) ? accessible : nil
             }
@@ -965,6 +1072,11 @@ final class ProcessMonitor {
             )
             return isIncludedProcess(process) ? process : nil
         }
+        let cachedProcessIdentifiers = Set(cachedProcessTableEntries.map(\.pid))
+        processes.append(contentsOf: accessibleProcesses.filter {
+            !cachedProcessIdentifiers.contains($0.pid)
+        })
+        return processes
     }
 
     private func readAccessibleProcesses() -> [RawProcess] {
@@ -1123,7 +1235,8 @@ final class ProcessMonitor {
         from processes: [RawProcess],
         excluding assignedPIDs: Set<pid_t>,
         cpuByPID: [pid_t: Double],
-        measuredIdentities: Set<ProcessIdentity>
+        measuredIdentities: Set<ProcessIdentity>,
+        networkActivityBundleIdentifiers: Set<String>?
     ) -> [ManagedApp] {
         var groups: [String: BackgroundProcessGroup] = [:]
         let ownPID = getpid()
@@ -1144,6 +1257,9 @@ final class ProcessMonitor {
                     command: identityCommand,
                     pid: process.pid
                 )
+            let probesNetworkActivity = networkActivityBundleIdentifiers?.contains(
+                identifier
+            ) != false
             if var group = groups[identifier] {
                 group.pids.append(process.pid)
                 if let identity = process.identity {
@@ -1152,7 +1268,9 @@ final class ProcessMonitor {
                         identity: identity,
                         cpuPercent: cpuByPID[process.pid, default: 0],
                         isMainProcess: true,
-                        networkActivity: networkActivity(identity),
+                        networkActivity: probesNetworkActivity
+                            ? networkActivity(identity)
+                            : .inactive,
                         hasCPUMeasurement: measuredIdentities.contains(identity)
                     ))
                 }
@@ -1164,7 +1282,7 @@ final class ProcessMonitor {
                 groups[identifier] = group
             } else {
                 let url = process.path.hasPrefix("/")
-                    ? URL(fileURLWithPath: process.path)
+                    ? URL(filePath: process.path, directoryHint: .notDirectory)
                     : nil
                 groups[identifier] = BackgroundProcessGroup(
                     identifier: identifier,
@@ -1177,7 +1295,9 @@ final class ProcessMonitor {
                             identity: identity,
                             cpuPercent: cpuByPID[process.pid, default: 0],
                             isMainProcess: true,
-                            networkActivity: networkActivity(identity),
+                            networkActivity: probesNetworkActivity
+                                ? networkActivity(identity)
+                                : .inactive,
                             hasCPUMeasurement: measuredIdentities.contains(identity)
                         )]
                     } ?? [],

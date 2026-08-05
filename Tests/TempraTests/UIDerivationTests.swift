@@ -411,6 +411,7 @@ struct UIDerivationTests {
                 isSystemProcess: false,
                 status: .normal
             )
+            store.setPresentationActive(true)
             var snapshotPublicationCount = 0
             let displayItemsObservation = store.$displayItems
                 .dropFirst()
@@ -450,6 +451,59 @@ struct UIDerivationTests {
             print("UI projection measurement: 1 display snapshot for 1 live monitoring sample")
             withExtendedLifetime(displayItemsObservation) {}
 
+            _ = await store.shutdown()
+        }
+    }
+
+    @Test("Background samples defer display projection until the menu opens")
+    func backgroundSamplesDeferDisplayProjection() async throws {
+        try await withDefaults { defaults in
+            let store = try AppStore(
+                persistence: AppPersistence(defaults: defaults),
+                managementCoordinator: ProcessManagementCoordinator(),
+                monitoringService: UIDerivationMonitoringService(),
+                launchAtLoginController: UIDerivationLaunchAtLoginController(),
+                startsMonitoring: false,
+                persistenceErrorHandler: { _ in }
+            )
+            let app = ManagedApp(
+                bundleIdentifier: "example.background",
+                name: "Background",
+                bundleURL: URL(fileURLWithPath: "/Applications/Background.app"),
+                processIdentifiers: [21],
+                cpuPercent: 30,
+                isFrontmost: false,
+                isHidden: true,
+                isPlayingAudio: false,
+                isSystemProcess: false,
+                status: .normal
+            )
+            var publicationCount = 0
+            let observation = store.$displayItems
+                .dropFirst()
+                .sink { _ in publicationCount += 1 }
+
+            store.applyMonitoringSample(
+                MonitoringSample(
+                    generation: 1,
+                    systemCPU: nil,
+                    apps: [app],
+                    didRefreshApplications: true,
+                    powerByIdentifier: [:],
+                    powerMetricsSupported: false
+                ),
+                demand: .management(samplesSystemCPU: false)
+            )
+
+            #expect(publicationCount == 0)
+            #expect(store.displayItems.isEmpty)
+            #expect(store.totalCPUPercent == 30)
+
+            store.setPresentationActive(true)
+
+            #expect(publicationCount == 1)
+            #expect(store.displayItems.first?.bundleIdentifier == app.bundleIdentifier)
+            withExtendedLifetime(observation) {}
             _ = await store.shutdown()
         }
     }
@@ -568,6 +622,15 @@ struct UIDerivationTests {
             #expect(store.preferences.includesEssentialSystemProcesses)
             #expect(try AppPersistence(defaults: defaults)
                 .loadPreferences().includesEssentialSystemProcesses)
+
+            let visibleRequestCount = requests.count
+            store.setPresentationActive(false)
+            store.refresh()
+            requests = try await waitForInclusionRequests(
+                visibleRequestCount + 1,
+                from: monitoringService
+            )
+            #expect(requests.last == false)
 
             _ = await store.shutdown()
         }

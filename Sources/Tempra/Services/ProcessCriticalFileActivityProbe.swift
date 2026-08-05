@@ -131,7 +131,7 @@ struct ProcessCriticalFileActivityProbe: Sendable {
     static func isActiveDownload(path: String, openFlags: UInt32) -> Bool {
         let accessMode = Int32(bitPattern: openFlags) & O_ACCMODE
         guard accessMode == O_WRONLY || accessMode == O_RDWR else { return false }
-        let pathExtension = URL(fileURLWithPath: path).pathExtension.lowercased()
+        let pathExtension = (path as NSString).pathExtension.lowercased()
         return downloadExtensions.contains(pathExtension)
     }
 

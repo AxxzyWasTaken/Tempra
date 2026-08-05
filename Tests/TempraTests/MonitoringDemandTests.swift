@@ -4,6 +4,25 @@ import Testing
 
 @Suite("Monitoring demand")
 struct MonitoringDemandTests {
+    @Test("Process events promote monitoring work to latency-sensitive priority")
+    func processEventsPromoteMonitoringPriority() {
+        let periodicRequest = MonitoringRequest(
+            generation: 1,
+            inventory: nil,
+            samplesSystemCPU: true,
+            samplesApplications: false,
+            includesEssentialSystemProcesses: false,
+            samplesPower: false,
+            processChange: nil
+        )
+
+        #expect(!periodicRequest.isLatencySensitive)
+        #expect(periodicRequest.replacingProcessChange(
+            with: .audioActivity
+        ).isLatencySensitive)
+        #expect(periodicRequest.requiringLatencySensitiveSampling().isLatencySensitive)
+    }
+
     @Test("Dormant mode has no recurring work")
     func dormantHasNoRecurringWork() {
         let demand = MonitoringDemand.resolve(
@@ -29,7 +48,9 @@ struct MonitoringDemandTests {
         #expect(demand == .liveUI)
         #expect(demand.sampleInterval == 1)
         #expect(demand.temperatureInterval == 2)
+        #expect(demand.processTableRefreshInterval == 5)
         #expect(demand.samplesPower)
+        #expect(demand.refreshesAudioActivity)
     }
 
     @Test("Continuous monitoring uses coarse intervals")
@@ -43,6 +64,7 @@ struct MonitoringDemandTests {
         #expect(demand == .continuous)
         #expect(demand.sampleInterval == 5)
         #expect(demand.temperatureInterval == 15)
+        #expect(demand.processTableRefreshInterval == 15)
         #expect(!demand.samplesPower)
     }
 
@@ -57,6 +79,7 @@ struct MonitoringDemandTests {
         #expect(demand == .menuBar)
         #expect(demand.sampleInterval == 5)
         #expect(demand.temperatureInterval == nil)
+        #expect(demand.processTableRefreshInterval == 30)
         #expect(!demand.samplesApplications)
         #expect(!demand.samplesPower)
     }
@@ -71,12 +94,13 @@ struct MonitoringDemandTests {
         )
 
         #expect(demand == .management(samplesSystemCPU: false))
-        #expect(demand.sampleInterval == 1)
+        #expect(demand.sampleInterval == 5)
         #expect(demand.temperatureInterval == nil)
         #expect(demand.samplesApplications)
         #expect(!demand.recordsApplicationMetrics)
         #expect(!demand.samplesSystemCPU)
         #expect(!demand.samplesPower)
+        #expect(!demand.refreshesAudioActivity)
     }
 
     @Test("Rule maintenance preserves requested menu-bar CPU sampling")
@@ -92,7 +116,7 @@ struct MonitoringDemandTests {
         #expect(demand.samplesSystemCPU)
     }
 
-    @Test("Continuous metrics keep the management sampling cadence")
+    @Test("Continuous metrics use the coarse management sampling cadence")
     func continuousManagementIntervals() {
         let demand = MonitoringDemand.resolve(
             isPresentationActive: false,
@@ -102,8 +126,9 @@ struct MonitoringDemandTests {
         )
 
         #expect(demand == .continuousManagement)
-        #expect(demand.sampleInterval == 1)
+        #expect(demand.sampleInterval == 5)
         #expect(demand.temperatureInterval == 15)
+        #expect(demand.processTableRefreshInterval == 15)
         #expect(demand.recordsApplicationMetrics)
         #expect(demand.samplesSystemCPU)
         #expect(!demand.samplesPower)

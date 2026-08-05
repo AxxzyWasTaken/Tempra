@@ -71,14 +71,18 @@ enum SoundSourceCompatibilityPolicy {
             return true
         }
         guard let applicationURL else { return false }
-        return applicationURL.standardizedFileURL.pathComponents.contains { component in
+        let standardizedURL = URL(
+            filePath: applicationURL.path,
+            directoryHint: .notDirectory
+        ).standardized
+        return standardizedURL.pathComponents.contains { component in
             component.caseInsensitiveCompare("SoundSource.app") == .orderedSame
         }
     }
 
     static func isProtectedExecutable(_ command: String) -> Bool {
         protectedExecutableNames.contains(
-            URL(fileURLWithPath: command).lastPathComponent.lowercased()
+            (command as NSString).lastPathComponent.lowercased()
         )
     }
 }
@@ -93,7 +97,7 @@ enum SystemProcessRulePolicy {
         }
         guard bundleIdentifier.hasPrefix(backgroundCommandPrefix) else { return false }
         let command = String(bundleIdentifier.dropFirst(backgroundCommandPrefix.count))
-        return URL(fileURLWithPath: command).lastPathComponent
+        return (command as NSString).lastPathComponent
             .caseInsensitiveCompare("WindowServer") == .orderedSame
     }
 

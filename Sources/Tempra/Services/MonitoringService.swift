@@ -6,8 +6,38 @@ struct MonitoringRequest: Sendable {
     let samplesSystemCPU: Bool
     let samplesApplications: Bool
     let includesEssentialSystemProcesses: Bool
+    let processTableRefreshInterval: TimeInterval
     let samplesPower: Bool
+    let networkActivityBundleIdentifiers: Set<String>
+    let refreshesAudioActivity: Bool
+    let isLatencySensitive: Bool
     let processChange: ProcessChangeNotification?
+
+    init(
+        generation: UInt64,
+        inventory: ApplicationInventory?,
+        samplesSystemCPU: Bool,
+        samplesApplications: Bool,
+        includesEssentialSystemProcesses: Bool,
+        processTableRefreshInterval: TimeInterval = 5,
+        samplesPower: Bool,
+        networkActivityBundleIdentifiers: Set<String> = [],
+        refreshesAudioActivity: Bool = false,
+        isLatencySensitive: Bool = false,
+        processChange: ProcessChangeNotification?
+    ) {
+        self.generation = generation
+        self.inventory = inventory
+        self.samplesSystemCPU = samplesSystemCPU
+        self.samplesApplications = samplesApplications
+        self.includesEssentialSystemProcesses = includesEssentialSystemProcesses
+        self.processTableRefreshInterval = processTableRefreshInterval
+        self.samplesPower = samplesPower
+        self.networkActivityBundleIdentifiers = networkActivityBundleIdentifiers
+        self.refreshesAudioActivity = refreshesAudioActivity
+        self.isLatencySensitive = isLatencySensitive
+        self.processChange = processChange
+    }
 
     func replacingProcessChange(
         with processChange: ProcessChangeNotification?
@@ -18,7 +48,28 @@ struct MonitoringRequest: Sendable {
             samplesSystemCPU: samplesSystemCPU,
             samplesApplications: samplesApplications,
             includesEssentialSystemProcesses: includesEssentialSystemProcesses,
+            processTableRefreshInterval: processTableRefreshInterval,
             samplesPower: samplesPower,
+            networkActivityBundleIdentifiers: networkActivityBundleIdentifiers,
+            refreshesAudioActivity: refreshesAudioActivity,
+            isLatencySensitive: isLatencySensitive || processChange != nil,
+            processChange: processChange
+        )
+    }
+
+    func requiringLatencySensitiveSampling() -> MonitoringRequest {
+        guard !isLatencySensitive else { return self }
+        return MonitoringRequest(
+            generation: generation,
+            inventory: inventory,
+            samplesSystemCPU: samplesSystemCPU,
+            samplesApplications: samplesApplications,
+            includesEssentialSystemProcesses: includesEssentialSystemProcesses,
+            processTableRefreshInterval: processTableRefreshInterval,
+            samplesPower: samplesPower,
+            networkActivityBundleIdentifiers: networkActivityBundleIdentifiers,
+            refreshesAudioActivity: refreshesAudioActivity,
+            isLatencySensitive: true,
             processChange: processChange
         )
     }
@@ -115,7 +166,10 @@ actor MonitoringService: MonitoringServicing {
         let apps = await processMonitor.sample(
             inventory: inventory,
             includingEssentialSystemProcesses: request.includesEssentialSystemProcesses,
-            refreshesAudioActivity: request.processChange?.audioActivityChanged != false
+            processTableRefreshInterval: request.processTableRefreshInterval,
+            refreshesAudioActivity: request.refreshesAudioActivity
+                || request.processChange?.audioActivityChanged == true,
+            networkActivityBundleIdentifiers: request.networkActivityBundleIdentifiers
         )
         let powerByIdentifier: [String: ProcessPowerSample]
         if request.samplesPower {

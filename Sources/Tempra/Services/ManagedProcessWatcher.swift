@@ -62,7 +62,7 @@ final class ManagedProcessWatcher {
 
     init(
         audioMonitor: any AudioActivityMonitoring = AudioActivityMonitor(),
-        eventDebounceInterval: TimeInterval = 2
+        eventDebounceInterval: TimeInterval = 0.25
     ) {
         self.audioMonitor = audioMonitor
         self.eventDebounceInterval = eventDebounceInterval

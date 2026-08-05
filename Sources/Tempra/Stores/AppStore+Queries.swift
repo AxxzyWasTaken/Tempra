@@ -3,6 +3,7 @@ import Foundation
 @MainActor
 extension AppStore {
     func rebuildDisplayItems() {
+        guard isPresentationActive else { return }
         displayItems = DisplayItemProjection.project(
             apps: apps,
             rules: rules,
@@ -22,7 +23,7 @@ extension AppStore {
     }
 
     var activeManagementCount: Int {
-        displayItems.filter { $0.status.isActiveManagement }.count
+        apps.filter { $0.status.isActiveManagement }.count
     }
 
     var totalCPUPercent: Double {

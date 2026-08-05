@@ -7,7 +7,7 @@ import Testing
 @Suite("Managed process event ordering")
 @MainActor
 struct ManagedProcessWatcherTests {
-    @Test("Managed process events are coalesced for two seconds by default")
+    @Test("Managed process events are coalesced for a quarter second by default")
     func defaultDebounceCoalescesProcessEvents() async {
         let audioMonitor = RecordingAudioActivityMonitor()
         let watcher = ManagedProcessWatcher(audioMonitor: audioMonitor)
@@ -24,11 +24,11 @@ struct ManagedProcessWatcherTests {
         )
 
         watcher.handleProcessChange(for: notification)
-        try? await Task.sleep(for: .milliseconds(150))
+        try? await Task.sleep(for: .milliseconds(50))
         watcher.handleProcessChange(for: notification)
 
         #expect(notifications.isEmpty)
-        #expect(await eventually(timeout: .seconds(3)) { notifications.count == 1 })
+        #expect(await eventually(timeout: .seconds(1)) { notifications.count == 1 })
 
         await watcher.stop()
     }

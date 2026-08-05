@@ -194,6 +194,56 @@ struct ProcessMonitorTests {
         #expect(monitor.cachedMetadataCount == 1)
     }
 
+    @Test("Network probes run only for CPU-limited app groups")
+    func networkProbesAreScopedToLimitedApps() async throws {
+        let limitedIdentity = ProcessIdentity(
+            pid: 100,
+            startTimeMicroseconds: 1_000_000
+        )
+        let ordinaryIdentity = ProcessIdentity(
+            pid: 200,
+            startTimeMicroseconds: 2_000_000
+        )
+        let reader = StubProcessSnapshotReader(
+            snapshots: [
+                100: snapshot(limitedIdentity),
+                200: snapshot(ordinaryIdentity, executableName: "Ordinary"),
+            ],
+            paths: [
+                100: appExecutable("Limited"),
+                200: appExecutable("Ordinary"),
+            ]
+        )
+        let networkProbe = RecordingNetworkActivityProbe()
+        let monitor = ProcessMonitor(
+            processReader: reader,
+            currentUserID: 501,
+            uptime: { 1 },
+            audioProcessIdentifiers: { [] },
+            networkActivity: { networkProbe.read($0) },
+            windowSnapshot: { nil }
+        )
+        let limitedIdentifier = bundleIdentifier("Limited")
+
+        let apps = await monitor.sample(
+            inventory: inventory(
+                app("Limited", pid: 100),
+                app("Ordinary", pid: 200)
+            ),
+            networkActivityBundleIdentifiers: [limitedIdentifier]
+        )
+        let limited = try #require(apps.first {
+            $0.bundleIdentifier == limitedIdentifier
+        })
+        let ordinary = try #require(apps.first {
+            $0.bundleIdentifier == bundleIdentifier("Ordinary")
+        })
+
+        #expect(networkProbe.readIdentities == [limitedIdentity])
+        #expect(limited.processSamples.first?.networkActivity == .active)
+        #expect(ordinary.processSamples.first?.networkActivity == .inactive)
+    }
+
     @Test("A reset baseline is measured again instead of caching zero CPU")
     func resetBaselineIsNotCached() async throws {
         let identity = ProcessIdentity(pid: 100, startTimeMicroseconds: 2_000_000)
@@ -754,6 +804,88 @@ struct ProcessMonitorTests {
         #expect(audioProbe.readCount == 2)
     }
 
+    @Test("Process events reuse the system table and discover accessible children")
+    func processEventsReuseSystemTable() async throws {
+        let mainIdentity = ProcessIdentity(
+            pid: 100,
+            startTimeMicroseconds: 1_000_000
+        )
+        let childIdentity = ProcessIdentity(
+            pid: 200,
+            startTimeMicroseconds: 2_000_000
+        )
+        let reader = StubProcessSnapshotReader(
+            snapshots: [100: snapshot(mainIdentity)],
+            paths: [
+                100: appExecutable("Example"),
+                200: "/usr/libexec/example-helper",
+            ]
+        )
+        let clock = StubUptime(value: 1)
+        var processTableReadCount = 0
+        let monitor = ProcessMonitor(
+            processReader: reader,
+            currentUserID: 501,
+            uptime: { clock.value },
+            audioProcessIdentifiers: { [] },
+            windowSnapshot: { nil },
+            processTableReader: {
+                processTableReadCount += 1
+                return (
+                    entries: [ProcessTableEntry(
+                        pid: 100,
+                        parentPID: 1,
+                        userID: 501,
+                        cpuPercent: 0,
+                        command: "/Applications/Example.app/Contents/MacOS/Example"
+                    )],
+                    samplerPID: 999
+                )
+            },
+            privilegedSnapshotReader: { _ in [:] }
+        )
+        let appInventory = inventory(app("Example", pid: 100))
+
+        _ = await monitor.sample(
+            inventory: appInventory,
+            includingEssentialSystemProcesses: true,
+            processTableRefreshInterval: 30
+        )
+        #expect(processTableReadCount == 1)
+
+        reader.snapshots[200] = snapshot(childIdentity, parentPID: 100)
+        monitor.handleProcessChange(ProcessChangeNotification(
+            invalidatedMetadata: [],
+            processTableChanged: true,
+            audioActivityChanged: false
+        ))
+        clock.value = 1.5
+        let afterFork = try #require(await monitor.sample(
+            inventory: appInventory,
+            includingEssentialSystemProcesses: true,
+            processTableRefreshInterval: 30
+        ).first)
+
+        #expect(afterFork.processIdentifiers == [100, 200])
+        #expect(processTableReadCount == 1)
+
+        clock.value = 7
+        _ = await monitor.sample(
+            inventory: appInventory,
+            includingEssentialSystemProcesses: true,
+            processTableRefreshInterval: 30
+        )
+        #expect(processTableReadCount == 1)
+
+        clock.value = 32
+        _ = await monitor.sample(
+            inventory: appInventory,
+            includingEssentialSystemProcesses: true,
+            processTableRefreshInterval: 30
+        )
+        #expect(processTableReadCount == 2)
+    }
+
     @Test("Cached system-process samples still refresh audio activity")
     @MainActor
     func cachedSystemProcessSampleRefreshesAudioActivity() async throws {
@@ -930,5 +1062,23 @@ private final class StubAudioProcessProbe {
     func read() -> Set<pid_t> {
         readCount += 1
         return processIdentifiers
+    }
+}
+
+private final class RecordingNetworkActivityProbe: @unchecked Sendable {
+    private let lock = NSLock()
+    private var identities: Set<ProcessIdentity> = []
+
+    var readIdentities: Set<ProcessIdentity> {
+        lock.lock()
+        defer { lock.unlock() }
+        return identities
+    }
+
+    func read(_ identity: ProcessIdentity) -> ProcessNetworkActivity {
+        lock.lock()
+        identities.insert(identity)
+        lock.unlock()
+        return .active
     }
 }

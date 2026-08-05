@@ -102,6 +102,7 @@ actor ProcessController {
     private let criticalFileActivityProbeInterval: TimeInterval = 2
     private let networkSensitivityReleaseDelay: TimeInterval = 5
     private let limitObservationInterval: TimeInterval = 1
+    private let frontmostProbeInterval: TimeInterval = 1
     private let userActivationProbeDuration: TimeInterval = 0.4
     private let foregroundActivationProtectionDuration: TimeInterval = 1
     private let audioProtectionReleaseDelay: TimeInterval = 15
@@ -121,6 +122,8 @@ actor ProcessController {
     private var pauseActivationProbeUntil: [String: Date] = [:]
     private var foregroundActivationProtectionUntil: [String: ContinuousClock.Instant] = [:]
     private var foregroundActivationMinimumRevision: [String: UInt64] = [:]
+    private var cachedFrontmostIdentifier: String?
+    private var lastFrontmostProbeAt: ContinuousClock.Instant?
     private var networkSensitiveProcesses: [String: Set<ProcessIdentity>] = [:]
     private var networkSensitiveUntil: [String: [ProcessIdentity: ContinuousClock.Instant]] = [:]
     private var downloadProtectedProcesses: [String: Set<ProcessIdentity>] = [:]
@@ -286,6 +289,28 @@ actor ProcessController {
         return snapshot()
     }
 
+    func updateMeasurements(
+        targets: [ProcessControlTarget]
+    ) -> ProcessControlSnapshot {
+        let incomingGroups = Dictionary(
+            uniqueKeysWithValues: targets.map { ($0.bundleIdentifier, $0) }
+        )
+        guard Set(incomingGroups.keys) == Set(groups.keys),
+              incomingGroups.allSatisfy({ identifier, target in
+                  groups[identifier]?.processIdentities == target.processIdentities
+              }) else {
+            return snapshot()
+        }
+
+        for (identifier, target) in incomingGroups {
+            guard let current = groups[identifier] else { continue }
+            var updated = target
+            updated.windowVisibility = current.windowVisibility
+            groups[identifier] = updated
+        }
+        return snapshot()
+    }
+
     private func drainReconciliationQueue() async {
         if isDrainingReconciliationQueue {
             await withCheckedContinuation { continuation in
@@ -420,6 +445,8 @@ actor ProcessController {
     func applicationDidActivate(
         bundleIdentifier: String
     ) async -> ProcessControlSnapshot {
+        cachedFrontmostIdentifier = bundleIdentifier
+        lastFrontmostProbeAt = clock.now()
         let isManaged = rules[bundleIdentifier]?.hasBehavior == true
             || stoppedByTempra[bundleIdentifier]?.isEmpty == false
             || backgroundedByTempra[bundleIdentifier]?.isEmpty == false
@@ -2752,8 +2779,21 @@ actor ProcessController {
             }
             foregroundActivationProtectionUntil.removeValue(forKey: app.bundleIdentifier)
         }
-        if app.isFrontmost { return true }
+        let now = clock.now()
+        if app.isFrontmost {
+            return true
+        }
+        if let lastFrontmostProbeAt {
+            let elapsed = ProcessControlMath.timeInterval(
+                lastFrontmostProbeAt.duration(to: now)
+            )
+            if elapsed >= 0, elapsed < frontmostProbeInterval {
+                return cachedFrontmostIdentifier == app.bundleIdentifier
+            }
+        }
         let frontmostIdentifier = await frontmostProvider()
+        cachedFrontmostIdentifier = frontmostIdentifier
+        lastFrontmostProbeAt = clock.now()
         return frontmostIdentifier == app.bundleIdentifier
     }
 

@@ -119,6 +119,20 @@ struct BackgroundProcessPolicyTests {
                     + "FutureSoundSourceHost.xpc"
             )
         ))
+        #expect(SoundSourceCompatibilityPolicy.isProtected(
+            bundleIdentifier: "com.rogueamoeba.FutureSoundSourceHost",
+            applicationURL: URL(
+                filePath: "/Applications/soundsource.APP/Contents/FutureHost.xpc",
+                directoryHint: .notDirectory
+            )
+        ))
+        #expect(!SoundSourceCompatibilityPolicy.isProtected(
+            bundleIdentifier: "com.example.Other",
+            applicationURL: URL(
+                filePath: "/Applications/SoundSource.app/../Other.app",
+                directoryHint: .notDirectory
+            )
+        ))
         #expect(!SoundSourceCompatibilityPolicy.isProtected(
             bundleIdentifier: "com.rogueamoeba.audiohijack"
         ))

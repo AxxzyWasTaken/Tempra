@@ -55,6 +55,7 @@ final class ManagementLedger {
     private let retention: TimeInterval
     private var state: ManagementLedgerState
     private var heartbeatTask: Task<Void, Never>?
+    private var hasUnpersistedChanges = false
     private static let maximumStoredBytes = 16 * 1_024 * 1_024
 
     init(
@@ -122,6 +123,7 @@ final class ManagementLedger {
         at date: Date = Date()
     ) throws {
         let previousState = state
+        let previouslyHadUnpersistedChanges = hasUnpersistedChanges
         do {
             try applyTransition(
                 bundleIdentifier: bundleIdentifier,
@@ -130,8 +132,11 @@ final class ManagementLedger {
                 status: status,
                 at: date
             )
+            try Self.validate(state)
+            hasUnpersistedChanges = true
         } catch {
             state = previousState
+            hasUnpersistedChanges = previouslyHadUnpersistedChanges
             throw error
         }
     }
@@ -174,22 +179,28 @@ final class ManagementLedger {
             ))
         }
         trim(now: date)
-        try persist()
     }
 
     func heartbeat(at date: Date = Date()) throws {
         let previousState = state
+        let previouslyHadUnpersistedChanges = hasUnpersistedChanges
         for index in state.active.indices where state.active[index].sessionID == sessionID {
             state.active[index].lastObservedAt = max(
                 state.active[index].lastObservedAt,
                 date
             )
         }
+        let previousCompletedCount = state.completed.count
         trim(now: date)
+        if state.completed.count != previousCompletedCount {
+            hasUnpersistedChanges = true
+        }
+        guard hasUnpersistedChanges || !state.active.isEmpty else { return }
         do {
             try persist()
         } catch {
             state = previousState
+            hasUnpersistedChanges = previouslyHadUnpersistedChanges
             throw error
         }
     }
@@ -337,6 +348,7 @@ final class ManagementLedger {
         guard defaults.data(forKey: storageKey) == data else {
             throw AppPersistenceError.writeFailed(name: "management history")
         }
+        hasUnpersistedChanges = false
     }
 
     private static func validate(_ state: ManagementLedgerState) throws {
