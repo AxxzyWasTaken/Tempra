@@ -32,7 +32,11 @@ struct AppPreferencesTests {
             limitPolicy: .maximum,
             limitPercent: 35,
             delayPolicy: .minimum,
-            delaySeconds: 30
+            delaySeconds: 30,
+            activation: ProfileActivation(
+                powerCondition: .battery,
+                idleAfterMinutes: 12
+            )
         )
         var preferences = AppPreferences()
         preferences.profiles = [profile]
@@ -41,6 +45,7 @@ struct AppPreferencesTests {
         preferences.includesEssentialSystemProcesses = true
         preferences.continuousMonitoringEnabled = true
         preferences.hasPresentedPrivilegedAccessOnboarding = true
+        preferences.managementPauseUntil = Date(timeIntervalSince1970: 10_000)
 
         try AppPreferencesStorage.save(preferences, to: defaults, key: "preferences")
         let loaded = try AppPreferencesStorage.load(from: defaults, key: "preferences")

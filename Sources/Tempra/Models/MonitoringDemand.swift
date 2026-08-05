@@ -39,7 +39,8 @@ enum MonitoringDemand: Equatable {
     static func resolve(
         isPresentationActive: Bool,
         isContinuousMonitoringEnabled: Bool,
-        showsCPUUsageInMenuBar: Bool
+        showsCPUUsageInMenuBar: Bool,
+        requiresContextMonitoring: Bool = false
     ) -> MonitoringDemand {
         if isPresentationActive {
             return .liveUI
@@ -47,6 +48,6 @@ enum MonitoringDemand: Equatable {
         if isContinuousMonitoringEnabled {
             return .continuous
         }
-        return showsCPUUsageInMenuBar ? .menuBar : .dormant
+        return showsCPUUsageInMenuBar || requiresContextMonitoring ? .menuBar : .dormant
     }
 }

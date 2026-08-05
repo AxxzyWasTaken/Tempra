@@ -164,6 +164,157 @@ struct AppStoreSuspensionTests {
         }
     }
 
+    @Test("A global management pause restores rules and reapplies them at its deadline")
+    func globalPauseExpiresWithoutMonitoringEvent() async throws {
+        try await withDefaults { defaults in
+            let identifier = "example.global-pause"
+            let persistence = AppPersistence(defaults: defaults)
+            try persistence.saveRules([identifier: AppRule(
+                bundleIdentifier: identifier,
+                displayName: "Example",
+                action: .pause,
+                delaySeconds: 60
+            )])
+            let clock = ManualSuspensionExpirationClock(now: Date())
+            let coordinator = ProcessManagementCoordinator(
+                controller: ProcessController(
+                    frontmostProvider: { nil },
+                    windowSnapshotProvider: {
+                        WindowVisibilitySnapshot(windowsFrontToBack: [], screenBounds: [])
+                    }
+                ),
+                processWatcher: ManagedProcessWatcher(
+                    audioMonitor: SuspensionTestAudioMonitor()
+                )
+            )
+            let store = try AppStore(
+                persistence: persistence,
+                managementCoordinator: coordinator,
+                monitoringService: SuspensionTestMonitoringService(),
+                launchAtLoginController: SuspensionTestLaunchAtLoginController(),
+                startsMonitoring: false,
+                suspensionClock: clock.clock,
+                userIdleMonitor: UserIdleMonitor(secondsProvider: { 0 }),
+                persistenceErrorHandler: { _ in }
+            )
+            store.applyMonitoringSample(
+                MonitoringSample(
+                    generation: 1,
+                    systemCPU: nil,
+                    apps: [ManagedApp(
+                        bundleIdentifier: identifier,
+                        name: "Example",
+                        bundleURL: nil,
+                        processIdentifiers: [],
+                        launchedAt: Date().addingTimeInterval(-120),
+                        cpuPercent: 10,
+                        isFrontmost: false,
+                        isHidden: true,
+                        isPlayingAudio: false,
+                        isSystemProcess: false,
+                        windowVisibility: .hiddenOrMinimized,
+                        status: .normal
+                    )],
+                    didRefreshApplications: true,
+                    powerByIdentifier: [:],
+                    powerMetricsSupported: false
+                ),
+                demand: .dormant
+            )
+            #expect(await eventually { coordinator.statuses[identifier] == .waiting })
+
+            store.pauseManagement(for: 60)
+            #expect(store.isManagementPaused)
+            #expect(await eventually { coordinator.statuses[identifier] == nil })
+            #expect(try persistence.loadPreferences().managementPauseUntil != nil)
+
+            clock.advance(by: 60)
+            #expect(await eventually {
+                !store.isManagementPaused && coordinator.statuses[identifier] == .waiting
+            })
+            #expect(try persistence.loadPreferences().managementPauseUntil == nil)
+
+            _ = await store.shutdown()
+        }
+    }
+
+    @Test("Lifecycle holds reapply rules only after every hold and the wake grace")
+    func lifecycleHoldsUseWakeGrace() async throws {
+        try await withDefaults { defaults in
+            let identifier = "example.lifecycle"
+            let persistence = AppPersistence(defaults: defaults)
+            try persistence.saveRules([identifier: AppRule(
+                bundleIdentifier: identifier,
+                displayName: "Example",
+                action: .pause,
+                delaySeconds: 60
+            )])
+            let clock = ManualSuspensionExpirationClock(now: Date())
+            let coordinator = ProcessManagementCoordinator(
+                controller: ProcessController(
+                    frontmostProvider: { nil },
+                    windowSnapshotProvider: {
+                        WindowVisibilitySnapshot(windowsFrontToBack: [], screenBounds: [])
+                    }
+                ),
+                processWatcher: ManagedProcessWatcher(
+                    audioMonitor: SuspensionTestAudioMonitor()
+                )
+            )
+            let store = try AppStore(
+                persistence: persistence,
+                managementCoordinator: coordinator,
+                monitoringService: SuspensionTestMonitoringService(),
+                launchAtLoginController: SuspensionTestLaunchAtLoginController(),
+                startsMonitoring: false,
+                suspensionClock: clock.clock,
+                userIdleMonitor: UserIdleMonitor(secondsProvider: { 0 }),
+                persistenceErrorHandler: { _ in }
+            )
+            store.applyMonitoringSample(
+                MonitoringSample(
+                    generation: 1,
+                    systemCPU: nil,
+                    apps: [ManagedApp(
+                        bundleIdentifier: identifier,
+                        name: "Example",
+                        bundleURL: nil,
+                        processIdentifiers: [],
+                        launchedAt: Date().addingTimeInterval(-120),
+                        cpuPercent: 10,
+                        isFrontmost: false,
+                        isHidden: true,
+                        isPlayingAudio: false,
+                        isSystemProcess: false,
+                        windowVisibility: .hiddenOrMinimized,
+                        status: .normal
+                    )],
+                    didRefreshApplications: true,
+                    powerByIdentifier: [:],
+                    powerMetricsSupported: false
+                ),
+                demand: .dormant
+            )
+            #expect(await eventually { coordinator.statuses[identifier] == .waiting })
+
+            await store.suspendManagement(for: .systemSleep)
+            await store.suspendManagement(for: .inactiveUserSession)
+            #expect(await eventually { coordinator.statuses[identifier] == nil })
+
+            store.resumeManagement(after: .systemSleep)
+            #expect(clock.pendingSleepCount == 0)
+            store.resumeManagement(after: .inactiveUserSession)
+            #expect(await eventually { clock.pendingSleepCount == 1 })
+
+            clock.advance(by: 4)
+            #expect(coordinator.statuses[identifier] == nil)
+            clock.advance(by: 1)
+            #expect(await eventually { coordinator.statuses[identifier] == .waiting })
+
+            _ = await store.shutdown()
+        }
+    }
+
     private func eventually(
         _ condition: @escaping @MainActor @Sendable () -> Bool
     ) async -> Bool {

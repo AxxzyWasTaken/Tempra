@@ -11,7 +11,7 @@ enum ManagementMetricCategory: String, Codable, Equatable, Sendable {
         case .paused:
             self = .paused
         case .normal, .waiting, .audioProtected, .networkProtected, .snoozed,
-                .disabled, .notRunning, .unavailable:
+                .managementPaused, .disabled, .notRunning, .unavailable:
             return nil
         }
     }
@@ -389,7 +389,8 @@ final class ManagementLedger {
             case .paused:
                 category = .paused
             case .waiting, .restored, .audioProtected, .networkProtected, .hidden,
-                    .quit, .snoozed, .ruleDisabled, .ruleRemoved, .error:
+                    .quit, .gracefulQuit, .relaunched, .snoozed, .ruleDisabled,
+                    .ruleRemoved, .error:
                 category = nil
             case .ruleSaved, .highCPU:
                 continue

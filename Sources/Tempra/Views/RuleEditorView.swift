@@ -55,6 +55,13 @@ struct RuleEditorView: View {
 
                     idleControls
 
+                    if !displayedRuleGuidance.isEmpty {
+                        Divider()
+                            .overlay(TempraPalette.separator)
+
+                        ruleGuidanceSection
+                    }
+
                     if item.isStandaloneProcess
                         || item.requiresPrivilegedControl
                         || draft.runOnEfficiencyCores {
@@ -122,12 +129,15 @@ struct RuleEditorView: View {
                     }
 
                     if store.suspensionUntil(for: item.bundleIdentifier) != nil {
-                        Button("End Snooze") {
+                        Button("End Temporary Resume") {
                             store.endSnooze(bundleIdentifier: item.bundleIdentifier)
                         }
                     } else if store.rules[item.bundleIdentifier] != nil {
-                        Button("Snooze for 1 Hour") {
-                            store.snooze(bundleIdentifier: item.bundleIdentifier, for: 60 * 60)
+                        Button("Resume for 1 Hour") {
+                            store.resumeTemporarily(
+                                bundleIdentifier: item.bundleIdentifier,
+                                for: 60 * 60
+                            )
                             onClose()
                         }
                     }
@@ -287,6 +297,53 @@ struct RuleEditorView: View {
                     minutes: hideMinutes
                 )
             }
+        }
+    }
+
+    private var ruleGuidanceSection: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            Text("Rule Guidance")
+                .font(TempraTypography.bodyEmphasized)
+
+            ForEach(displayedRuleGuidance) { guidance in
+                HStack(alignment: .top, spacing: 7) {
+                    Image(systemName: guidance.symbolName)
+                        .foregroundStyle(guidanceColor(guidance.severity))
+                        .frame(width: 14)
+                        .accessibilityHidden(true)
+
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(guidance.title)
+                            .font(TempraTypography.bodyEmphasized)
+                        Text(guidance.message)
+                            .font(TempraTypography.ruleTag)
+                            .foregroundStyle(TempraPalette.secondaryText)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                .padding(.vertical, 6)
+                .padding(.horizontal, 7)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(
+                    guidanceColor(guidance.severity).opacity(0.09),
+                    in: RoundedRectangle(cornerRadius: 6, style: .continuous)
+                )
+                .accessibilityElement(children: .combine)
+            }
+        }
+    }
+
+    private var displayedRuleGuidance: [RuleGuidance] {
+        RuleGuidanceEvaluator.evaluate(draft).filter {
+            $0.kind != .administratorAccessRequired
+        }
+    }
+
+    private func guidanceColor(_ severity: RuleGuidanceSeverity) -> Color {
+        switch severity {
+        case .information: TempraPalette.accent
+        case .caution: TempraPalette.waiting
+        case .critical: TempraPalette.stopped
         }
     }
 

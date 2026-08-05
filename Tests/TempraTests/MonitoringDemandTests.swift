@@ -61,6 +61,21 @@ struct MonitoringDemandTests {
         #expect(!demand.samplesPower)
     }
 
+    @Test("Automatic profiles keep context sampling active")
+    func automaticProfileContextIntervals() {
+        let demand = MonitoringDemand.resolve(
+            isPresentationActive: false,
+            isContinuousMonitoringEnabled: false,
+            showsCPUUsageInMenuBar: false,
+            requiresContextMonitoring: true
+        )
+
+        #expect(demand == .menuBar)
+        #expect(demand.sampleInterval == 5)
+        #expect(!demand.samplesApplications)
+        #expect(!demand.samplesPower)
+    }
+
     @Test("Opening the menu keeps the last app values while establishing a baseline")
     @MainActor
     func openingMenuPreservesAppValuesDuringBaseline() async throws {

@@ -42,6 +42,34 @@ struct ManagedProcessSample: Equatable, Sendable {
     }
 }
 
+enum ProcessProtectionReason: String, CaseIterable, Hashable, Sendable {
+    case audioPlayback
+    case networkActivity
+    case criticalFileActivity
+    case missingCPUMeasurement
+    case mainProcessLifeline
+
+    var title: String {
+        switch self {
+        case .audioPlayback: "Playing audio"
+        case .networkActivity: "Network responsiveness"
+        case .criticalFileActivity: "Active download or file write"
+        case .missingCPUMeasurement: "Waiting for a CPU measurement"
+        case .mainProcessLifeline: "Main process responsiveness"
+        }
+    }
+
+    var symbolName: String {
+        switch self {
+        case .audioPlayback: "speaker.wave.2.fill"
+        case .networkActivity: "network"
+        case .criticalFileActivity: "arrow.down.doc.fill"
+        case .missingCPUMeasurement: "questionmark.circle"
+        case .mainProcessLifeline: "app.badge.checkmark"
+        }
+    }
+}
+
 struct ProcessControlTarget: Sendable {
     let bundleIdentifier: String
     let processIdentities: Set<ProcessIdentity>
@@ -106,6 +134,8 @@ struct ProcessControlSnapshot: Sendable {
     let revision: UInt64
     let statuses: [String: ManagementStatus]
     let estimatedSavedCPUByIdentifier: [String: Double]
+    let protectionReasonsByIdentifier:
+        [String: [ProcessIdentity: Set<ProcessProtectionReason>]]
     let scheduledTickInterval: TimeInterval?
 }
 

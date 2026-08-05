@@ -20,6 +20,8 @@ final class ProcessManagementCoordinator {
 
     private(set) var statuses: [String: ManagementStatus] = [:]
     private(set) var estimatedSavedCPUByIdentifier: [String: Double] = [:]
+    private(set) var protectionReasonsByIdentifier:
+        [String: [ProcessIdentity: Set<ProcessProtectionReason>]] = [:]
 
     init(
         controller: ProcessController,
@@ -146,6 +148,33 @@ final class ProcessManagementCoordinator {
         )
     }
 
+    func suspendForSystemTransition() async -> ProcessRestorationResult {
+        guard acceptsControllerResults else { return .success }
+        updateTask?.cancel()
+        updateTask = nil
+        let snapshot = await controller.suspendForSystemTransition()
+        if snapshot.revision == revision {
+            apply(snapshot)
+        }
+        return await controller.currentRestorationResult()
+    }
+
+    func resumeAfterSystemTransition() async {
+        guard acceptsControllerResults else { return }
+        let snapshot = await controller.resumeAfterSystemTransition()
+        if snapshot.revision == revision {
+            apply(snapshot)
+        }
+    }
+
+    func recentSignalEvents() async -> [ProcessControlSignalEvent] {
+        await controller.recentSignalEvents()
+    }
+
+    func recentLimitMeasurements() async -> [ProcessLimitMeasurement] {
+        await controller.recentLimitMeasurements()
+    }
+
     func applicationDidActivate(bundleIdentifier: String) async {
         guard acceptsControllerResults else { return }
         let requestRevision = revision
@@ -177,6 +206,7 @@ final class ProcessManagementCoordinator {
         guard acceptsControllerResults, snapshot.revision == revision else { return }
         statuses = snapshot.statuses
         estimatedSavedCPUByIdentifier = snapshot.estimatedSavedCPUByIdentifier
+        protectionReasonsByIdentifier = snapshot.protectionReasonsByIdentifier
         stateHandler?(statuses, estimatedSavedCPUByIdentifier)
     }
 

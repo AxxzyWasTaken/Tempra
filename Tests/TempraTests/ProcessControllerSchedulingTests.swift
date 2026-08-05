@@ -653,14 +653,9 @@ struct ProcessControllerSchedulingTests {
     func menuQuitRestoresPausedApp() async {
         let controlledProcess = process(100)
         let processSystem = RecordingProcessSystem()
-        var terminatedIdentifier: String?
         let controller = ProcessController(
             system: processSystem,
-            crashWatchdog: RecordingProcessCrashWatchdog(),
-            terminateApplication: { identifier in
-                terminatedIdentifier = identifier
-                return true
-            }
+            crashWatchdog: RecordingProcessCrashWatchdog()
         )
         let rule = AppRule(
             bundleIdentifier: identifier,
@@ -684,8 +679,147 @@ struct ProcessControllerSchedulingTests {
 
         #expect(outcome == .succeeded)
         #expect(processSystem.didAttemptToResume(controlledProcess))
-        #expect(terminatedIdentifier == identifier)
+        #expect(processSystem.didAttemptToTerminate(controlledProcess))
         #expect(await controller.currentSnapshot().statuses[identifier] == .waiting)
+        await controller.shutdown()
+    }
+
+    @Test("System transitions restore processes and block scheduled reapplication")
+    func systemTransitionRestoresAndSuspendsManagement() async {
+        let controlledProcess = process(199)
+        let processSystem = RecordingProcessSystem()
+        let controller = ProcessController(
+            system: processSystem,
+            crashWatchdog: RecordingProcessCrashWatchdog(),
+            frontmostProvider: { nil }
+        )
+        let rule = AppRule(
+            bundleIdentifier: identifier,
+            displayName: "Example",
+            action: .pause
+        )
+        let currentTarget = target(
+            processIdentities: [controlledProcess],
+            launchedAt: oldLaunchDate
+        )
+
+        _ = await controller.update(
+            targets: [currentTarget],
+            rules: [identifier: rule],
+            isEnabled: true,
+            revision: 1
+        )
+        #expect(processSystem.stopAttemptCount == 1)
+
+        let suspended = await controller.suspendForSystemTransition()
+        #expect(processSystem.didAttemptToResume(controlledProcess))
+        #expect(suspended.statuses[identifier] == nil)
+
+        _ = await controller.update(
+            targets: [currentTarget],
+            rules: [identifier: rule],
+            isEnabled: true,
+            revision: 2
+        )
+        #expect(processSystem.stopAttemptCount == 1)
+
+        _ = await controller.resumeAfterSystemTransition()
+        #expect(processSystem.stopAttemptCount == 2)
+        await controller.shutdown()
+    }
+
+    @Test("A suspended transition retries unresolved restoration")
+    func systemTransitionRestorationRetry() async {
+        let controlledProcess = process(198)
+        let processSystem = RecordingProcessSystem()
+        let controller = ProcessController(
+            system: processSystem,
+            crashWatchdog: RecordingProcessCrashWatchdog(),
+            frontmostProvider: { nil }
+        )
+        let rule = AppRule(
+            bundleIdentifier: identifier,
+            displayName: "Example",
+            action: .pause
+        )
+
+        _ = await controller.update(
+            targets: [target(
+                processIdentities: [controlledProcess],
+                launchedAt: oldLaunchDate
+            )],
+            rules: [identifier: rule],
+            isEnabled: true,
+            revision: 1
+        )
+        processSystem.failResume(for: controlledProcess, attempts: 3)
+
+        _ = await controller.suspendForSystemTransition()
+        #expect(!(await controller.currentRestorationResult()).succeeded)
+
+        _ = await controller.suspendForSystemTransition()
+        #expect((await controller.currentRestorationResult()).succeeded)
+        #expect(processSystem.resumeAttemptCount(for: controlledProcess) == 4)
+        await controller.shutdown()
+    }
+
+    @Test("Graceful quit does not use the force-termination path")
+    func gracefulQuitUsesApplicationTermination() async {
+        let controlledProcess = process(101)
+        let processSystem = RecordingProcessSystem()
+        var gracefulIdentifier: String?
+        let controller = ProcessController(
+            system: processSystem,
+            gracefulTerminateApplication: { identifier in
+                gracefulIdentifier = identifier
+                return true
+            }
+        )
+        _ = await controller.update(
+            targets: [target(processIdentities: [controlledProcess])],
+            rules: [:],
+            isEnabled: true,
+            revision: 1
+        )
+
+        let outcome = await controller.performApplicationCommand(
+            .quitGracefully,
+            bundleIdentifier: identifier
+        )
+
+        #expect(outcome == .succeeded)
+        #expect(gracefulIdentifier == identifier)
+        #expect(!processSystem.didAttemptToTerminate(controlledProcess))
+        await controller.shutdown()
+    }
+
+    @Test("Relaunch reports rejection without force-quitting")
+    func rejectedRelaunchDoesNotForceQuit() async {
+        let controlledProcess = process(102)
+        let processSystem = RecordingProcessSystem()
+        var relaunchIdentifier: String?
+        let controller = ProcessController(
+            system: processSystem,
+            relaunchApplication: { identifier in
+                relaunchIdentifier = identifier
+                return false
+            }
+        )
+        _ = await controller.update(
+            targets: [target(processIdentities: [controlledProcess])],
+            rules: [:],
+            isEnabled: true,
+            revision: 1
+        )
+
+        let outcome = await controller.performApplicationCommand(
+            .relaunch,
+            bundleIdentifier: identifier
+        )
+
+        #expect(outcome == .failed(.requestRejected))
+        #expect(relaunchIdentifier == identifier)
+        #expect(!processSystem.didAttemptToTerminate(controlledProcess))
         await controller.shutdown()
     }
 
@@ -694,14 +828,9 @@ struct ProcessControllerSchedulingTests {
         let soundSourceIdentifier = "com.rogueamoeba.FutureSoundSourceHost"
         let controlledProcess = process(101)
         let processSystem = RecordingProcessSystem()
-        var terminationCallCount = 0
         let controller = ProcessController(
             system: processSystem,
-            crashWatchdog: RecordingProcessCrashWatchdog(),
-            terminateApplication: { _ in
-                terminationCallCount += 1
-                return true
-            }
+            crashWatchdog: RecordingProcessCrashWatchdog()
         )
         let rule = AppRule(
             bundleIdentifier: soundSourceIdentifier,
@@ -729,23 +858,21 @@ struct ProcessControllerSchedulingTests {
         #expect(outcome == .failed(.compatibilityProtected))
         #expect(!processSystem.didAttemptToStop(controlledProcess))
         #expect(!processSystem.didAttemptToTerminate(controlledProcess))
-        #expect(terminationCallCount == 0)
         await controller.shutdown()
     }
 
     @Test("A pending menu quit is not replaced by management when the app is frontmost")
     func pendingMenuQuitRemainsWaitingWhileFrontmost() async {
-        var terminationCallCount = 0
-        let controller = ProcessController(terminateApplication: { _ in
-            terminationCallCount += 1
-            return true
-        })
+        let controlledProcess = process(103)
+        let processSystem = RecordingProcessSystem()
+        let controller = ProcessController(system: processSystem)
         let rule = AppRule(
             bundleIdentifier: identifier,
             displayName: "Example",
             action: .pause
         )
         let frontmostTarget = target(
+            processIdentities: [controlledProcess],
             launchedAt: oldLaunchDate,
             isFrontmost: true,
             isHidden: false,
@@ -770,7 +897,7 @@ struct ProcessControllerSchedulingTests {
         )
 
         #expect(outcome == .succeeded)
-        #expect(terminationCallCount == 1)
+        #expect(processSystem.didAttemptToTerminate(controlledProcess))
         #expect(snapshot.statuses[identifier] == .waiting)
         await controller.shutdown()
     }
@@ -779,14 +906,9 @@ struct ProcessControllerSchedulingTests {
     func menuQuitTerminatesStandaloneProcess() async {
         let controlledProcess = process(150)
         let processSystem = RecordingProcessSystem()
-        var applicationTerminationCallCount = 0
         let controller = ProcessController(
             system: processSystem,
-            crashWatchdog: RecordingProcessCrashWatchdog(),
-            terminateApplication: { _ in
-                applicationTerminationCallCount += 1
-                return true
-            }
+            crashWatchdog: RecordingProcessCrashWatchdog()
         )
         _ = await controller.update(
             targets: [target(
@@ -806,7 +928,6 @@ struct ProcessControllerSchedulingTests {
 
         #expect(outcome == .succeeded)
         #expect(processSystem.didAttemptToTerminate(controlledProcess))
-        #expect(applicationTerminationCallCount == 0)
         await controller.shutdown()
     }
 
@@ -814,14 +935,9 @@ struct ProcessControllerSchedulingTests {
     func menuQuitStopsOnRestorationFailure() async {
         let controlledProcess = process(101)
         let processSystem = RecordingProcessSystem()
-        var terminationCallCount = 0
         let controller = ProcessController(
             system: processSystem,
-            crashWatchdog: RecordingProcessCrashWatchdog(),
-            terminateApplication: { _ in
-                terminationCallCount += 1
-                return true
-            }
+            crashWatchdog: RecordingProcessCrashWatchdog()
         )
         let rule = AppRule(
             bundleIdentifier: identifier,
@@ -845,7 +961,7 @@ struct ProcessControllerSchedulingTests {
         )
 
         #expect(outcome == .failed(.restorationFailed))
-        #expect(terminationCallCount == 0)
+        #expect(!processSystem.didAttemptToTerminate(controlledProcess))
         #expect(await controller.currentSnapshot().statuses[identifier] == .unavailable)
         await controller.shutdown()
     }
@@ -3072,21 +3188,20 @@ private final class RecordingProcessSystem: ProcessSystemControlling, @unchecked
 private final class ManualProcessControlClock: @unchecked Sendable {
     private struct Sleeper {
         let deadline: ContinuousClock.Instant
-        let continuation: CheckedContinuation<Void, Never>
+        let wake: ProcessControlScheduledWake
     }
 
     private let lock = NSLock()
     private var currentInstant = ContinuousClock().now
     private var sleepers: [UUID: Sleeper] = [:]
-    private var cancelledBeforeRegistration: Set<UUID> = []
     private var registrationCount = 0
     private var wakeCount = 0
 
     var clock: ProcessControlClock {
         ProcessControlClock(
             now: { [self] in now },
-            sleepUntil: { [self] deadline in
-                await sleep(until: deadline)
+            scheduleWake: { [self] deadline, operation in
+                schedule(until: deadline, operation: operation)
             }
         )
     }
@@ -3108,47 +3223,42 @@ private final class ManualProcessControlClock: @unchecked Sendable {
     }
 
     func advance(by duration: Duration) {
-        let continuations: [CheckedContinuation<Void, Never>] = withLock {
+        let wakes: [ProcessControlScheduledWake] = withLock {
             currentInstant = currentInstant.advanced(by: duration)
             let dueIDs = sleepers.compactMap { id, sleeper in
                 sleeper.deadline <= currentInstant ? id : nil
             }
             wakeCount += dueIDs.count
-            return dueIDs.compactMap { sleepers.removeValue(forKey: $0)?.continuation }
+            return dueIDs.compactMap { sleepers.removeValue(forKey: $0)?.wake }
         }
-        continuations.forEach { $0.resume() }
+        wakes.forEach { $0.fire() }
     }
 
-    private func sleep(until deadline: ContinuousClock.Instant) async {
+    private func schedule(
+        until deadline: ContinuousClock.Instant,
+        operation: @escaping @Sendable () -> Void
+    ) -> ProcessControlScheduledWake {
         let id = UUID()
-        await withTaskCancellationHandler {
-            await withCheckedContinuation { continuation in
-                let shouldResume = withLock {
-                    registrationCount += 1
-                    if cancelledBeforeRegistration.remove(id) != nil || deadline <= currentInstant {
-                        return true
-                    }
-                    sleepers[id] = Sleeper(deadline: deadline, continuation: continuation)
-                    return false
-                }
-                if shouldResume {
-                    continuation.resume()
-                }
-            }
-        } onCancel: {
-            cancelSleep(id: id)
+        let wake = ProcessControlScheduledWake(operation: operation)
+        wake.setCancellationHandler { [weak self] in
+            self?.cancelWake(id: id)
         }
+        let shouldFire = withLock {
+            registrationCount += 1
+            guard deadline > currentInstant else { return true }
+            sleepers[id] = Sleeper(deadline: deadline, wake: wake)
+            return false
+        }
+        if shouldFire {
+            wake.fire()
+        }
+        return wake
     }
 
-    private func cancelSleep(id: UUID) {
-        let continuation: CheckedContinuation<Void, Never>? = withLock {
-            if let sleeper = sleepers.removeValue(forKey: id) {
-                return sleeper.continuation
-            }
-            cancelledBeforeRegistration.insert(id)
-            return nil
+    private func cancelWake(id: UUID) {
+        _ = withLock {
+            sleepers.removeValue(forKey: id)
         }
-        continuation?.resume()
     }
 
     private func withLock<Result>(_ operation: () -> Result) -> Result {

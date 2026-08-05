@@ -1,10 +1,57 @@
 import AppKit
+import Dispatch
 import Foundation
+
+private final class ProcessControlSerialExecutor: SerialExecutor {
+    private let queue = DispatchQueue(
+        label: "com.tempra.process-control",
+        qos: .userInteractive,
+        autoreleaseFrequency: .workItem
+    )
+
+    func enqueue(_ job: UnownedJob) {
+        queue.async { [self] in
+            job.runSynchronously(on: asUnownedSerialExecutor())
+        }
+    }
+}
+
+private final class ProcessControlWakeRegistration: @unchecked Sendable {
+    private let lock = NSLock()
+    private var wake: ProcessControlScheduledWake?
+    private var isCancelled = false
+
+    func install(_ wake: ProcessControlScheduledWake) {
+        let shouldCancel = withLock {
+            guard !isCancelled else { return true }
+            self.wake = wake
+            return false
+        }
+        if shouldCancel {
+            wake.cancel()
+        }
+    }
+
+    func cancel() {
+        let wake = withLock {
+            isCancelled = true
+            return self.wake
+        }
+        wake?.cancel()
+    }
+
+    private func withLock<Result>(_ operation: () -> Result) -> Result {
+        lock.lock()
+        defer { lock.unlock() }
+        return operation()
+    }
+}
 
 actor ProcessController {
     typealias EventHandler = @MainActor @Sendable (ProcessControllerEvent) -> Void
     typealias FrontmostProvider = @MainActor @Sendable () -> String?
     typealias ApplicationAction = @MainActor @Sendable (String) -> Bool
+    typealias AsyncApplicationAction = @MainActor @Sendable (String) async -> Bool
     typealias WindowSnapshotProvider = @Sendable () -> WindowVisibilitySnapshot?
 
     @TaskLocal private static var reconciliationContext: ProcessReconciliationContext?
@@ -14,6 +61,11 @@ actor ProcessController {
     private typealias LimitDeadline = ProcessLimitSchedulerModel.Deadline
     private typealias LimitDeadlineQueue = ProcessLimitSchedulerModel.DeadlineQueue
     private typealias LimitPulseArbiter = ProcessLimitSchedulerModel.PulseArbiter
+
+    nonisolated private let serialExecutor = ProcessControlSerialExecutor()
+    nonisolated var unownedExecutor: UnownedSerialExecutor {
+        serialExecutor.asUnownedSerialExecutor()
+    }
 
     private struct CriticalFileActivityCacheEntry: Sendable {
         let activity: ProcessCriticalFileActivity
@@ -35,7 +87,8 @@ actor ProcessController {
     private let frontmostProvider: FrontmostProvider
     private let activateApplication: ApplicationAction
     private let hideApplication: ApplicationAction
-    private let forceTerminateApplication: ApplicationAction
+    private let gracefulTerminateApplication: ApplicationAction
+    private let relaunchApplication: AsyncApplicationAction
     private let windowSnapshotProvider: WindowSnapshotProvider
     private let controlInterval: TimeInterval
     private let minimumRunDuration: TimeInterval
@@ -80,6 +133,7 @@ actor ProcessController {
     private var quitRequested: Set<String> = []
     private var statuses: [String: ManagementStatus] = [:]
     private var isEnabled = true
+    private var isSystemTransitionSuspended = false
     private var revision: UInt64 = 0
     private var stateID = UUID()
     private var isDrainingReconciliationQueue = false
@@ -96,6 +150,10 @@ actor ProcessController {
     private var scheduledTickInterval: TimeInterval?
     private var scheduledTickDeadline: ContinuousClock.Instant?
     private var isPauseWakeMonitoringEnabled = false
+
+    private var managementIsActive: Bool {
+        isEnabled && !isSystemTransitionSuspended
+    }
 
     init(
         system: any ProcessSystemControlling = RoutedProcessSystemController(),
@@ -120,11 +178,44 @@ actor ProcessController {
                 .map { $0.hide() }
                 .contains(true)
         },
-        terminateApplication: @escaping ApplicationAction = { identifier in
-            NSRunningApplication
-                .runningApplications(withBundleIdentifier: identifier)
-                .map { $0.forceTerminate() }
-                .contains(true)
+        gracefulTerminateApplication: @escaping ApplicationAction = { identifier in
+            let applications = NSRunningApplication.runningApplications(
+                withBundleIdentifier: identifier
+            )
+            return !applications.isEmpty && applications.allSatisfy { $0.terminate() }
+        },
+        relaunchApplication: @escaping AsyncApplicationAction = { identifier in
+            let applications = NSRunningApplication.runningApplications(
+                withBundleIdentifier: identifier
+            )
+            guard !applications.isEmpty,
+                  let applicationURL = applications.compactMap(\.bundleURL).first
+                    ?? NSWorkspace.shared.urlForApplication(
+                        withBundleIdentifier: identifier
+                    ),
+                  applications.allSatisfy({ $0.terminate() }) else {
+                return false
+            }
+
+            let clock = ContinuousClock()
+            let deadline = clock.now.advanced(by: .seconds(10))
+            while applications.contains(where: { !$0.isTerminated }), clock.now < deadline {
+                do {
+                    try await Task.sleep(for: .milliseconds(100))
+                } catch {
+                    return false
+                }
+            }
+            guard applications.allSatisfy(\.isTerminated) else { return false }
+
+            return await withCheckedContinuation { continuation in
+                NSWorkspace.shared.openApplication(
+                    at: applicationURL,
+                    configuration: NSWorkspace.OpenConfiguration()
+                ) { application, error in
+                    continuation.resume(returning: application != nil && error == nil)
+                }
+            }
         },
         windowSnapshotProvider: @escaping WindowSnapshotProvider = {
             WindowVisibilitySnapshot.capture()
@@ -139,7 +230,8 @@ actor ProcessController {
         self.frontmostProvider = frontmostProvider
         self.activateApplication = activateApplication
         self.hideApplication = hideApplication
-        self.forceTerminateApplication = terminateApplication
+        self.gracefulTerminateApplication = gracefulTerminateApplication
+        self.relaunchApplication = relaunchApplication
         self.windowSnapshotProvider = windowSnapshotProvider
         self.controlInterval = controlInterval
         self.minimumRunDuration = minimumRunDuration
@@ -180,7 +272,7 @@ actor ProcessController {
             downloadProtectedProcesses.removeValue(forKey: identifier)
             limitPulseArbiter.release(identifier: identifier)
         }
-        if !isEnabled {
+        if !managementIsActive {
             networkSensitiveProcesses.removeAll()
             networkSensitiveUntil.removeAll()
             downloadProtectedProcesses.removeAll()
@@ -265,7 +357,7 @@ actor ProcessController {
         }
 
         guard workIsCurrent else { return }
-        if isEnabled {
+        if managementIsActive {
             await tick(trigger: .stateUpdate)
         } else {
             _ = await restoreAll(attempts: 3)
@@ -304,6 +396,24 @@ actor ProcessController {
         await updatePauseWakeMonitoring()
         scheduleLimitScheduler()
         scheduleNextTick()
+        return snapshot()
+    }
+
+    func suspendForSystemTransition() async -> ProcessControlSnapshot {
+        stateID = UUID()
+        isSystemTransitionSuspended = true
+        needsStateReconciliation = true
+        await drainReconciliationQueue()
+        return snapshot()
+    }
+
+    func resumeAfterSystemTransition() async -> ProcessControlSnapshot {
+        guard isSystemTransitionSuspended else { return snapshot() }
+        stateID = UUID()
+        isSystemTransitionSuspended = false
+        backgroundSince.removeAll(keepingCapacity: true)
+        needsStateReconciliation = true
+        await drainReconciliationQueue()
         return snapshot()
     }
 
@@ -398,9 +508,17 @@ actor ProcessController {
             if groups[bundleIdentifier]?.usesApplicationCommands == true {
                 await hideApplication(bundleIdentifier)
             } else { false }
+        case .quitGracefully:
+            if groups[bundleIdentifier]?.usesApplicationCommands == true {
+                await gracefulTerminateApplication(bundleIdentifier)
+            } else { false }
         case .quit:
             if let group = groups[bundleIdentifier] {
                 await requestTermination(for: group)
+            } else { false }
+        case .relaunch:
+            if groups[bundleIdentifier]?.usesApplicationCommands == true {
+                await relaunchApplication(bundleIdentifier)
             } else { false }
         }
 
@@ -419,13 +537,22 @@ actor ProcessController {
             break
         case .hide:
             hideRequested.insert(bundleIdentifier)
-        case .quit:
+        case .quit, .quitGracefully:
             quitRequested.insert(bundleIdentifier)
             await setStatus(.waiting, for: bundleIdentifier)
             await emitActivity(
                 bundleIdentifier,
-                kind: .quit,
-                detail: "Force quit from the process menu"
+                kind: command == .quit ? .quit : .gracefulQuit,
+                detail: command == .quit
+                    ? "Force quit from the process menu"
+                    : "Quit request from the process menu"
+            )
+        case .relaunch:
+            await setStatus(.normal, for: bundleIdentifier)
+            await emitActivity(
+                bundleIdentifier,
+                kind: .relaunched,
+                detail: "Relaunched from the process menu"
             )
         }
 
@@ -471,7 +598,7 @@ actor ProcessController {
     }
 
     func wakePausedApplicationsForUserActivation() async {
-        guard isEnabled else { return }
+        guard managementIsActive else { return }
         let until = Date().addingTimeInterval(userActivationProbeDuration)
         for identifier in Array(stoppedByTempra.keys) where rules[identifier]?.action == .pause {
             let stopped = stoppedByTempra[identifier, default: []]
@@ -498,6 +625,10 @@ actor ProcessController {
 
     func currentSnapshot() -> ProcessControlSnapshot {
         snapshot()
+    }
+
+    func currentRestorationResult() -> ProcessRestorationResult {
+        restorationResult()
     }
 
     func recentSignalEvents() async -> [ProcessControlSignalEvent] {
@@ -545,7 +676,7 @@ actor ProcessController {
     }
 
     private func refreshNetworkSensitivity() {
-        guard isEnabled else { return }
+        guard managementIsActive else { return }
         let now = clock.now()
         let trackedNetworkIdentifiers = Set(networkSensitiveProcesses.keys)
             .union(networkSensitiveUntil.keys)
@@ -722,7 +853,7 @@ actor ProcessController {
             scheduledTickInterval = nil
             scheduledTickDeadline = nil
         }
-        guard workIsCurrent, isEnabled else {
+        guard workIsCurrent, managementIsActive else {
             await updatePauseWakeMonitoring()
             return
         }
@@ -1047,9 +1178,6 @@ actor ProcessController {
 
     private func requestTermination(for app: ProcessControlTarget) async -> Bool {
         guard workIsCurrent else { return false }
-        if app.usesApplicationCommands {
-            return await forceTerminateApplication(app.bundleIdentifier)
-        }
         let result = await system.terminate(app.processIdentities)
         return !result.applied.isEmpty && result.failed.isEmpty
     }
@@ -1981,7 +2109,7 @@ actor ProcessController {
         defer {
             limitPulseArbiter.release(identifier: identifier, generation: generation)
         }
-        guard isEnabled,
+        guard managementIsActive,
               let app = groups[identifier],
               processIdentities.isSubset(of: app.processIdentities),
               rules[identifier]?.action == .limit else {
@@ -2005,7 +2133,7 @@ actor ProcessController {
             scheduleNextTick()
             return
         }
-        guard isEnabled,
+        guard managementIsActive,
               let currentApp = groups[identifier],
               processIdentities.isSubset(of: currentApp.processIdentities),
               limitRuntimes[identifier]?.generation == generation,
@@ -2225,7 +2353,7 @@ actor ProcessController {
         generation: UInt64,
         processIdentities: Set<ProcessIdentity>
     ) -> Bool {
-        guard isEnabled,
+        guard managementIsActive,
               rules[identifier]?.action == .limit,
               groups[identifier]?.processIdentities.isSuperset(of: processIdentities) == true,
               let runtime = limitRuntimes[identifier],
@@ -2716,7 +2844,7 @@ actor ProcessController {
     }
 
     private func scheduleLimitScheduler() {
-        guard isEnabled, let nextDeadline = limitDeadlines.first else {
+        guard managementIsActive, let nextDeadline = limitDeadlines.first else {
             limitSchedulerTask?.cancel()
             limitSchedulerTask = nil
             scheduledLimitDeadline = nil
@@ -2738,8 +2866,17 @@ actor ProcessController {
         let schedulerGeneration = limitSchedulerGeneration
         let deadline = nextDeadline.deadline
         scheduledLimitDeadline = deadline
-        limitSchedulerTask = Task { [weak self, clock] in
-            await clock.sleepUntil(deadline)
+        let wakeRegistration = ProcessControlWakeRegistration()
+        limitSchedulerTask = Task(priority: .high) { [weak self, clock] in
+            await withTaskCancellationHandler {
+                await withCheckedContinuation { continuation in
+                    wakeRegistration.install(clock.scheduleWake(deadline) {
+                        continuation.resume()
+                    })
+                }
+            } onCancel: {
+                wakeRegistration.cancel()
+            }
             guard !Task.isCancelled else { return }
             await self?.requestLimitDeadlineProcessing(
                 schedulerGeneration: schedulerGeneration
@@ -2814,7 +2951,7 @@ actor ProcessController {
 
     private func evaluateLimitDeadline(_ deadline: LimitDeadline) async {
         guard workIsCurrent,
-              isEnabled,
+              managementIsActive,
               let runtime = limitRuntimes[deadline.identifier],
               runtime.generation == deadline.generation,
               runtime.processIdentities == deadline.processIdentities,
@@ -2848,7 +2985,7 @@ actor ProcessController {
     }
 
     private func scheduleNextTick(now: Date = Date()) {
-        guard isEnabled else { return }
+        guard managementIsActive else { return }
         let audioClockNow = clock.now()
         var nextInterval: TimeInterval?
         func include(_ interval: TimeInterval) {
@@ -2939,8 +3076,17 @@ actor ProcessController {
         tickTask?.cancel()
         scheduledTickInterval = nextInterval
         scheduledTickDeadline = proposedDeadline
-        tickTask = Task { [weak self, clock] in
-            await clock.sleepUntil(proposedDeadline)
+        let wakeRegistration = ProcessControlWakeRegistration()
+        tickTask = Task(priority: .high) { [weak self, clock] in
+            await withTaskCancellationHandler {
+                await withCheckedContinuation { continuation in
+                    wakeRegistration.install(clock.scheduleWake(proposedDeadline) {
+                        continuation.resume()
+                    })
+                }
+            } onCancel: {
+                wakeRegistration.cancel()
+            }
             guard !Task.isCancelled else { return }
             await self?.requestCadenceTick()
         }
@@ -2989,6 +3135,9 @@ actor ProcessController {
             estimatedSavedCPUByIdentifier: Dictionary(uniqueKeysWithValues: groups.keys.map {
                 ($0, estimatedSavedCPU(for: $0))
             }),
+            protectionReasonsByIdentifier: limitSelections.mapValues {
+                $0.protectionReasons
+            },
             scheduledTickInterval: scheduledTickInterval
         )
     }

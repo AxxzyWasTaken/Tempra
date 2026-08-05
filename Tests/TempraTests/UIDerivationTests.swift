@@ -108,9 +108,7 @@ struct UIDerivationTests {
                 includesBackgroundAndSystemProcesses: true,
                 scope: .running,
                 processSort: sort,
-                searchText: "",
-                showsAllRules: false,
-                collapsedRuleCount: 2
+                searchText: ""
             )
             #expect(lists.processItems.map(\.bundleIdentifier) == expectedIdentifiers)
         }
@@ -120,9 +118,7 @@ struct UIDerivationTests {
             includesBackgroundAndSystemProcesses: true,
             scope: .rules,
             processSort: .name,
-            searchText: "GAMMA",
-            showsAllRules: false,
-            collapsedRuleCount: 2
+            searchText: "GAMMA"
         )
         #expect(searched.processItems.map(\.bundleIdentifier) == ["gamma"])
 
@@ -131,9 +127,7 @@ struct UIDerivationTests {
             includesBackgroundAndSystemProcesses: true,
             scope: .alerts,
             processSort: .name,
-            searchText: "",
-            showsAllRules: false,
-            collapsedRuleCount: 2
+            searchText: ""
         )
         #expect(alerts.processItems.map(\.bundleIdentifier) == ["beta"])
     }
@@ -160,32 +154,30 @@ struct UIDerivationTests {
         #expect(!presentation.showsPrivilegedAccessOnboarding)
     }
 
-    @Test("Managed items are derived once with saved-CPU ordering and collapse limits")
+    @Test("Managed items keep every rule in stable name order as live savings change")
     func managedItemOrdering() {
-        let collapsed = MenuBarItemLists(
+        let initial = MenuBarItemLists(
             displayItems: menuFixtures(),
             includesBackgroundAndSystemProcesses: true,
             scope: .running,
             processSort: .name,
-            searchText: "",
-            showsAllRules: false,
-            collapsedRuleCount: 2
+            searchText: ""
         )
+        #expect(initial.managedItems.map(\.bundleIdentifier) == ["beta", "delta", "gamma"])
 
-        #expect(collapsed.managedItems.map(\.bundleIdentifier) == ["gamma", "beta", "delta"])
-        #expect(collapsed.visibleManagedItems.map(\.bundleIdentifier) == ["gamma", "beta"])
-
-        let expanded = MenuBarItemLists(
-            displayItems: menuFixtures(),
+        let changedSavings = MenuBarItemLists(
+            displayItems: menuFixtures(
+                betaSavedCPU: 50,
+                gammaSavedCPU: 0,
+                deltaSavedCPU: 25
+            ),
             includesBackgroundAndSystemProcesses: true,
             scope: .running,
             processSort: .name,
-            searchText: "",
-            showsAllRules: true,
-            collapsedRuleCount: 2
+            searchText: ""
         )
-        #expect(expanded.visibleManagedItems.map(\.bundleIdentifier) == [
-            "gamma", "beta", "delta",
+        #expect(changedSavings.managedItems.map(\.bundleIdentifier) == [
+            "beta", "delta", "gamma",
         ])
     }
 
@@ -220,9 +212,7 @@ struct UIDerivationTests {
             includesBackgroundAndSystemProcesses: false,
             scope: .running,
             processSort: .name,
-            searchText: "",
-            showsAllRules: true,
-            collapsedRuleCount: 5
+            searchText: ""
         )
         #expect(hidden.processItems.map(\.bundleIdentifier) == ["ordinary"])
         #expect(Set(hidden.managedItems.map(\.bundleIdentifier)) == [
@@ -234,9 +224,7 @@ struct UIDerivationTests {
             includesBackgroundAndSystemProcesses: true,
             scope: .running,
             processSort: .name,
-            searchText: "",
-            showsAllRules: true,
-            collapsedRuleCount: 5
+            searchText: ""
         )
         #expect(visible.processItems.map(\.bundleIdentifier) == [
             "background-agent", "com.apple.dock", backgroundIdentifier, "ordinary",
@@ -247,9 +235,7 @@ struct UIDerivationTests {
             includesBackgroundAndSystemProcesses: false,
             scope: .rules,
             processSort: .name,
-            searchText: "",
-            showsAllRules: true,
-            collapsedRuleCount: 5
+            searchText: ""
         )
         #expect(Set(rules.processItems.map(\.bundleIdentifier)) == [
             "com.apple.dock", backgroundIdentifier,
@@ -525,9 +511,7 @@ struct UIDerivationTests {
                 includesBackgroundAndSystemProcesses: true,
                 scope: .running,
                 processSort: .averageDescending,
-                searchText: "process",
-                showsAllRules: false,
-                collapsedRuleCount: 5
+                searchText: "process"
             )
         }
         let repeatedElapsed = repeatedStart.duration(to: clock.now)
@@ -538,9 +522,7 @@ struct UIDerivationTests {
             includesBackgroundAndSystemProcesses: true,
             scope: .running,
             processSort: .averageDescending,
-            searchText: "process",
-            showsAllRules: false,
-            collapsedRuleCount: 5
+            searchText: "process"
         )
         let snapshotElapsed = snapshotStart.duration(to: clock.now)
         let repeated = try #require(repeatedLists)
@@ -553,7 +535,11 @@ struct UIDerivationTests {
         )
     }
 
-    private func menuFixtures() -> [AppDisplayItem] {
+    private func menuFixtures(
+        betaSavedCPU: Double = 5,
+        gammaSavedCPU: Double = 10,
+        deltaSavedCPU: Double = 5
+    ) -> [AppDisplayItem] {
         [
             item(
                 identifier: "alpha",
@@ -568,7 +554,7 @@ struct UIDerivationTests {
                 currentCPU: 7,
                 averageCPU: 10,
                 power: 2,
-                savedCPU: 5,
+                savedCPU: betaSavedCPU,
                 rule: rule("beta"),
                 isAttention: true
             ),
@@ -578,7 +564,7 @@ struct UIDerivationTests {
                 currentCPU: 0,
                 averageCPU: 0,
                 power: 1,
-                savedCPU: 10,
+                savedCPU: gammaSavedCPU,
                 isRunning: false,
                 rule: rule("gamma")
             ),
@@ -588,7 +574,7 @@ struct UIDerivationTests {
                 currentCPU: 4,
                 averageCPU: 30,
                 power: 1,
-                savedCPU: 5,
+                savedCPU: deltaSavedCPU,
                 rule: rule("delta")
             ),
         ]

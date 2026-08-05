@@ -43,7 +43,12 @@ struct StatusItemState: Equatable {
     let toolTip: String
 
     init(systemCPU: SystemCPUSnapshot, isEnabled: Bool, preferences: AppPreferences) {
-        symbolName = isEnabled ? "gauge.with.dots.needle.67percent" : "pause.circle"
+        let managementPauseUntil = preferences.managementPauseUntil.flatMap {
+            $0 > Date() ? $0 : nil
+        }
+        symbolName = isEnabled && managementPauseUntil == nil
+            ? "gauge.with.dots.needle.67percent"
+            : "pause.circle"
         let roundedCPU = min(100, max(0, Int(systemCPU.totalPercent.rounded())))
         if preferences.showsCPUUsageInMenuBar {
             let digits = String(roundedCPU)
@@ -53,6 +58,9 @@ struct StatusItemState: Equatable {
         }
         if !isEnabled {
             toolTip = "Tempra · Management off"
+        } else if let managementPauseUntil {
+            toolTip = "Tempra · Paused until "
+                + managementPauseUntil.formatted(date: .omitted, time: .shortened)
         } else if preferences.showsCPUUsageInMenuBar {
             toolTip = "Tempra · \(roundedCPU)% total CPU"
         } else {
@@ -67,7 +75,9 @@ final class MenuPanelPresentation: ObservableObject {
     @Published var settingsSection: TempraSettingsSection = .general
     @Published var processSort: ProcessSort = .averageDescending
     @Published var showsPrivilegedAccessOnboarding = false
+    @Published private(set) var isMonitorDetached = false
     var onShowSettings: (() -> Void)?
+    var onSetMonitorDetached: ((Bool) -> Void)?
 
     func select(bundleIdentifier: String, anchorKey: String, localMidY: CGFloat) {
         if selection?.bundleIdentifier == bundleIdentifier,
@@ -120,6 +130,14 @@ final class MenuPanelPresentation: ObservableObject {
         settingsSection = section
         onShowSettings?()
     }
+
+    func setMonitorDetached(_ isDetached: Bool) {
+        onSetMonitorDetached?(isDetached)
+    }
+
+    func updateMonitorDetachedState(_ isDetached: Bool) {
+        isMonitorDetached = isDetached
+    }
 }
 
 @MainActor
@@ -132,6 +150,7 @@ final class MenuPanelCoordinator: NSObject, NSWindowDelegate {
     private var inspectorPanel: TempraPanel?
     private var highCPUAlertPanel: TempraPanel?
     private var settingsPanel: NSPanel?
+    private var detachedMonitorPanel: NSPanel?
     private var cancellables: Set<AnyCancellable> = []
     private var localEventMonitor: Any?
     private var globalEventMonitor: Any?
@@ -147,6 +166,9 @@ final class MenuPanelCoordinator: NSObject, NSWindowDelegate {
         configureStatusItem()
         presentation.onShowSettings = { [weak self] in
             self?.showSettingsPanel()
+        }
+        presentation.onSetMonitorDetached = { [weak self] isDetached in
+            self?.setMonitorDetached(isDetached)
         }
         observeState()
         installMenuTrackingObservers()
@@ -166,6 +188,19 @@ final class MenuPanelCoordinator: NSObject, NSWindowDelegate {
     }
 
     func closePanels() {
+        closeTransientPanels()
+        if let detachedMonitorPanel {
+            detachedMonitorPanel.delegate = nil
+            detachedMonitorPanel.close()
+            detachedMonitorPanel.contentViewController = nil
+            self.detachedMonitorPanel = nil
+        }
+        presentation.updateMonitorDetachedState(false)
+        store.setPresentationActive(false)
+        removeEventMonitorsIfIdle()
+    }
+
+    private func closeTransientPanels() {
         presentation.closeInspector()
         inspectorPanel?.close()
         inspectorPanel?.contentViewController = nil
@@ -173,7 +208,8 @@ final class MenuPanelCoordinator: NSObject, NSWindowDelegate {
         mainPanel?.close()
         mainPanel?.contentViewController = nil
         mainPanel = nil
-        store.setPresentationActive(false)
+        store.setHistoryFocus(bundleIdentifier: nil)
+        store.setPresentationActive(detachedMonitorPanel?.isVisible == true)
         removeEventMonitorsIfIdle()
         statusItem.button?.highlight(false)
     }
@@ -189,6 +225,7 @@ final class MenuPanelCoordinator: NSObject, NSWindowDelegate {
         settingsPanel?.contentViewController = nil
         settingsPanel = nil
         presentation.onShowSettings = nil
+        presentation.onSetMonitorDetached = nil
         cancellables.removeAll()
         if let localEventMonitor {
             NSEvent.removeMonitor(localEventMonitor)
@@ -248,6 +285,25 @@ final class MenuPanelCoordinator: NSObject, NSWindowDelegate {
         settingsPanel.standardWindowButton(.miniaturizeButton)?.isEnabled = false
         settingsPanel.standardWindowButton(.zoomButton)?.isEnabled = false
         settingsPanel.delegate = self
+    }
+
+    private func configureDetachedMonitorPanel(_ panel: NSPanel) {
+        panel.title = "Tempra Monitor"
+        panel.titleVisibility = .visible
+        panel.backgroundColor = .clear
+        panel.isOpaque = false
+        panel.hasShadow = true
+        panel.isReleasedWhenClosed = false
+        panel.isFloatingPanel = true
+        panel.hidesOnDeactivate = false
+        panel.animationBehavior = .utilityWindow
+        panel.level = .floating
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        panel.tabbingMode = .disallowed
+        panel.contentMinSize = TempraLayout.mainPanelSize
+        panel.contentMaxSize = TempraLayout.mainPanelSize
+        panel.standardWindowButton(.zoomButton)?.isEnabled = false
+        panel.delegate = self
     }
 
     private func makeTempraPanel(size: CGSize) -> TempraPanel {
@@ -311,6 +367,24 @@ final class MenuPanelCoordinator: NSObject, NSWindowDelegate {
         return panel
     }
 
+    private func ensureDetachedMonitorPanel() -> NSPanel {
+        if let detachedMonitorPanel { return detachedMonitorPanel }
+        let panel = NSPanel(
+            contentRect: CGRect(origin: .zero, size: TempraLayout.mainPanelSize),
+            styleMask: [.titled, .closable, .miniaturizable, .utilityWindow],
+            backing: .buffered,
+            defer: false
+        )
+        configureDetachedMonitorPanel(panel)
+        panel.contentViewController = NSHostingController(
+            rootView: MenuBarView(store: store, presentation: presentation)
+        )
+        panel.setContentSize(TempraLayout.mainPanelSize)
+        panel.appearance = store.preferences.appearance.nsAppearance
+        detachedMonitorPanel = panel
+        return panel
+    }
+
     private func observeState() {
         store.$systemCPU
             .combineLatest(store.$isEnabled)
@@ -338,6 +412,11 @@ final class MenuPanelCoordinator: NSObject, NSWindowDelegate {
 
         presentation.$selection
             .sink { [weak self] selection in
+                self?.store.setHistoryFocus(
+                    bundleIdentifier: selection?.inspector == .activity
+                        ? selection?.bundleIdentifier
+                        : nil
+                )
                 self?.updateInspector(for: selection)
             }
             .store(in: &cancellables)
@@ -400,17 +479,29 @@ final class MenuPanelCoordinator: NSObject, NSWindowDelegate {
     }
 
     @objc private func toggleMainPanel() {
+        if let detachedMonitorPanel, detachedMonitorPanel.isVisible {
+            store.setPresentationActive(true)
+            NSApp.activate(ignoringOtherApps: true)
+            detachedMonitorPanel.makeKeyAndOrderFront(nil)
+            return
+        }
         if highCPUAlertPanel?.isVisible == true {
             store.dismissHighCPUAlert()
             showMainPanel()
         } else if mainPanel?.isVisible == true {
-            closePanels()
+            closeTransientPanels()
         } else {
             showMainPanel()
         }
     }
 
     private func showMainPanel() {
+        if let detachedMonitorPanel, detachedMonitorPanel.isVisible {
+            store.setPresentationActive(true)
+            NSApp.activate(ignoringOtherApps: true)
+            detachedMonitorPanel.makeKeyAndOrderFront(nil)
+            return
+        }
         store.setPresentationActive(true)
         let mainPanel = ensureMainPanel()
         positionMainPanel(mainPanel)
@@ -422,7 +513,7 @@ final class MenuPanelCoordinator: NSObject, NSWindowDelegate {
     }
 
     private func showSettingsPanel() {
-        closePanels()
+        closeTransientPanels()
         let settingsPanel = ensureSettingsPanel()
         if !settingsPanel.isVisible {
             settingsPanel.center()
@@ -444,7 +535,7 @@ final class MenuPanelCoordinator: NSObject, NSWindowDelegate {
             return
         }
 
-        closePanels()
+        closeTransientPanels()
         let highCPUAlertPanel = ensureHighCPUAlertPanel()
         positionHighCPUAlertPanel(highCPUAlertPanel)
         installEventMonitors()
@@ -477,7 +568,14 @@ final class MenuPanelCoordinator: NSObject, NSWindowDelegate {
     }
 
     private func updateInspector(for selection: MenuPanelSelection?) {
-        guard let mainPanel, mainPanel.isVisible, let selection else {
+        let hostPanel: NSPanel? = if mainPanel?.isVisible == true {
+            mainPanel
+        } else if detachedMonitorPanel?.isVisible == true {
+            detachedMonitorPanel
+        } else {
+            nil
+        }
+        guard let hostPanel, let selection else {
             inspectorPanel?.close()
             inspectorPanel?.contentViewController = nil
             inspectorPanel = nil
@@ -486,11 +584,11 @@ final class MenuPanelCoordinator: NSObject, NSWindowDelegate {
 
         let inspectorPanel = ensureInspectorPanel()
         let size = TempraLayout.inspectorSize
-        let visibleFrame = mainPanel.screen?.visibleFrame ?? NSScreen.main?.visibleFrame ?? .zero
-        let targetScreenY = mainPanel.frame.maxY - selection.localMidY
+        let visibleFrame = hostPanel.screen?.visibleFrame ?? NSScreen.main?.visibleFrame ?? .zero
+        let targetScreenY = hostPanel.frame.maxY - selection.localMidY
         let idealY = targetScreenY - size.height / 2
         let y = min(max(idealY, visibleFrame.minY + 6), visibleFrame.maxY - size.height - 6)
-        let x = mainPanel.frame.minX - size.width + 2
+        let x = hostPanel.frame.minX - size.width + 2
 
         inspectorPanel.setFrameOrigin(CGPoint(x: x, y: y))
         inspectorPanel.orderFrontRegardless()
@@ -543,7 +641,8 @@ final class MenuPanelCoordinator: NSObject, NSWindowDelegate {
     private func removeEventMonitorsIfIdle() {
         guard mainPanel?.isVisible != true,
               highCPUAlertPanel?.isVisible != true,
-              settingsPanel?.isVisible != true else { return }
+              settingsPanel?.isVisible != true,
+              detachedMonitorPanel?.isVisible != true else { return }
         if let localEventMonitor {
             NSEvent.removeMonitor(localEventMonitor)
             self.localEventMonitor = nil
@@ -604,15 +703,60 @@ final class MenuPanelCoordinator: NSObject, NSWindowDelegate {
         inspectorPanel?.appearance = nsAppearance
         highCPUAlertPanel?.appearance = nsAppearance
         settingsPanel?.appearance = nsAppearance
+        detachedMonitorPanel?.appearance = nsAppearance
         settingsPanel?.backgroundColor = .windowBackgroundColor
     }
 
     func windowWillClose(_ notification: Notification) {
-        guard let closedWindow = notification.object as? NSWindow,
-              closedWindow === settingsPanel else { return }
-        settingsPanel?.contentViewController = nil
-        settingsPanel = nil
+        guard let closedWindow = notification.object as? NSWindow else { return }
+        if closedWindow === settingsPanel {
+            settingsPanel?.contentViewController = nil
+            settingsPanel = nil
+        } else if closedWindow === detachedMonitorPanel {
+            presentation.closeInspector()
+            inspectorPanel?.close()
+            inspectorPanel?.contentViewController = nil
+            inspectorPanel = nil
+            detachedMonitorPanel?.contentViewController = nil
+            detachedMonitorPanel = nil
+            presentation.updateMonitorDetachedState(false)
+            store.setHistoryFocus(bundleIdentifier: nil)
+            store.setPresentationActive(false)
+        } else {
+            return
+        }
         removeEventMonitorsIfIdle()
+    }
+
+    private func setMonitorDetached(_ isDetached: Bool) {
+        guard isDetached != presentation.isMonitorDetached else { return }
+        if isDetached {
+            presentation.updateMonitorDetachedState(true)
+            presentation.closeInspector()
+            inspectorPanel?.close()
+            inspectorPanel?.contentViewController = nil
+            inspectorPanel = nil
+            mainPanel?.close()
+            mainPanel?.contentViewController = nil
+            mainPanel = nil
+            let panel = ensureDetachedMonitorPanel()
+            if !panel.isVisible {
+                panel.center()
+            }
+            store.setPresentationActive(true)
+            NSApp.activate(ignoringOtherApps: true)
+            panel.makeKeyAndOrderFront(nil)
+            statusItem.button?.highlight(false)
+        } else {
+            if let detachedMonitorPanel {
+                detachedMonitorPanel.delegate = nil
+                detachedMonitorPanel.close()
+                detachedMonitorPanel.contentViewController = nil
+                self.detachedMonitorPanel = nil
+            }
+            presentation.updateMonitorDetachedState(false)
+            showMainPanel()
+        }
     }
 }
 

@@ -72,6 +72,35 @@ enum ProfileDelayPolicy: String, Codable, CaseIterable, Identifiable {
     }
 }
 
+enum ProfilePowerCondition: String, Codable, CaseIterable, Identifiable {
+    case any
+    case battery
+    case externalPower
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .any: "Any power source"
+        case .battery: "On battery"
+        case .externalPower: "On external power"
+        }
+    }
+}
+
+struct ProfileActivation: Codable, Equatable {
+    var powerCondition: ProfilePowerCondition = .any
+    var idleAfterMinutes: Double?
+
+    var isAutomatic: Bool {
+        powerCondition != .any || idleAfterMinutes != nil
+    }
+
+    var conditionCount: Int {
+        (powerCondition == .any ? 0 : 1) + (idleAfterMinutes == nil ? 0 : 1)
+    }
+}
+
 struct ManagementProfile: Codable, Equatable, Identifiable {
     let id: UUID
     var name: String
@@ -79,6 +108,7 @@ struct ManagementProfile: Codable, Equatable, Identifiable {
     var limitPercent: Double
     var delayPolicy: ProfileDelayPolicy
     var delaySeconds: TimeInterval
+    var activation: ProfileActivation
 
     init(
         id: UUID = UUID(),
@@ -86,7 +116,8 @@ struct ManagementProfile: Codable, Equatable, Identifiable {
         limitPolicy: ProfileLimitPolicy = .inherit,
         limitPercent: Double = 50,
         delayPolicy: ProfileDelayPolicy = .inherit,
-        delaySeconds: TimeInterval = 10
+        delaySeconds: TimeInterval = 10,
+        activation: ProfileActivation = ProfileActivation()
     ) {
         self.id = id
         self.name = name
@@ -94,6 +125,31 @@ struct ManagementProfile: Codable, Equatable, Identifiable {
         self.limitPercent = limitPercent
         self.delayPolicy = delayPolicy
         self.delaySeconds = delaySeconds
+        self.activation = activation
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case name
+        case limitPolicy
+        case limitPercent
+        case delayPolicy
+        case delaySeconds
+        case activation
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(UUID.self, forKey: .id)
+        name = try container.decode(String.self, forKey: .name)
+        limitPolicy = try container.decode(ProfileLimitPolicy.self, forKey: .limitPolicy)
+        limitPercent = try container.decode(Double.self, forKey: .limitPercent)
+        delayPolicy = try container.decode(ProfileDelayPolicy.self, forKey: .delayPolicy)
+        delaySeconds = try container.decode(TimeInterval.self, forKey: .delaySeconds)
+        activation = try container.decodeIfPresent(
+            ProfileActivation.self,
+            forKey: .activation
+        ) ?? ProfileActivation()
     }
 
     func applying(to rule: AppRule) -> AppRule {
@@ -137,6 +193,7 @@ struct AppPreferences: Codable, Equatable {
     var showsCPUUsageInMenuBar = true
     var historyRange: CPUHistoryRange = .fiveMinutes
     var hasPresentedPrivilegedAccessOnboarding = false
+    var managementPauseUntil: Date?
 
     var activeProfile: ManagementProfile? {
         guard let activeProfileID else { return nil }
@@ -159,6 +216,7 @@ struct AppPreferences: Codable, Equatable {
         case showsCPUUsageInMenuBar
         case historyRange
         case hasPresentedPrivilegedAccessOnboarding
+        case managementPauseUntil
     }
 
     init() {}
@@ -225,6 +283,10 @@ struct AppPreferences: Codable, Equatable {
             Bool.self,
             forKey: .hasPresentedPrivilegedAccessOnboarding
         ) ?? false
+        managementPauseUntil = try container.decodeIfPresent(
+            Date.self,
+            forKey: .managementPauseUntil
+        )
     }
 
     static let durationOptions: [TimeInterval] = [10, 30, 60, 300]

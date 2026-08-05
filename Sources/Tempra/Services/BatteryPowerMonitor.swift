@@ -1,10 +1,10 @@
 import Foundation
 import IOKit
+import IOKit.ps
 
-struct BatteryElectricalReading: Equatable, Sendable {
-    let voltageMillivolts: Int64
-    let amperageMilliamps: Int64
-    let isExternalPowerConnected: Bool
+enum BatteryElectricalReading: Equatable, Sendable {
+    case discharging(voltageMillivolts: Int64, amperageMilliamps: Int64)
+    case externalPower
 }
 
 enum BatteryPowerState: Equatable, Sendable {
@@ -31,19 +31,27 @@ final class BatteryPowerMonitor {
             recentWatts.removeAll(keepingCapacity: true)
             return nil
         }
-        if reading.isExternalPowerConnected {
+
+        let voltageMillivolts: Int64
+        let amperageMilliamps: Int64
+        switch reading {
+        case .externalPower:
             recentWatts.removeAll(keepingCapacity: true)
             return .externalPower
+        case .discharging(let voltage, let amperage):
+            voltageMillivolts = voltage
+            amperageMilliamps = amperage
         }
-        guard reading.voltageMillivolts > 0,
-              reading.amperageMilliamps < 0,
-              reading.amperageMilliamps > Int64.min else {
+
+        guard voltageMillivolts > 0,
+              amperageMilliamps < 0,
+              amperageMilliamps > Int64.min else {
             recentWatts.removeAll(keepingCapacity: true)
             return nil
         }
 
-        let watts = Double(reading.voltageMillivolts)
-            * Double(-reading.amperageMilliamps)
+        let watts = Double(voltageMillivolts)
+            * Double(-amperageMilliamps)
             / 1_000_000
         guard watts.isFinite, watts >= 0 else {
             recentWatts.removeAll(keepingCapacity: true)
@@ -57,6 +65,36 @@ final class BatteryPowerMonitor {
     }
 
     private static func readBattery() -> BatteryElectricalReading? {
+        guard let infoReference = IOPSCopyPowerSourcesInfo() else { return nil }
+        let info = infoReference.takeRetainedValue()
+        guard let sourcesReference = IOPSCopyPowerSourcesList(info) else { return nil }
+        let sources = sourcesReference.takeRetainedValue() as [CFTypeRef]
+
+        for source in sources {
+            guard let descriptionReference = IOPSGetPowerSourceDescription(info, source),
+                  let description = descriptionReference.takeUnretainedValue()
+                    as? [String: Any],
+                  description[kIOPSTypeKey] as? String == kIOPSInternalBatteryType,
+                  let powerSourceState = description[kIOPSPowerSourceStateKey] as? String else {
+                continue
+            }
+            if powerSourceState == kIOPSACPowerValue {
+                return .externalPower
+            }
+            guard powerSourceState == kIOPSBatteryPowerValue,
+                  let amperage = (description[kIOPSCurrentKey] as? NSNumber)?.int64Value,
+                  let voltage = readBatteryVoltage() else {
+                return nil
+            }
+            return .discharging(
+                voltageMillivolts: voltage,
+                amperageMilliamps: amperage
+            )
+        }
+        return nil
+    }
+
+    private static func readBatteryVoltage() -> Int64? {
         let service = IOServiceGetMatchingService(
             kIOMainPortDefault,
             IOServiceMatching("AppleSmartBattery")
@@ -64,19 +102,7 @@ final class BatteryPowerMonitor {
         guard service != IO_OBJECT_NULL else { return nil }
         defer { IOObjectRelease(service) }
 
-        guard let voltage = integerProperty("Voltage", service: service),
-              let amperage = integerProperty("Amperage", service: service),
-              let externalConnected = integerProperty(
-                  "ExternalConnected",
-                  service: service
-              ) else {
-            return nil
-        }
-        return BatteryElectricalReading(
-            voltageMillivolts: voltage,
-            amperageMilliamps: amperage,
-            isExternalPowerConnected: externalConnected != 0
-        )
+        return integerProperty(kIOPSVoltageKey, service: service)
     }
 
     private static func integerProperty(

@@ -11,6 +11,7 @@ enum ManagementStatus: Equatable, Sendable {
     case audioProtected
     case networkProtected
     case snoozed(Date)
+    case managementPaused(Date)
     case disabled
     case notRunning
     case unavailable
@@ -25,7 +26,10 @@ enum ManagementStatus: Equatable, Sendable {
         case .energyEfficient: "Power-saving cores"
         case .audioProtected: "Audio active"
         case .networkProtected: "Network active"
-        case .snoozed(let until): "Snoozed until \(until.formatted(date: .omitted, time: .shortened))"
+        case .snoozed(let until):
+            "Resumed until \(until.formatted(date: .omitted, time: .shortened))"
+        case .managementPaused(let until):
+            "Management paused until \(until.formatted(date: .omitted, time: .shortened))"
         case .disabled: "Disabled"
         case .notRunning: "Not running"
         case .unavailable: "Unavailable"
@@ -43,6 +47,7 @@ enum ManagementStatus: Equatable, Sendable {
         case .audioProtected: "speaker.wave.2.fill"
         case .networkProtected: "network"
         case .snoozed: "moon.zzz.fill"
+        case .managementPaused: "pause.circle.fill"
         case .disabled: "slash.circle.fill"
         case .notRunning: "app.dashed"
         case .unavailable: "exclamationmark.triangle.fill"
@@ -54,7 +59,8 @@ enum ManagementStatus: Equatable, Sendable {
         case .waiting, .limited, .limitedWithProtectedProcesses, .paused,
                 .energyEfficient, .audioProtected, .networkProtected:
             true
-        case .normal, .snoozed, .disabled, .notRunning, .unavailable:
+        case .normal, .snoozed, .managementPaused, .disabled, .notRunning,
+                .unavailable:
             false
         }
     }
@@ -64,7 +70,7 @@ enum ManagementStatus: Equatable, Sendable {
         case .limited, .limitedWithProtectedProcesses, .paused, .energyEfficient:
             true
         case .normal, .waiting, .audioProtected, .networkProtected, .snoozed,
-                .disabled, .notRunning, .unavailable:
+                .managementPaused, .disabled, .notRunning, .unavailable:
             false
         }
     }
@@ -74,7 +80,7 @@ enum ManagementStatus: Equatable, Sendable {
         case .limited, .limitedWithProtectedProcesses, .paused:
             true
         case .normal, .waiting, .energyEfficient, .audioProtected, .networkProtected,
-                .snoozed, .disabled, .notRunning, .unavailable:
+                .snoozed, .managementPaused, .disabled, .notRunning, .unavailable:
             false
         }
     }

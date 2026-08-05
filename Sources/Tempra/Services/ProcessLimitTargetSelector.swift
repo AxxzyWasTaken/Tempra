@@ -7,6 +7,7 @@ struct ProcessLimitSelection: Equatable, Sendable {
     let alwaysRunningCPUPercent: Double
     let controlledLimitPercent: Double
     let targetIsReachable: Bool
+    let protectionReasons: [ProcessIdentity: Set<ProcessProtectionReason>]
 
     static let empty = ProcessLimitSelection(
         controlledProcesses: [],
@@ -14,7 +15,8 @@ struct ProcessLimitSelection: Equatable, Sendable {
         controlledCPUPercent: 0,
         alwaysRunningCPUPercent: 0,
         controlledLimitPercent: 0,
-        targetIsReachable: true
+        targetIsReachable: true,
+        protectionReasons: [:]
     )
 }
 
@@ -41,6 +43,27 @@ enum ProcessLimitTargetSelector {
         }
         guard !normalizedSamples.isEmpty else { return .empty }
 
+        var protectionReasons: [ProcessIdentity: Set<ProcessProtectionReason>] = [:]
+        for sample in normalizedSamples {
+            if !sample.hasCPUMeasurement {
+                protectionReasons[sample.identity, default: []].insert(
+                    .missingCPUMeasurement
+                )
+            }
+            if protectsAudio, sample.isPlayingAudio {
+                protectionReasons[sample.identity, default: []].insert(.audioPlayback)
+            }
+            if criticalActivityProcesses.contains(sample.identity) {
+                protectionReasons[sample.identity, default: []].insert(
+                    .criticalFileActivity
+                )
+            }
+            if sample.networkActivity.isLatencySensitive
+                || latencySensitiveProcesses.contains(sample.identity) {
+                protectionReasons[sample.identity, default: []].insert(.networkActivity)
+            }
+        }
+
         let hardProtectedProcesses = Set(normalizedSamples.compactMap { sample in
             !sample.hasCPUMeasurement
                 || (protectsAudio && sample.isPlayingAudio)
@@ -62,6 +85,9 @@ enum ProcessLimitTargetSelector {
                 ?? normalizedSamples.min(by: sampleOrderByCPUThenIdentity)
             if let mainLifeline {
                 softProtectedProcesses.insert(mainLifeline.identity)
+                protectionReasons[mainLifeline.identity, default: []].insert(
+                    .mainProcessLifeline
+                )
             }
         }
 
@@ -72,7 +98,8 @@ enum ProcessLimitTargetSelector {
                 controlled: [],
                 samples: normalizedSamples,
                 requestedLimit: requestedLimit,
-                minimumControlledDutyCycle: normalizedMinimumDutyCycle
+                minimumControlledDutyCycle: normalizedMinimumDutyCycle,
+                protectionReasons: protectionReasons
             )
         }
 
@@ -84,7 +111,8 @@ enum ProcessLimitTargetSelector {
                 controlled: [],
                 samples: normalizedSamples,
                 requestedLimit: requestedLimit,
-                minimumControlledDutyCycle: normalizedMinimumDutyCycle
+                minimumControlledDutyCycle: normalizedMinimumDutyCycle,
+                protectionReasons: protectionReasons
             )
         }
 
@@ -93,7 +121,8 @@ enum ProcessLimitTargetSelector {
                 controlled: [onlyProcess.identity],
                 samples: normalizedSamples,
                 requestedLimit: requestedLimit,
-                minimumControlledDutyCycle: normalizedMinimumDutyCycle
+                minimumControlledDutyCycle: normalizedMinimumDutyCycle,
+                protectionReasons: protectionReasons
             )
         }
 
@@ -121,7 +150,8 @@ enum ProcessLimitTargetSelector {
                 controlled: preferredControlled,
                 samples: normalizedSamples,
                 requestedLimit: requestedLimit,
-                minimumControlledDutyCycle: normalizedMinimumDutyCycle
+                minimumControlledDutyCycle: normalizedMinimumDutyCycle,
+                protectionReasons: protectionReasons
             )
         }
 
@@ -137,7 +167,8 @@ enum ProcessLimitTargetSelector {
             controlled: controlled,
             samples: normalizedSamples,
             requestedLimit: requestedLimit,
-            minimumControlledDutyCycle: normalizedMinimumDutyCycle
+            minimumControlledDutyCycle: normalizedMinimumDutyCycle,
+            protectionReasons: protectionReasons
         )
     }
 
@@ -190,7 +221,8 @@ enum ProcessLimitTargetSelector {
         controlled: Set<ProcessIdentity>,
         samples: [ManagedProcessSample],
         requestedLimit: Double,
-        minimumControlledDutyCycle: Double
+        minimumControlledDutyCycle: Double,
+        protectionReasons: [ProcessIdentity: Set<ProcessProtectionReason>]
     ) -> ProcessLimitSelection {
         let controlledCPU = samples.reduce(0) { result, sample in
             result + (controlled.contains(sample.identity) ? sample.cpuPercent : 0)
@@ -198,6 +230,10 @@ enum ProcessLimitTargetSelector {
         let totalCPU = samples.reduce(0) { $0 + $1.cpuPercent }
         let alwaysRunningCPU = max(0, totalCPU - controlledCPU)
         let allIdentities = Set(samples.map(\.identity))
+        let alwaysRunningProcesses = allIdentities.subtracting(controlled)
+        let retainedProtectionReasons = protectionReasons.filter { identity, reasons in
+            alwaysRunningProcesses.contains(identity) && !reasons.isEmpty
+        }
         let controlledLimit = min(
             controlledCPU,
             max(0, requestedLimit - alwaysRunningCPU)
@@ -205,11 +241,12 @@ enum ProcessLimitTargetSelector {
         let minimumControlledCPU = controlledCPU * minimumControlledDutyCycle
         return ProcessLimitSelection(
             controlledProcesses: controlled,
-            alwaysRunningProcesses: allIdentities.subtracting(controlled),
+            alwaysRunningProcesses: alwaysRunningProcesses,
             controlledCPUPercent: controlledCPU,
             alwaysRunningCPUPercent: alwaysRunningCPU,
             controlledLimitPercent: controlledLimit,
-            targetIsReachable: alwaysRunningCPU + minimumControlledCPU <= requestedLimit
+            targetIsReachable: alwaysRunningCPU + minimumControlledCPU <= requestedLimit,
+            protectionReasons: retainedProtectionReasons
         )
     }
 

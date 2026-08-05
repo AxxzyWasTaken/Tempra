@@ -10,6 +10,8 @@ enum ActivityKind: String, Codable, Sendable {
     case energyEfficient
     case hidden
     case quit
+    case gracefulQuit
+    case relaunched
     case snoozed
     case ruleSaved
     case ruleDisabled
@@ -28,7 +30,9 @@ enum ActivityKind: String, Codable, Sendable {
         case .energyEfficient: "Power-saving cores"
         case .hidden: "App hidden"
         case .quit: "App force quit"
-        case .snoozed: "Snoozed"
+        case .gracefulQuit: "App quit"
+        case .relaunched: "App relaunched"
+        case .snoozed: "Temporarily resumed"
         case .ruleSaved: "Rule saved"
         case .ruleDisabled: "Rule disabled"
         case .ruleRemoved: "Rule removed"
@@ -48,6 +52,8 @@ enum ActivityKind: String, Codable, Sendable {
         case .energyEfficient: "leaf.fill"
         case .hidden: "eye.slash.fill"
         case .quit: "xmark.circle.fill"
+        case .gracefulQuit: "power"
+        case .relaunched: "arrow.clockwise.circle.fill"
         case .snoozed: "moon.zzz.fill"
         case .ruleSaved: "checkmark.circle.fill"
         case .ruleDisabled: "slash.circle.fill"

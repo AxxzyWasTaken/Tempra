@@ -1,3 +1,4 @@
+import Dispatch
 import Foundation
 
 enum ProcessControlTickTrigger {
@@ -10,16 +11,95 @@ struct ProcessReconciliationContext: Sendable {
     let revision: UInt64
 }
 
+final class ProcessControlScheduledWake: @unchecked Sendable {
+    private let lock = NSLock()
+    private var operation: (@Sendable () -> Void)?
+    private var cancellationHandler: (@Sendable () -> Void)?
+    private var isComplete = false
+
+    init(operation: @escaping @Sendable () -> Void) {
+        self.operation = operation
+    }
+
+    func setCancellationHandler(_ handler: @escaping @Sendable () -> Void) {
+        let shouldCancel = withLock {
+            guard !isComplete else { return true }
+            cancellationHandler = handler
+            return false
+        }
+        if shouldCancel {
+            handler()
+        }
+    }
+
+    func fire() {
+        complete()
+    }
+
+    func cancel() {
+        complete()
+    }
+
+    private func complete() {
+        let completion: (
+            operation: (@Sendable () -> Void)?,
+            cancellationHandler: (@Sendable () -> Void)?
+        )? = withLock {
+            guard !isComplete else { return nil }
+            isComplete = true
+            let completion = (
+                operation: operation,
+                cancellationHandler: cancellationHandler
+            )
+            operation = nil
+            cancellationHandler = nil
+            return completion
+        }
+        completion?.cancellationHandler?()
+        completion?.operation?()
+    }
+
+    private func withLock<Result>(_ operation: () -> Result) -> Result {
+        lock.lock()
+        defer { lock.unlock() }
+        return operation()
+    }
+}
+
 struct ProcessControlClock: Sendable {
     let now: @Sendable () -> ContinuousClock.Instant
-    let sleepUntil: @Sendable (ContinuousClock.Instant) async -> Void
+    let scheduleWake: @Sendable (
+        ContinuousClock.Instant,
+        @escaping @Sendable () -> Void
+    ) -> ProcessControlScheduledWake
+
+    private static let schedulingQueue = DispatchQueue(
+        label: "com.tempra.process-control-clock",
+        qos: .userInteractive,
+        autoreleaseFrequency: .workItem
+    )
 
     static let continuous: ProcessControlClock = {
         let clock = ContinuousClock()
         return ProcessControlClock(
             now: { clock.now },
-            sleepUntil: { deadline in
-                try? await clock.sleep(until: deadline)
+            scheduleWake: { deadline, operation in
+                let wake = ProcessControlScheduledWake(operation: operation)
+                let delay = max(
+                    0,
+                    ProcessControlMath.timeInterval(clock.now.duration(to: deadline))
+                )
+                let timer = DispatchSource.makeTimerSource(queue: schedulingQueue)
+                timer.schedule(deadline: .now() + delay)
+                timer.setEventHandler { [weak wake] in
+                    wake?.fire()
+                }
+                wake.setCancellationHandler {
+                    timer.setEventHandler {}
+                    timer.cancel()
+                }
+                timer.activate()
+                return wake
             }
         )
     }()
@@ -52,7 +132,9 @@ enum ProcessControlMath {
 enum ApplicationCommand: Equatable, Sendable {
     case bringToFront
     case hide
+    case quitGracefully
     case quit
+    case relaunch
 }
 
 enum ApplicationCommandFailure: Equatable, Sendable {

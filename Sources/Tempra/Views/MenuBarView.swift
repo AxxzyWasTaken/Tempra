@@ -24,16 +24,13 @@ enum ProcessSort: String, CaseIterable, Hashable, Identifiable {
 struct MenuBarItemLists {
     let processItems: [AppDisplayItem]
     let managedItems: [AppDisplayItem]
-    let visibleManagedItems: [AppDisplayItem]
 
     init(
         displayItems: [AppDisplayItem],
         includesBackgroundAndSystemProcesses: Bool,
         scope: MenuScope,
         processSort: ProcessSort,
-        searchText: String,
-        showsAllRules: Bool,
-        collapsedRuleCount: Int
+        searchText: String
     ) {
         let scopedItems = displayItems.filter { item in
             switch scope {
@@ -66,17 +63,14 @@ struct MenuBarItemLists {
                         || Self.matchesSearch(item, searchText: searchText))
                 }
                 .sorted { lhs, rhs in
-                    if lhs.estimatedSavedCPUPercent != rhs.estimatedSavedCPUPercent {
-                        return lhs.estimatedSavedCPUPercent > rhs.estimatedSavedCPUPercent
+                    if lhs.sortName != rhs.sortName {
+                        return lhs.sortName < rhs.sortName
                     }
-                    return lhs.sortName < rhs.sortName
+                    return lhs.bundleIdentifier < rhs.bundleIdentifier
                 }
         } else {
             managedItems = []
         }
-        visibleManagedItems = showsAllRules
-            ? managedItems
-            : Array(managedItems.prefix(collapsedRuleCount))
     }
 
     private static func matchesSearch(
@@ -143,9 +137,15 @@ private struct HeaderActionsMenu: View, Equatable {
     let scopeBadges: [MenuScope: String]
     let historyRange: CPUHistoryRange
     let appearance: AppAppearance
+    let managementPauseUntil: Date?
+    let isMonitorDetached: Bool
     let onScopeChange: (MenuScope) -> Void
     let onHistoryRangeChange: (CPUHistoryRange) -> Void
     let onAppearanceChange: (AppAppearance) -> Void
+    let onPauseManagement: (TimeInterval) -> Void
+    let onResumeManagement: () -> Void
+    let onSetMonitorDetached: (Bool) -> Void
+    let onExportDiagnostics: () -> Void
     let onShowSettings: () -> Void
     let onQuit: () -> Void
 
@@ -154,6 +154,8 @@ private struct HeaderActionsMenu: View, Equatable {
             && lhs.scopeBadges == rhs.scopeBadges
             && lhs.historyRange == rhs.historyRange
             && lhs.appearance == rhs.appearance
+            && lhs.managementPauseUntil == rhs.managementPauseUntil
+            && lhs.isMonitorDetached == rhs.isMonitorDetached
     }
 
     var body: some View {
@@ -196,6 +198,31 @@ private struct HeaderActionsMenu: View, Equatable {
 
             Divider()
 
+            if managementPauseUntil.map({ $0 > Date() }) == true {
+                Button("Resume Management Now", action: onResumeManagement)
+            } else {
+                Menu("Pause Management") {
+                    Button("For 15 Minutes") {
+                        onPauseManagement(15 * 60)
+                    }
+                    Button("For 1 Hour") {
+                        onPauseManagement(60 * 60)
+                    }
+                    Button("For 4 Hours") {
+                        onPauseManagement(4 * 60 * 60)
+                    }
+                }
+            }
+
+            Button(
+                isMonitorDetached ? "Attach Monitor to Menu Bar" : "Detach Monitor",
+                action: { onSetMonitorDetached(!isMonitorDetached) }
+            )
+
+            Button("Export Diagnostics…", action: onExportDiagnostics)
+
+            Divider()
+
             Button("Settings…", action: onShowSettings)
             Button("Quit Tempra", action: onQuit)
         } label: {
@@ -229,10 +256,9 @@ struct MenuBarView: View {
 
     @State private var scope: MenuScope = .running
     @State private var searchText = ""
-    @State private var showsAllRules = false
     @State private var rowFrames: [String: CGRect] = [:]
 
-    private let collapsedRuleCount = 5
+    private let managedViewportRowCount = 5
     private let coordinateSpaceName = "tempra.main.panel"
 
     var body: some View {
@@ -242,13 +268,13 @@ struct MenuBarView: View {
                 .includesEssentialSystemProcesses,
             scope: scope,
             processSort: presentation.processSort,
-            searchText: searchText,
-            showsAllRules: showsAllRules,
-            collapsedRuleCount: collapsedRuleCount
+            searchText: searchText
         )
         VStack(spacing: 0) {
-            Color.clear
-                .frame(height: TempraLayout.mainNotchHeight)
+            if !presentation.isMonitorDetached {
+                Color.clear
+                    .frame(height: TempraLayout.mainNotchHeight)
+            }
 
             monitorPanel(itemLists: itemLists)
         }
@@ -258,13 +284,46 @@ struct MenuBarView: View {
         )
         .coordinateSpace(name: coordinateSpaceName)
         .onPreferenceChange(ProcessRowFramesKey.self, perform: updateRowFrames)
-        .tempraPanelSurface(MainPanelShape())
+        .tempraPanelSurface(
+            MonitorPanelShape(isDetached: presentation.isMonitorDetached)
+        )
         .tempraAppearance(store.preferences.appearance)
     }
 
     private func monitorPanel(itemLists: MenuBarItemLists) -> some View {
         VStack(spacing: 0) {
             header
+
+            if let managementPauseUntil = activeManagementPauseUntil {
+                panelNotice(
+                    symbolName: "pause.circle.fill",
+                    color: TempraPalette.waiting,
+                    message: "Management is paused until "
+                        + managementPauseUntil.formatted(
+                            date: .omitted,
+                            time: .shortened
+                        )
+                        + ". All controlled processes are resumed.",
+                    actionTitle: "Resume",
+                    action: store.resumeManagement
+                )
+            }
+
+            if let restorationFailure = store.lifecycleRestorationFailure {
+                panelNotice(
+                    symbolName: "exclamationmark.triangle.fill",
+                    color: TempraPalette.stopped,
+                    message: lifecycleFailureMessage(restorationFailure),
+                    actionTitle: "Retry",
+                    action: {
+                        Task {
+                            await store.retryLifecycleRestoration()
+                        }
+                    }
+                )
+            }
+
+            diagnosticNotice
 
             if presentation.showsPrivilegedAccessOnboarding,
                !store.privilegedControlStatus.isEnabled {
@@ -313,10 +372,7 @@ struct MenuBarView: View {
                     Divider()
                         .overlay(TempraPalette.separator)
                         .padding(.vertical, 7)
-                    managedSection(
-                        managedItems: itemLists.managedItems,
-                        visibleManagedItems: itemLists.visibleManagedItems
-                    )
+                    managedSection(managedItems: itemLists.managedItems)
                     .fixedSize(horizontal: false, vertical: true)
                 }
             }
@@ -341,7 +397,7 @@ struct MenuBarView: View {
             ))
             .labelsHidden()
             .toggleStyle(TempraSwitchToggleStyle())
-            .help(displayedManagementEnabled ? "Management is on" : "Management is off; all apps are resumed")
+            .help(managementToggleHelp)
             .accessibilityLabel("Management")
 
             searchField
@@ -353,9 +409,19 @@ struct MenuBarView: View {
                 ),
                 historyRange: store.preferences.historyRange,
                 appearance: store.preferences.appearance,
+                managementPauseUntil: store.preferences.managementPauseUntil,
+                isMonitorDetached: presentation.isMonitorDetached,
                 onScopeChange: { scope = $0 },
                 onHistoryRangeChange: store.setHistoryRange,
                 onAppearanceChange: store.setAppearance,
+                onPauseManagement: store.pauseManagement,
+                onResumeManagement: store.resumeManagement,
+                onSetMonitorDetached: presentation.setMonitorDetached,
+                onExportDiagnostics: {
+                    Task {
+                        await store.exportDiagnostics()
+                    }
+                },
                 onShowSettings: {
                     presentation.showSettings()
                 },
@@ -367,6 +433,82 @@ struct MenuBarView: View {
         }
         .padding(.horizontal, 11)
         .frame(height: 39)
+    }
+
+    private func panelNotice(
+        symbolName: String,
+        color: Color,
+        message: String,
+        actionTitle: String? = nil,
+        action: (() -> Void)? = nil,
+        dismiss: (() -> Void)? = nil
+    ) -> some View {
+        HStack(alignment: .top, spacing: 7) {
+            Image(systemName: symbolName)
+                .foregroundStyle(color)
+                .accessibilityHidden(true)
+
+            Text(message)
+                .font(TempraTypography.ruleTag)
+                .foregroundStyle(TempraPalette.primaryText)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Spacer(minLength: 4)
+
+            if let actionTitle, let action {
+                Button(actionTitle, action: action)
+                    .buttonStyle(.borderless)
+                    .controlSize(.small)
+            }
+
+            if let dismiss {
+                Button(action: dismiss) {
+                    Image(systemName: "xmark")
+                        .frame(width: 16, height: 16)
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(TempraPalette.secondaryText)
+                .help("Dismiss")
+                .accessibilityLabel("Dismiss")
+            }
+        }
+        .padding(.horizontal, 11)
+        .padding(.vertical, 7)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(color.opacity(0.10))
+        .overlay(alignment: .bottom) {
+            Rectangle()
+                .fill(TempraPalette.separator)
+                .frame(height: 1)
+        }
+    }
+
+    @ViewBuilder
+    private var diagnosticNotice: some View {
+        switch store.diagnosticExportStatus {
+        case .idle:
+            EmptyView()
+        case .exporting:
+            panelNotice(
+                symbolName: "arrow.down.doc.fill",
+                color: TempraPalette.accent,
+                message: "Preparing the diagnostic report…"
+            )
+        case .saved(let url):
+            panelNotice(
+                symbolName: "checkmark.circle.fill",
+                color: TempraPalette.saved,
+                message: "Saved diagnostics as \(url.lastPathComponent).",
+                dismiss: store.dismissDiagnosticExportStatus
+            )
+        case .failed(let message):
+            panelNotice(
+                symbolName: "exclamationmark.triangle.fill",
+                color: TempraPalette.stopped,
+                message: "Diagnostic export failed: \(message)",
+                dismiss: store.dismissDiagnosticExportStatus
+            )
+        }
     }
 
     private var searchField: some View {
@@ -648,18 +790,19 @@ struct MenuBarView: View {
         .buttonStyle(.plain)
     }
 
-    private func managedSection(
-        managedItems: [AppDisplayItem],
-        visibleManagedItems: [AppDisplayItem]
-    ) -> some View {
+    private func managedSection(managedItems: [AppDisplayItem]) -> some View {
         VStack(spacing: 0) {
             HStack(spacing: TempraLayout.processColumnSpacing) {
-                Text(displayedManagementEnabled ? "TAMED PROCESSES" : "MANAGEMENT OFF")
+                Text(managedSectionTitle)
                     .font(TempraTypography.sectionHeading)
                 Spacer(minLength: 4)
-                Text("CPU")
+                Text("EST. CPU")
                     .font(TempraTypography.tableHeader)
                     .frame(width: TempraLayout.averageCPUColumnWidth, alignment: .trailing)
+                    .help(
+                        "Current estimated CPU use prevented while the rule is active. "
+                            + "This value is not a cumulative total."
+                    )
                 Text("EST. W")
                     .font(TempraTypography.tableHeader)
                     .frame(width: TempraLayout.powerColumnWidth, alignment: .trailing)
@@ -677,26 +820,16 @@ struct MenuBarView: View {
             } else {
                 ScrollView(.vertical) {
                     LazyVStack(spacing: 0) {
-                        ForEach(visibleManagedItems) { item in
+                        ForEach(managedItems) { item in
                             managedRow(item)
                         }
                     }
                 }
                 .scrollIndicators(.visible)
                 .frame(
-                    height: CGFloat(min(visibleManagedItems.count, collapsedRuleCount))
+                    height: CGFloat(min(managedItems.count, managedViewportRowCount))
                         * TempraLayout.processRowHeight + 12
                 )
-            }
-
-            if managedItems.count > collapsedRuleCount {
-                showMoreButton(
-                    title: showsAllRules
-                        ? "Show fewer…"
-                        : "Show all tamed processes…"
-                ) {
-                    showsAllRules.toggle()
-                }
             }
         }
     }
@@ -738,19 +871,6 @@ struct MenuBarView: View {
         .padding(.vertical, 15)
     }
 
-    private func showMoreButton(title: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Text(title)
-                .font(TempraTypography.footer)
-                .frame(maxWidth: .infinity)
-                .frame(height: 21)
-                .background(TempraPalette.secondaryControlFill, in: Capsule())
-        }
-        .buttonStyle(.plain)
-        .padding(.horizontal, 28)
-        .padding(.top, 3)
-    }
-
     @ViewBuilder
     private func contextMenu(for item: AppDisplayItem, anchorKey: String) -> some View {
         Button("View Activity Details…") {
@@ -790,8 +910,30 @@ struct MenuBarView: View {
             }
         }
 
+        if item.canControlApplication {
+            Divider()
+
+            Button("Quit") {
+                performApplicationCommand(
+                    .quitGracefully,
+                    item: item,
+                    anchorKey: anchorKey
+                )
+            }
+
+            Button("Relaunch") {
+                performApplicationCommand(
+                    .relaunch,
+                    item: item,
+                    anchorKey: anchorKey
+                )
+            }
+        }
+
         if item.canManageProcess {
             if item.canQuitProcess {
+                Divider()
+
                 Button(item.canControlApplication ? "Force Quit" : "Force Quit Process") {
                     performApplicationCommand(
                         .quit,
@@ -859,15 +1001,21 @@ struct MenuBarView: View {
                 }
 
                 if store.suspensionUntil(for: item.bundleIdentifier) != nil {
-                    Button("End Snooze") {
+                    Button("End Temporary Resume") {
                         store.endSnooze(bundleIdentifier: item.bundleIdentifier)
                     }
                 } else {
-                    Button("Snooze for 15 Minutes") {
-                        store.snooze(bundleIdentifier: item.bundleIdentifier, for: 15 * 60)
+                    Button("Resume for 15 Minutes") {
+                        store.resumeTemporarily(
+                            bundleIdentifier: item.bundleIdentifier,
+                            for: 15 * 60
+                        )
                     }
-                    Button("Snooze for 1 Hour") {
-                        store.snooze(bundleIdentifier: item.bundleIdentifier, for: 60 * 60)
+                    Button("Resume for 1 Hour") {
+                        store.resumeTemporarily(
+                            bundleIdentifier: item.bundleIdentifier,
+                            for: 60 * 60
+                        )
                     }
                 }
 
@@ -936,7 +1084,7 @@ struct MenuBarView: View {
                         }
                     }
                 } label: {
-                    Text(store.preferences.activeProfile?.name ?? "No Active Profile")
+                    Text(profileLabel)
                         .foregroundStyle(TempraPalette.secondaryText)
                 }
                 .menuStyle(.borderlessButton)
@@ -1109,5 +1257,48 @@ struct MenuBarView: View {
 
     private var displayedManagementEnabled: Bool {
         store.isEnabled
+    }
+
+    private var activeManagementPauseUntil: Date? {
+        store.preferences.managementPauseUntil.flatMap {
+            $0 > Date() ? $0 : nil
+        }
+    }
+
+    private var managementToggleHelp: String {
+        if let activeManagementPauseUntil {
+            return "Management is enabled but paused until "
+                + activeManagementPauseUntil.formatted(
+                    date: .omitted,
+                    time: .shortened
+                )
+        }
+        return displayedManagementEnabled
+            ? "Management is on"
+            : "Management is off; all apps are resumed"
+    }
+
+    private var managedSectionTitle: String {
+        if !displayedManagementEnabled { return "MANAGEMENT OFF" }
+        if activeManagementPauseUntil != nil { return "MANAGEMENT PAUSED" }
+        return "TAMED PROCESSES"
+    }
+
+    private var profileLabel: String {
+        guard let profile = store.effectiveManagementProfile else {
+            return "No Active Profile"
+        }
+        return store.automaticProfileID == profile.id
+            ? "Auto: \(profile.name)"
+            : profile.name
+    }
+
+    private func lifecycleFailureMessage(_ result: ProcessRestorationResult) -> String {
+        let processCount = Set(result.failures.flatMap(\.processIdentifiers)).count
+        let appCount = result.failures.count
+        let processUnit = processCount == 1 ? "process" : "processes"
+        let appUnit = appCount == 1 ? "app" : "apps"
+        return "Tempra could not resume \(processCount) \(processUnit) in "
+            + "\(appCount) \(appUnit) during a system transition. Management remains blocked."
     }
 }

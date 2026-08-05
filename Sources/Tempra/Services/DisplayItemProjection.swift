@@ -11,6 +11,9 @@ enum DisplayItemProjection {
         averageCPUByIdentifier: [String: Double],
         savedCPUByIdentifier: [String: Double],
         savedPowerByIdentifier: [String: Double],
+        protectionReasonsByIdentifier:
+            [String: [ProcessIdentity: Set<ProcessProtectionReason>]] = [:],
+        managementPauseUntil: Date? = nil,
         attentionIdentifiers: Set<String>,
         iconCache: AppIconCache
     ) -> [AppDisplayItem] {
@@ -21,6 +24,10 @@ enum DisplayItemProjection {
                 status = .snoozed(suspension.until)
             } else if let rule, !rule.isEnabled || !isEnabled {
                 status = .disabled
+            } else if let rule, rule.hasBehavior,
+                      let managementPauseUntil,
+                      managementPauseUntil > Date() {
+                status = .managementPaused(managementPauseUntil)
             } else {
                 status = app.status
             }
@@ -37,6 +44,10 @@ enum DisplayItemProjection {
                 residentMemoryBytes: app.residentMemoryBytes,
                 processCount: app.processIdentifiers.count,
                 controllableProcessCount: app.processIdentities.count,
+                processSamples: app.processSamples,
+                processProtectionReasons: protectionReasonsByIdentifier[
+                    app.bundleIdentifier
+                ] ?? [:],
                 launchedAt: app.launchedAt,
                 isRunning: true,
                 isFrontmost: app.isFrontmost,

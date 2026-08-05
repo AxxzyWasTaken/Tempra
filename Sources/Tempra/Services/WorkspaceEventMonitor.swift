@@ -1,5 +1,10 @@
 import AppKit
 
+enum ManagementLifecycleSuspension: Hashable, Sendable {
+    case systemSleep
+    case inactiveUserSession
+}
+
 @MainActor
 final class WorkspaceEventMonitor {
     private var observers: [NSObjectProtocol] = []
@@ -7,6 +12,12 @@ final class WorkspaceEventMonitor {
 
     func start(
         onApplicationActivated: @escaping @MainActor @Sendable (String) async -> Void,
+        onWillSuspend: @escaping @MainActor @Sendable (
+            ManagementLifecycleSuspension
+        ) async -> Void,
+        onDidResume: @escaping @MainActor @Sendable (
+            ManagementLifecycleSuspension
+        ) -> Void,
         onChange: @escaping @MainActor @Sendable () -> Void
     ) {
         guard runningApplicationsObservation == nil, observers.isEmpty else { return }
@@ -35,10 +46,51 @@ final class WorkspaceEventMonitor {
             }
         })
 
+        observers.append(workspace.notificationCenter.addObserver(
+            forName: NSWorkspace.willSleepNotification,
+            object: nil,
+            queue: .main
+        ) { _ in
+            Task { @MainActor in
+                await onWillSuspend(.systemSleep)
+            }
+        })
+
+        observers.append(workspace.notificationCenter.addObserver(
+            forName: NSWorkspace.didWakeNotification,
+            object: nil,
+            queue: .main
+        ) { _ in
+            Task { @MainActor in
+                onDidResume(.systemSleep)
+                onChange()
+            }
+        })
+
+        observers.append(workspace.notificationCenter.addObserver(
+            forName: NSWorkspace.sessionDidResignActiveNotification,
+            object: nil,
+            queue: .main
+        ) { _ in
+            Task { @MainActor in
+                await onWillSuspend(.inactiveUserSession)
+            }
+        })
+
+        observers.append(workspace.notificationCenter.addObserver(
+            forName: NSWorkspace.sessionDidBecomeActiveNotification,
+            object: nil,
+            queue: .main
+        ) { _ in
+            Task { @MainActor in
+                onDidResume(.inactiveUserSession)
+                onChange()
+            }
+        })
+
         for name in [
             NSWorkspace.didHideApplicationNotification,
-            NSWorkspace.didUnhideApplicationNotification,
-            NSWorkspace.didWakeNotification
+            NSWorkspace.didUnhideApplicationNotification
         ] {
             observers.append(workspace.notificationCenter.addObserver(
                 forName: name,

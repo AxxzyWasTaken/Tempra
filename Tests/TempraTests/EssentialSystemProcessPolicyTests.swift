@@ -278,7 +278,9 @@ struct BackgroundProcessPolicyTests {
     @Test("Live sampler includes root-owned launchd as monitor-only")
     @MainActor
     func liveRootDaemonVisibility() async {
-        let apps = await ProcessMonitor().sample(includingEssentialSystemProcesses: true)
+        let apps = await ProcessMonitor(
+            audioProcessIdentifiers: { [] }
+        ).sample(includingEssentialSystemProcesses: true)
         let launchdIdentifier = BackgroundProcessPolicy.identifier(
             command: "/sbin/launchd",
             pid: 1

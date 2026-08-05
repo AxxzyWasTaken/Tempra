@@ -11,6 +11,9 @@ extension AppStore {
             averageCPUByIdentifier: runtimeMetrics.averageCPUByIdentifier,
             savedCPUByIdentifier: managementCoordinator.estimatedSavedCPUByIdentifier,
             savedPowerByIdentifier: runtimeMetrics.savedPowerByIdentifier,
+            protectionReasonsByIdentifier: managementCoordinator
+                .protectionReasonsByIdentifier,
+            managementPauseUntil: preferences.managementPauseUntil,
             attentionIdentifiers: attentionIdentifiers,
             iconCache: iconCache
         )
@@ -86,6 +89,18 @@ extension AppStore {
 
     func lastActivity(for bundleIdentifier: String) -> ActivityEvent? {
         activityEvents.first { $0.bundleIdentifier == bundleIdentifier }
+    }
+
+    func appCPUHistory(for bundleIdentifier: String) -> [AppCPUHistorySample] {
+        appCPUHistoryIndicesByIdentifier[bundleIdentifier, default: []].compactMap {
+            appCPUHistorySamples.indices.contains($0)
+                ? appCPUHistorySamples[$0]
+                : nil
+        }
+    }
+
+    func setHistoryFocus(bundleIdentifier: String?) {
+        historyFocusBundleIdentifier = bundleIdentifier
     }
 
     func managementDurations(

@@ -1,3 +1,4 @@
+import Foundation
 import Testing
 @testable import Tempra
 
@@ -54,5 +55,20 @@ struct StatusItemStateTests {
 
         #expect(first.title.hasSuffix("7%"))
         #expect(first == equivalent)
+    }
+
+    @Test("A timed management pause is visible in the status item")
+    func timedPauseStatus() {
+        var preferences = AppPreferences()
+        preferences.managementPauseUntil = Date().addingTimeInterval(60)
+
+        let state = StatusItemState(
+            systemCPU: SystemCPUSnapshot(totalPercent: 42),
+            isEnabled: true,
+            preferences: preferences
+        )
+
+        #expect(state.symbolName == "pause.circle")
+        #expect(state.toolTip.contains("Paused until"))
     }
 }

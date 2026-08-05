@@ -5,6 +5,8 @@ struct ActivityInspectorView: View {
     @ObservedObject var store: AppStore
     let onClose: () -> Void
 
+    @State private var historyRange: CPUHistoryRange = .hour
+
     var body: some View {
         VStack(spacing: 0) {
             titleBar
@@ -21,6 +23,16 @@ struct ActivityInspectorView: View {
                     }
 
                     usageSection
+
+                    Divider()
+                        .overlay(TempraPalette.separator)
+
+                    historySection
+
+                    Divider()
+                        .overlay(TempraPalette.separator)
+
+                    processSection
 
                     Divider()
                         .overlay(TempraPalette.separator)
@@ -64,6 +76,10 @@ struct ActivityInspectorView: View {
 
             Spacer(minLength: 6)
 
+            if item.canControlApplication || item.canQuitProcess {
+                applicationActionsMenu
+            }
+
             Button(action: onClose) {
                 Image(systemName: "xmark")
                     .foregroundStyle(TempraPalette.secondaryText)
@@ -76,6 +92,65 @@ struct ActivityInspectorView: View {
         }
         .padding(.horizontal, 14)
         .frame(height: 49)
+    }
+
+    private var applicationActionsMenu: some View {
+        Menu {
+            if item.canControlApplication {
+                Button("Bring to Front") {
+                    performApplicationCommand(.bringToFront)
+                }
+                if !item.isHidden {
+                    Button("Hide") {
+                        performApplicationCommand(.hide)
+                    }
+                }
+
+                Divider()
+                Button("Quit") {
+                    performApplicationCommand(.quitGracefully)
+                }
+                Button("Relaunch") {
+                    performApplicationCommand(.relaunch)
+                }
+            }
+
+            if item.canQuitProcess {
+                Divider()
+                Button(item.canControlApplication ? "Force Quit" : "Force Quit Process") {
+                    performApplicationCommand(.quit)
+                }
+            }
+
+            if item.rule != nil {
+                Divider()
+                if store.suspensionUntil(for: item.bundleIdentifier) != nil {
+                    Button("End Temporary Resume") {
+                        store.endSnooze(bundleIdentifier: item.bundleIdentifier)
+                    }
+                } else {
+                    Button("Resume for 15 Minutes") {
+                        store.resumeTemporarily(
+                            bundleIdentifier: item.bundleIdentifier,
+                            for: 15 * 60
+                        )
+                    }
+                    Button("Resume for 1 Hour") {
+                        store.resumeTemporarily(
+                            bundleIdentifier: item.bundleIdentifier,
+                            for: 60 * 60
+                        )
+                    }
+                }
+            }
+        } label: {
+            Image(systemName: "ellipsis.circle")
+                .frame(width: 22, height: 22)
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .help("Application Actions")
+        .accessibilityLabel("Application Actions")
     }
 
     private var usageSection: some View {
@@ -94,6 +169,108 @@ struct ActivityInspectorView: View {
                 value: item.cpuPowerText,
                 help: "Approximate processor power attributed by macOS. GPU and other system power are not included."
             )
+        }
+    }
+
+    private var historySection: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            HStack {
+                sectionHeading("CPU History")
+
+                Spacer()
+
+                Picker("History range", selection: $historyRange) {
+                    ForEach(CPUHistoryRange.allCases) { range in
+                        Text(range.menuTitle).tag(range)
+                    }
+                }
+                .labelsHidden()
+                .pickerStyle(.menu)
+                .controlSize(.small)
+                .fixedSize()
+            }
+
+            AppCPUHistoryChartView(
+                samples: store.appCPUHistory(for: item.bundleIdentifier),
+                range: historyRange
+            )
+
+            HStack(spacing: 12) {
+                chartLegend("CPU used", color: TempraPalette.performance)
+                chartLegend("Est. CPU saved", color: TempraPalette.saved)
+            }
+        }
+    }
+
+    private var processSection: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            sectionHeading("Subprocesses")
+
+            if item.processSamples.isEmpty {
+                Text(item.isRunning
+                     ? "Waiting for process details."
+                     : "The app is not running.")
+                    .foregroundStyle(TempraPalette.secondaryText)
+            } else {
+                ForEach(item.processSamples, id: \.identity) { sample in
+                    processDetail(sample)
+                }
+            }
+        }
+    }
+
+    private func processDetail(_ sample: ManagedProcessSample) -> some View {
+        let reasons = item.protectionReasons(for: sample)
+        return VStack(alignment: .leading, spacing: 3) {
+            HStack(alignment: .firstTextBaseline, spacing: 7) {
+                Text("PID \(sample.identity.pid)")
+                    .font(TempraTypography.bodyEmphasized.monospacedDigit())
+
+                Text(sample.isMainProcess ? "Main" : "Helper")
+                    .font(TempraTypography.ruleTag)
+                    .foregroundStyle(TempraPalette.secondaryText)
+
+                Spacer(minLength: 4)
+
+                Text(String(format: "%.1f%%", sample.cpuPercent))
+                    .font(TempraTypography.metricValue)
+            }
+
+            if reasons.isEmpty {
+                Text("No active protection")
+                    .font(TempraTypography.ruleTag)
+                    .foregroundStyle(TempraPalette.tertiaryText)
+            } else {
+                ForEach(reasons, id: \.self) { reason in
+                    Label(reason.title, systemImage: reason.symbolName)
+                        .font(TempraTypography.ruleTag)
+                        .foregroundStyle(TempraPalette.secondaryText)
+                }
+            }
+
+            if sample.identity.requiresPrivilegedControl {
+                Label("Administrator access required", systemImage: "lock.shield")
+                    .font(TempraTypography.ruleTag)
+                    .foregroundStyle(TempraPalette.secondaryText)
+            }
+        }
+        .padding(.vertical, 5)
+        .padding(.horizontal, 7)
+        .background(
+            TempraPalette.secondaryControlFill,
+            in: RoundedRectangle(cornerRadius: 6, style: .continuous)
+        )
+        .accessibilityElement(children: .combine)
+    }
+
+    private func chartLegend(_ title: String, color: Color) -> some View {
+        HStack(spacing: 4) {
+            Capsule()
+                .fill(color)
+                .frame(width: 13, height: 2)
+            Text(title)
+                .font(TempraTypography.ruleTag)
+                .foregroundStyle(TempraPalette.secondaryText)
         }
     }
 
@@ -226,5 +403,11 @@ struct ActivityInspectorView: View {
         if item.isStandaloneProcess { return "Background process" }
         if item.isService { return "Background service" }
         return "Application"
+    }
+
+    private func performApplicationCommand(_ command: ApplicationCommand) {
+        Task {
+            _ = await store.performApplicationCommand(command, for: item)
+        }
     }
 }

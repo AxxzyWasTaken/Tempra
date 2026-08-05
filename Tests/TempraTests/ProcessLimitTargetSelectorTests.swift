@@ -24,6 +24,8 @@ struct ProcessLimitTargetSelectorTests {
         #expect(abs(selection.alwaysRunningCPUPercent - 3.8) < 0.000_001)
         #expect(abs(selection.controlledLimitPercent - 5.2) < 0.000_001)
         #expect(selection.targetIsReachable)
+        #expect(selection.protectionReasons[main.identity] == [.mainProcessLifeline])
+        #expect(selection.protectionReasons[network.identity] == [.networkActivity])
     }
 
     @Test("The smallest sufficient set of expensive workers is selected")
@@ -57,6 +59,9 @@ struct ProcessLimitTargetSelectorTests {
         #expect(selection.controlledProcesses == [establishedWorker.identity])
         #expect(selection.alwaysRunningProcesses.contains(newHelper.identity))
         #expect(!selection.targetIsReachable)
+        #expect(selection.protectionReasons[newHelper.identity] == [
+            .missingCPUMeasurement
+        ])
     }
 
     @Test("A connected single-process app remains limitable")
@@ -176,6 +181,7 @@ struct ProcessLimitTargetSelectorTests {
         #expect(selection.controlledProcesses.isEmpty)
         #expect(selection.alwaysRunningProcesses == [mediaProcess.identity])
         #expect(!selection.targetIsReachable)
+        #expect(selection.protectionReasons[mediaProcess.identity] == [.audioPlayback])
     }
 
     @Test("A process with critical file activity remains running")
@@ -192,6 +198,9 @@ struct ProcessLimitTargetSelectorTests {
         #expect(selection.controlledProcesses == [worker.identity])
         #expect(selection.alwaysRunningProcesses == [downloader.identity])
         #expect(!selection.targetIsReachable)
+        #expect(selection.protectionReasons[downloader.identity]?.contains(
+            .criticalFileActivity
+        ) == true)
     }
 
     @Test("The responsiveness duty floor reports an unreachable exact limit")

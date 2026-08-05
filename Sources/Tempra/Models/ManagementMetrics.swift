@@ -88,6 +88,15 @@ struct CPUHistorySample: Codable, Equatable, Identifiable {
     }
 }
 
+struct AppCPUHistorySample: Codable, Equatable, Identifiable {
+    let bundleIdentifier: String
+    let date: Date
+    let cpuPercent: Double
+    let estimatedSavedCPUPercent: Double
+
+    var id: Date { date }
+}
+
 enum ThermalPressure: String, Codable, Equatable {
     case unknown
     case nominal

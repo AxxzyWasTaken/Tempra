@@ -15,6 +15,8 @@ struct AppDisplayItem: Identifiable {
     let residentMemoryBytes: UInt64?
     let processCount: Int
     let controllableProcessCount: Int
+    let processSamples: [ManagedProcessSample]
+    let processProtectionReasons: [ProcessIdentity: Set<ProcessProtectionReason>]
     let launchedAt: Date?
     let isRunning: Bool
     let isFrontmost: Bool
@@ -42,6 +44,8 @@ struct AppDisplayItem: Identifiable {
         residentMemoryBytes: UInt64? = nil,
         processCount: Int = 0,
         controllableProcessCount: Int = 0,
+        processSamples: [ManagedProcessSample] = [],
+        processProtectionReasons: [ProcessIdentity: Set<ProcessProtectionReason>] = [:],
         launchedAt: Date? = nil,
         isRunning: Bool,
         isFrontmost: Bool,
@@ -69,6 +73,8 @@ struct AppDisplayItem: Identifiable {
         self.residentMemoryBytes = residentMemoryBytes
         self.processCount = processCount
         self.controllableProcessCount = controllableProcessCount
+        self.processSamples = processSamples.sorted { $0.identity.pid < $1.identity.pid }
+        self.processProtectionReasons = processProtectionReasons
         self.launchedAt = launchedAt
         self.isRunning = isRunning
         self.isFrontmost = isFrontmost
@@ -194,5 +200,21 @@ struct AppDisplayItem: Identifiable {
         }
         if isHidden, status == .normal { return "Hidden" }
         return status.label
+    }
+
+    func protectionReasons(
+        for sample: ManagedProcessSample
+    ) -> [ProcessProtectionReason] {
+        var reasons = processProtectionReasons[sample.identity] ?? []
+        if rule?.protectAudio == true, sample.isPlayingAudio {
+            reasons.insert(.audioPlayback)
+        }
+        if sample.networkActivity.isLatencySensitive {
+            reasons.insert(.networkActivity)
+        }
+        if !sample.hasCPUMeasurement {
+            reasons.insert(.missingCPUMeasurement)
+        }
+        return ProcessProtectionReason.allCases.filter(reasons.contains)
     }
 }

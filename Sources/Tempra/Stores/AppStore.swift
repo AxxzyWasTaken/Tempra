@@ -23,11 +23,16 @@ final class AppStore: ObservableObject {
     @Published private(set) var suspensions: [String: RuleSuspension] = [:]
     @Published private(set) var activityEvents: [ActivityEvent] = []
     @Published private(set) var cpuHistorySamples: [CPUHistorySample] = []
+    @Published private(set) var appCPUHistorySamples: [AppCPUHistorySample] = []
     @Published private(set) var systemCPU = SystemCPUSnapshot()
     @Published private(set) var attentionIdentifiers: Set<String> = []
     @Published private(set) var pendingHighCPUAlert: HighCPUAlert?
     @Published private(set) var applicationActionFailure: ApplicationActionFailurePresentation?
     @Published private(set) var isEnabled: Bool
+    @Published private(set) var automaticProfileID: UUID?
+    @Published private(set) var managementContext = ManagementContext.unavailable
+    @Published private(set) var lifecycleRestorationFailure: ProcessRestorationResult?
+    @Published private(set) var diagnosticExportStatus = DiagnosticExportStatus.idle
     @Published private(set) var launchAtLoginError: String?
     @Published private(set) var privilegedControlStatus: PrivilegedControlStatus
     @Published private(set) var isRequestingPrivilegedControl = false
@@ -41,6 +46,8 @@ final class AppStore: ObservableObject {
     private let persistenceErrorHandler: PersistenceErrorHandler
     private let historyStore: AppHistoryStore
     private let suspensionClock: SuspensionExpirationClock
+    private let userIdleMonitor: UserIdleMonitor
+    private let diagnosticExporter: any DiagnosticExporting
     let iconCache: AppIconCache
     let managementLedger: ManagementLedger
     private lazy var monitoringCoordinator = MonitoringCoordinator(
@@ -58,6 +65,14 @@ final class AppStore: ObservableObject {
     private var persistedSuspensions: [String: RuleSuspension]
     private var suspensionExpirationTask: Task<Void, Never>?
     private var suspensionExpirationID: UUID?
+    private var managementPauseExpirationTask: Task<Void, Never>?
+    private var managementPauseExpirationID: UUID?
+    private var lifecycleSuspensions: Set<ManagementLifecycleSuspension> = []
+    private var lifecycleResumeTask: Task<Void, Never>?
+    private var lifecycleResumeID: UUID?
+    private let lifecycleReapplyGracePeriod: TimeInterval = 5
+    var historyFocusBundleIdentifier: String?
+    var appCPUHistoryIndicesByIdentifier: [String: [Int]] = [:]
 
     convenience init(
         persistenceErrorHandler: @escaping PersistenceErrorHandler
@@ -81,6 +96,8 @@ final class AppStore: ObservableObject {
         iconCache: AppIconCache? = nil,
         privilegedHelperManager: PrivilegedHelperManager? = nil,
         suspensionClock: SuspensionExpirationClock = .continuous,
+        userIdleMonitor: UserIdleMonitor = UserIdleMonitor(),
+        diagnosticExporter: (any DiagnosticExporting)? = nil,
         persistenceErrorHandler: @escaping PersistenceErrorHandler
     ) throws {
         let loadedEnabled = try persistence.loadEnabled()
@@ -93,13 +110,19 @@ final class AppStore: ObservableObject {
             try persistence.saveRules(safeLoadedRules)
         }
         var loadedPreferences = try persistence.loadPreferences()
+        if loadedPreferences.managementPauseUntil.map({ $0 <= suspensionClock.now() }) == true {
+            loadedPreferences.managementPauseUntil = nil
+            try persistence.savePreferences(loadedPreferences)
+        }
         let loadedSuspensions = try persistence.loadSuspensions()
         let loadedActivity = try persistence.loadActivity()
         let loadedCPUHistory = try persistence.loadCPUHistory()
+        let loadedAppCPUHistory = try persistence.loadAppCPUHistory()
         let historyStore = AppHistoryStore(
             persistence: persistence,
             activityEvents: loadedActivity,
-            cpuHistorySamples: loadedCPUHistory
+            cpuHistorySamples: loadedCPUHistory,
+            appCPUHistorySamples: loadedAppCPUHistory
         )
         let managementLedger = try ManagementLedger(
             defaults: persistence.defaults,
@@ -116,9 +139,15 @@ final class AppStore: ObservableObject {
         self.persistenceErrorHandler = persistenceErrorHandler
         self.historyStore = historyStore
         self.suspensionClock = suspensionClock
+        self.userIdleMonitor = userIdleMonitor
+        self.diagnosticExporter = diagnosticExporter ?? NativeDiagnosticExporter()
         self.iconCache = iconCache ?? AppIconCache()
         self.managementLedger = managementLedger
         isEnabled = loadedEnabled
+        automaticProfileID = ManagementProfileSelector.automaticProfileID(
+            profiles: loadedPreferences.profiles,
+            context: .unavailable
+        )
         privilegedControlStatus = privilegedHelperManager.status
         rules = safeLoadedRules
         loadedPreferences.launchAtLogin = launchAtLoginController.isEnabled
@@ -126,6 +155,10 @@ final class AppStore: ObservableObject {
         suspensions = loadedSuspensions
         activityEvents = historyStore.activityEvents
         cpuHistorySamples = historyStore.cpuHistorySamples
+        appCPUHistorySamples = historyStore.appCPUHistorySamples
+        appCPUHistoryIndicesByIdentifier = Self.appCPUHistoryIndex(
+            historyStore.appCPUHistorySamples
+        )
         persistedEnabled = loadedEnabled
         persistedRules = safeLoadedRules
         persistedPreferences = loadedPreferences
@@ -146,6 +179,7 @@ final class AppStore: ObservableObject {
             }
         )
         scheduleSuspensionExpiration()
+        scheduleManagementPauseExpiration()
 
         if startsMonitoring {
             workspaceEventMonitor.start(
@@ -153,6 +187,12 @@ final class AppStore: ObservableObject {
                     await self?.managementCoordinator.applicationDidActivate(
                         bundleIdentifier: bundleIdentifier
                     )
+                },
+                onWillSuspend: { [weak self] reason in
+                    await self?.suspendManagement(for: reason)
+                },
+                onDidResume: { [weak self] reason in
+                    self?.resumeManagement(after: reason)
                 },
                 onChange: { [weak self] in
                     self?.refresh()
@@ -278,7 +318,8 @@ final class AppStore: ObservableObject {
         recordActivity(
             bundleIdentifier: bundleIdentifier,
             kind: .snoozed,
-            detail: "Until \(until.formatted(date: .omitted, time: .shortened))"
+            detail: "The rule resumes at "
+                + until.formatted(date: .omitted, time: .shortened)
         )
         scheduleSuspensionExpiration()
         applyRulesToCurrentApps()
@@ -289,6 +330,10 @@ final class AppStore: ObservableObject {
         guard persistSuspensions() else { return }
         scheduleSuspensionExpiration()
         applyRulesToCurrentApps()
+    }
+
+    func resumeTemporarily(bundleIdentifier: String, for duration: TimeInterval) {
+        snooze(bundleIdentifier: bundleIdentifier, for: duration)
     }
 
     func performApplicationCommand(
@@ -417,6 +462,90 @@ final class AppStore: ObservableObject {
         applyRulesToCurrentApps()
     }
 
+    var isManagementPaused: Bool {
+        preferences.managementPauseUntil.map { $0 > suspensionClock.now() } == true
+    }
+
+    var effectiveManagementProfile: ManagementProfile? {
+        if let automaticProfileID,
+           let profile = preferences.profiles.first(where: { $0.id == automaticProfileID }) {
+            return profile
+        }
+        return preferences.activeProfile
+    }
+
+    func pauseManagement(for duration: TimeInterval) {
+        guard !hasBegunShutdown, duration.isFinite, duration > 0 else { return }
+        preferences.managementPauseUntil = suspensionClock.now().addingTimeInterval(duration)
+        guard persistPreferences() else { return }
+        scheduleManagementPauseExpiration()
+        applyRulesToCurrentApps()
+    }
+
+    func resumeManagement() {
+        guard preferences.managementPauseUntil != nil else { return }
+        preferences.managementPauseUntil = nil
+        guard persistPreferences() else { return }
+        scheduleManagementPauseExpiration()
+        applyRulesToCurrentApps()
+    }
+
+    func retryLifecycleRestoration() async {
+        guard !hasBegunShutdown else { return }
+        let result = await managementCoordinator.suspendForSystemTransition()
+        lifecycleRestorationFailure = result.succeeded ? nil : result
+        guard result.succeeded, lifecycleSuspensions.isEmpty else { return }
+        await managementCoordinator.resumeAfterSystemTransition()
+        refresh()
+    }
+
+    func exportDiagnostics() async {
+        guard !hasBegunShutdown, diagnosticExportStatus != .exporting else { return }
+        diagnosticExportStatus = .exporting
+        let signalEvents = await managementCoordinator.recentSignalEvents()
+        let limitMeasurements = await managementCoordinator.recentLimitMeasurements()
+        guard !hasBegunShutdown else {
+            diagnosticExportStatus = .failed(
+                "Tempra started shutting down before it could export diagnostics."
+            )
+            return
+        }
+
+        do {
+            let generatedAt = Date()
+            let report = TempraDiagnosticReport.build(
+                generatedAt: generatedAt,
+                appVersion: diagnosticAppVersion,
+                isEnabled: isEnabled,
+                preferences: preferences,
+                automaticProfileID: automaticProfileID,
+                effectiveProfileID: effectiveManagementProfile?.id,
+                privilegedControl: privilegedControlDiagnosticDescription,
+                lifecycleRestorationFailure: lifecycleRestorationFailure,
+                rules: rules,
+                apps: apps,
+                statuses: managementCoordinator.statuses,
+                protectionReasonsByIdentifier: managementCoordinator
+                    .protectionReasonsByIdentifier,
+                activityEvents: activityEvents,
+                signalEvents: signalEvents,
+                limitMeasurements: limitMeasurements
+            )
+            let data = try report.encodedData()
+            let fileURL = try diagnosticExporter.export(
+                data,
+                suggestedFileName: diagnosticFileName(for: generatedAt)
+            )
+            diagnosticExportStatus = fileURL.map(DiagnosticExportStatus.saved) ?? .idle
+        } catch {
+            diagnosticExportStatus = .failed(error.localizedDescription)
+        }
+    }
+
+    func dismissDiagnosticExportStatus() {
+        diagnosticExportStatus = .idle
+    }
+
     func setHighCPUAlertsEnabled(_ enabled: Bool) {
         preferences.highCPUAlertsEnabled = enabled
         guard persistPreferences() else { return }
@@ -482,6 +611,8 @@ final class AppStore: ObservableObject {
         preferences.profiles.append(profile)
         preferences.activeProfileID = profile.id
         guard persistPreferences() else { return nil }
+        reevaluateAutomaticProfile()
+        configureMonitoringDemand(refreshImmediately: true)
         applyRulesToCurrentApps()
         return profile.id
     }
@@ -512,8 +643,19 @@ final class AppStore: ObservableObject {
             max(0, preferences.profiles[index].delaySeconds),
             5 * 60
         )
+        if let idleAfterMinutes = preferences.profiles[index].activation.idleAfterMinutes {
+            preferences.profiles[index].activation.idleAfterMinutes = min(
+                max(1, idleAfterMinutes),
+                120
+            )
+        }
         guard persistPreferences() else { return }
-        if preferences.activeProfileID == id {
+        let previousAutomaticProfileID = automaticProfileID
+        reevaluateAutomaticProfile()
+        configureMonitoringDemand(refreshImmediately: true)
+        if preferences.activeProfileID == id
+            || previousAutomaticProfileID == id
+            || automaticProfileID == id {
             applyRulesToCurrentApps()
         }
     }
@@ -525,6 +667,8 @@ final class AppStore: ObservableObject {
             preferences.activeProfileID = nil
         }
         guard persistPreferences() else { return }
+        reevaluateAutomaticProfile()
+        configureMonitoringDemand(refreshImmediately: true)
         applyRulesToCurrentApps()
     }
 
@@ -597,7 +741,10 @@ final class AppStore: ObservableObject {
         MonitoringDemand.resolve(
             isPresentationActive: isPresentationActive,
             isContinuousMonitoringEnabled: preferences.continuousMonitoringEnabled,
-            showsCPUUsageInMenuBar: preferences.showsCPUUsageInMenuBar
+            showsCPUUsageInMenuBar: preferences.showsCPUUsageInMenuBar,
+            requiresContextMonitoring: preferences.profiles.contains {
+                $0.activation.isAutomatic
+            }
         )
     }
 
@@ -612,6 +759,7 @@ final class AppStore: ObservableObject {
             pendingHighCPUAlert = nil
             do {
                 try historyStore.persistCPUHistory()
+                try historyStore.persistAppCPUHistory()
             } catch {
                 reportPersistenceError(error)
             }
@@ -649,18 +797,21 @@ final class AppStore: ObservableObject {
     ) {
         guard !hasBegunShutdown else { return }
         var rebuildsDisplayItems = false
-
-        let activeLimitIdentifiers = Set(
-            managementCoordinator.statuses.compactMap { identifier, status in
-                status.isActivelyLimitingCPU ? identifier : nil
-            }
-        )
-        runtimeMetrics.updateBatteryPower(
-            state: sample.batteryPower,
-            activeLimitIdentifiers: activeLimitIdentifiers
+        let automaticProfileChanged = updateManagementContext(
+            batteryPower: sample.batteryPower,
+            userIdleDuration: userIdleMonitor.sample()
         )
 
         if let systemCPU = sample.systemCPU {
+            let activeLimitIdentifiers = Set(
+                managementCoordinator.statuses.compactMap { identifier, status in
+                    status.isActivelyLimitingCPU ? identifier : nil
+                }
+            )
+            runtimeMetrics.updateBatteryPower(
+                state: sample.batteryPower,
+                activeLimitIdentifiers: activeLimitIdentifiers
+            )
             self.systemCPU = systemCPU
         }
         runtimeMetrics.setPowerSupported(sample.powerMetricsSupported)
@@ -695,6 +846,8 @@ final class AppStore: ObservableObject {
 
         if rebuildsDisplayItems {
             rebuildDisplayItems()
+        } else if automaticProfileChanged {
+            applyRulesToCurrentApps()
         }
 
         if sample.systemCPU != nil {
@@ -711,6 +864,12 @@ final class AppStore: ObservableObject {
             suspensionExpirationTask?.cancel()
             suspensionExpirationTask = nil
             suspensionExpirationID = nil
+            managementPauseExpirationTask?.cancel()
+            managementPauseExpirationTask = nil
+            managementPauseExpirationID = nil
+            lifecycleResumeTask?.cancel()
+            lifecycleResumeTask = nil
+            lifecycleResumeID = nil
             isEnabled = false
             do {
                 try managementLedger.shutdown()
@@ -719,6 +878,7 @@ final class AppStore: ObservableObject {
             }
             do {
                 try historyStore.persistCPUHistory()
+                try historyStore.persistAppCPUHistory()
             } catch {
                 reportPersistenceError(error)
             }
@@ -737,8 +897,8 @@ final class AppStore: ObservableObject {
             apps: apps,
             rules: rules,
             suspensions: suspensions,
-            activeProfile: preferences.activeProfile,
-            isEnabled: isEnabled
+            activeProfile: effectiveManagementProfile,
+            isEnabled: isEnabled && !isManagementPaused
         ) { [weak self] processChange in
             guard let self, !hasBegunShutdown else { return }
             if purgeExpiredSuspensions() {
@@ -841,6 +1001,113 @@ final class AppStore: ObservableObject {
         }
     }
 
+    private func scheduleManagementPauseExpiration() {
+        managementPauseExpirationTask?.cancel()
+        managementPauseExpirationTask = nil
+        managementPauseExpirationID = nil
+
+        guard !hasBegunShutdown,
+              let deadline = preferences.managementPauseUntil,
+              deadline > suspensionClock.now() else {
+            return
+        }
+
+        let expirationID = UUID()
+        managementPauseExpirationID = expirationID
+        managementPauseExpirationTask = Task { @MainActor [weak self, suspensionClock] in
+            let reachedDeadline = await suspensionClock.sleepUntil(deadline)
+            guard reachedDeadline, !Task.isCancelled else { return }
+            self?.handleManagementPauseExpiration(id: expirationID)
+        }
+    }
+
+    func suspendManagement(
+        for reason: ManagementLifecycleSuspension
+    ) async {
+        guard !hasBegunShutdown else { return }
+        lifecycleSuspensions.insert(reason)
+        lifecycleResumeTask?.cancel()
+        lifecycleResumeTask = nil
+        lifecycleResumeID = nil
+        let result = await managementCoordinator.suspendForSystemTransition()
+        lifecycleRestorationFailure = result.succeeded ? nil : result
+    }
+
+    func resumeManagement(after reason: ManagementLifecycleSuspension) {
+        guard !hasBegunShutdown else { return }
+        lifecycleSuspensions.remove(reason)
+        guard lifecycleSuspensions.isEmpty,
+              lifecycleRestorationFailure == nil else {
+            return
+        }
+
+        lifecycleResumeTask?.cancel()
+        let resumeID = UUID()
+        lifecycleResumeID = resumeID
+        let deadline = suspensionClock.now().addingTimeInterval(
+            lifecycleReapplyGracePeriod
+        )
+        lifecycleResumeTask = Task { @MainActor [weak self, suspensionClock] in
+            let reachedDeadline = await suspensionClock.sleepUntil(deadline)
+            guard reachedDeadline, !Task.isCancelled else { return }
+            await self?.completeLifecycleResume(id: resumeID)
+        }
+    }
+
+    private func completeLifecycleResume(id: UUID) async {
+        guard lifecycleResumeID == id,
+              lifecycleSuspensions.isEmpty,
+              lifecycleRestorationFailure == nil,
+              !hasBegunShutdown else {
+            return
+        }
+        lifecycleResumeTask = nil
+        lifecycleResumeID = nil
+        await managementCoordinator.resumeAfterSystemTransition()
+        refresh()
+    }
+
+    private func handleManagementPauseExpiration(id: UUID) {
+        guard managementPauseExpirationID == id, !hasBegunShutdown else { return }
+        managementPauseExpirationTask = nil
+        managementPauseExpirationID = nil
+        guard preferences.managementPauseUntil.map({ $0 <= suspensionClock.now() }) == true else {
+            scheduleManagementPauseExpiration()
+            return
+        }
+        preferences.managementPauseUntil = nil
+        guard persistPreferences() else {
+            scheduleManagementPauseExpiration()
+            return
+        }
+        applyRulesToCurrentApps()
+    }
+
+    @discardableResult
+    func updateManagementContext(
+        batteryPower: BatteryPowerState?,
+        userIdleDuration: TimeInterval?
+    ) -> Bool {
+        if let batteryPower {
+            managementContext.powerSource = batteryPower.profilePowerSource
+        }
+        managementContext.userIdleDuration = userIdleDuration.flatMap {
+            $0.isFinite && $0 >= 0 ? $0 : nil
+        }
+        return reevaluateAutomaticProfile()
+    }
+
+    @discardableResult
+    private func reevaluateAutomaticProfile() -> Bool {
+        let selectedID = ManagementProfileSelector.automaticProfileID(
+            profiles: preferences.profiles,
+            context: managementContext
+        )
+        guard selectedID != automaticProfileID else { return false }
+        automaticProfileID = selectedID
+        return true
+    }
+
     private func handleSuspensionExpiration(id: UUID) {
         guard suspensionExpirationID == id, !hasBegunShutdown else { return }
         suspensionExpirationTask = nil
@@ -938,7 +1205,7 @@ final class AppStore: ObservableObject {
         case .unavailable:
             kind = .error
             detail = "Tempra could not manage the process."
-        case .snoozed, .disabled, .notRunning:
+        case .snoozed, .managementPaused, .disabled, .notRunning:
             return
         }
 
@@ -975,6 +1242,17 @@ final class AppStore: ObservableObject {
                 interventionCount: activeManagementCount
             ) {
                 cpuHistorySamples = samples
+            }
+            if includesApplicationMetrics,
+               let samples = try historyStore.recordAppCPUHistory(
+                   apps: apps,
+                   estimatedSavedCPUByIdentifier: managementCoordinator
+                       .estimatedSavedCPUByIdentifier,
+                   prioritizedBundleIdentifiers: Set(rules.keys),
+                   focusedBundleIdentifier: historyFocusBundleIdentifier
+               ) {
+                appCPUHistorySamples = samples
+                appCPUHistoryIndicesByIdentifier = Self.appCPUHistoryIndex(samples)
             }
         } catch {
             reportPersistenceError(error)
@@ -1071,10 +1349,50 @@ final class AppStore: ObservableObject {
             let commandName = switch command {
             case .bringToFront: "bring \(appName) to the front"
             case .hide: "hide \(appName)"
+            case .quitGracefully: "quit \(appName)"
             case .quit: "force quit \(appName)"
+            case .relaunch: "relaunch \(appName)"
             }
             return "macOS did not accept the request to \(commandName)."
         }
+    }
+
+    private var diagnosticAppVersion: String {
+        let shortVersion = Bundle.main.object(
+            forInfoDictionaryKey: "CFBundleShortVersionString"
+        ) as? String ?? "development"
+        let build = Bundle.main.object(
+            forInfoDictionaryKey: "CFBundleVersion"
+        ) as? String
+        return build.map { "\(shortVersion) (\($0))" } ?? shortVersion
+    }
+
+    private var privilegedControlDiagnosticDescription: String {
+        switch privilegedControlStatus {
+        case .notRegistered: "not-registered"
+        case .requiresApproval: "requires-approval"
+        case .enabled: "enabled"
+        case .helperUnavailable: "helper-unavailable"
+        case .unavailable: "unavailable"
+        }
+    }
+
+    private static func appCPUHistoryIndex(
+        _ samples: [AppCPUHistorySample]
+    ) -> [String: [Int]] {
+        samples.indices.reduce(into: [:]) { index, sampleIndex in
+            index[samples[sampleIndex].bundleIdentifier, default: []]
+                .append(sampleIndex)
+        }
+    }
+
+    private func diagnosticFileName(for date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = .current
+        formatter.dateFormat = "yyyy-MM-dd"
+        return "Tempra Diagnostics \(formatter.string(from: date)).json"
     }
 
     private func reportPersistenceError(_ error: Error) {

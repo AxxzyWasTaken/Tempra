@@ -361,32 +361,25 @@ struct BatteryPowerMeasurementTests {
         let source = ReadingSource()
         let monitor = BatteryPowerMonitor(readingProvider: { source.reading })
 
-        source.reading = BatteryElectricalReading(
+        source.reading = .discharging(
             voltageMillivolts: 12_000,
-            amperageMilliamps: -1_000,
-            isExternalPowerConnected: false
+            amperageMilliamps: -1_000
         )
         #expect(monitor.sample() == .discharging(watts: 12))
 
-        source.reading = BatteryElectricalReading(
+        source.reading = .discharging(
             voltageMillivolts: 12_000,
-            amperageMilliamps: -500,
-            isExternalPowerConnected: false
+            amperageMilliamps: -500
         )
         let smoothed = try #require(monitor.sample())
         #expect(smoothed == .discharging(watts: 9))
 
-        source.reading = BatteryElectricalReading(
-            voltageMillivolts: 12_000,
-            amperageMilliamps: 500,
-            isExternalPowerConnected: true
-        )
+        source.reading = .externalPower
         #expect(monitor.sample() == .externalPower)
 
-        source.reading = BatteryElectricalReading(
+        source.reading = .discharging(
             voltageMillivolts: 12_000,
-            amperageMilliamps: .min,
-            isExternalPowerConnected: false
+            amperageMilliamps: .min
         )
         #expect(monitor.sample() == nil)
     }

@@ -19,12 +19,27 @@ struct AppHistoryStoreTests {
                     sample(at: cutoff.addingTimeInterval(-0.001)),
                     sample(at: cutoff),
                 ],
+                appCPUHistorySamples: [
+                    appSample(
+                        identifier: "example.recent",
+                        at: referenceDate.addingTimeInterval(-15)
+                    ),
+                    appSample(
+                        identifier: "example.expired",
+                        at: cutoff.addingTimeInterval(-0.001)
+                    ),
+                    appSample(identifier: "example.cutoff", at: cutoff)
+                ],
                 now: referenceDate
             )
 
             #expect(store.cpuHistorySamples.map(\.date) == [
                 cutoff,
                 referenceDate.addingTimeInterval(-15),
+            ])
+            #expect(store.appCPUHistorySamples.map(\.bundleIdentifier) == [
+                "example.cutoff",
+                "example.recent"
             ])
         }
     }
@@ -236,6 +251,78 @@ struct AppHistoryStoreTests {
         }
     }
 
+    @Test("Per-app history prioritizes the focused and managed applications")
+    func perAppHistoryPrioritizesFocusedAndManagedApps() throws {
+        try withDefaults { defaults in
+            let persistence = AppPersistence(defaults: defaults)
+            let store = AppHistoryStore(
+                persistence: persistence,
+                activityEvents: [],
+                cpuHistorySamples: [],
+                now: referenceDate
+            )
+            let apps = (0..<30).map { index in
+                managedApp(
+                    identifier: "example.\(index)",
+                    cpuPercent: Double(index)
+                )
+            }
+
+            let samples = try #require(try store.recordAppCPUHistory(
+                apps: apps,
+                estimatedSavedCPUByIdentifier: ["example.0": 2],
+                prioritizedBundleIdentifiers: ["example.1"],
+                focusedBundleIdentifier: "example.0",
+                now: referenceDate
+            ))
+
+            #expect(samples.count == 24)
+            #expect(samples.contains { $0.bundleIdentifier == "example.0" })
+            #expect(samples.contains { $0.bundleIdentifier == "example.1" })
+            #expect(samples.first { $0.bundleIdentifier == "example.0" }?
+                .estimatedSavedCPUPercent == 2)
+            #expect(try persistence.loadAppCPUHistory() == samples)
+        }
+    }
+
+    @Test("Per-app history uses a bounded sampling cadence")
+    func perAppHistoryUsesBoundedCadence() throws {
+        try withDefaults { defaults in
+            let store = AppHistoryStore(
+                persistence: AppPersistence(defaults: defaults),
+                activityEvents: [],
+                cpuHistorySamples: [],
+                now: referenceDate
+            )
+            let apps = [managedApp(identifier: "example.app", cpuPercent: 12)]
+
+            _ = try store.recordAppCPUHistory(
+                apps: apps,
+                estimatedSavedCPUByIdentifier: [:],
+                prioritizedBundleIdentifiers: [],
+                focusedBundleIdentifier: nil,
+                now: referenceDate
+            )
+            let early = try store.recordAppCPUHistory(
+                apps: apps,
+                estimatedSavedCPUByIdentifier: [:],
+                prioritizedBundleIdentifiers: [],
+                focusedBundleIdentifier: nil,
+                now: referenceDate.addingTimeInterval(29)
+            )
+            let accepted = try #require(try store.recordAppCPUHistory(
+                apps: apps,
+                estimatedSavedCPUByIdentifier: [:],
+                prioritizedBundleIdentifiers: [],
+                focusedBundleIdentifier: nil,
+                now: referenceDate.addingTimeInterval(30)
+            ))
+
+            #expect(early == nil)
+            #expect(accepted.count == 2)
+        }
+    }
+
     private var systemCPU: SystemCPUSnapshot {
         SystemCPUSnapshot(
             totalPercent: 1,
@@ -256,6 +343,36 @@ struct AppHistoryStoreTests {
             cpuTemperatureCelsius: 70,
             thermalPressure: .nominal,
             interventionCount: 5
+        )
+    }
+
+    private func managedApp(
+        identifier: String,
+        cpuPercent: Double
+    ) -> ManagedApp {
+        ManagedApp(
+            bundleIdentifier: identifier,
+            name: identifier,
+            bundleURL: nil,
+            processIdentifiers: [],
+            cpuPercent: cpuPercent,
+            isFrontmost: false,
+            isHidden: true,
+            isPlayingAudio: false,
+            isSystemProcess: false,
+            status: .normal
+        )
+    }
+
+    private func appSample(
+        identifier: String,
+        at date: Date
+    ) -> AppCPUHistorySample {
+        AppCPUHistorySample(
+            bundleIdentifier: identifier,
+            date: date,
+            cpuPercent: 1,
+            estimatedSavedCPUPercent: 2
         )
     }
 

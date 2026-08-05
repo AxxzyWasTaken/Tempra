@@ -228,6 +228,20 @@ struct MainPanelShape: Shape {
     }
 }
 
+struct MonitorPanelShape: Shape {
+    let isDetached: Bool
+
+    func path(in rect: CGRect) -> Path {
+        if isDetached {
+            return RoundedRectangle(
+                cornerRadius: TempraLayout.panelCornerRadius,
+                style: .continuous
+            ).path(in: rect)
+        }
+        return MainPanelShape().path(in: rect)
+    }
+}
+
 struct InspectorPanelShape: Shape {
     func path(in rect: CGRect) -> Path {
         let radius = min(TempraLayout.panelCornerRadius, rect.height / 2)

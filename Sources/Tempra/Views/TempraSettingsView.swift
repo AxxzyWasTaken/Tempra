@@ -197,85 +197,102 @@ struct TempraSettingsView: View {
     }
 
     private var controlSettings: some View {
-        VStack(alignment: .leading, spacing: 13) {
-            Toggle("Enable automatic app management", isOn: Binding(
-                get: { store.isEnabled },
-                set: { enabled in store.setEnabled(enabled) }
-            ))
-            .toggleStyle(.checkbox)
+        ScrollView(.vertical) {
+            VStack(alignment: .leading, spacing: 13) {
+                Toggle("Enable automatic app management", isOn: Binding(
+                    get: { store.isEnabled },
+                    set: { enabled in store.setEnabled(enabled) }
+                ))
+                .toggleStyle(.checkbox)
 
-            Text(store.isEnabled
-                 ? "Tempra is applying enabled rules to background apps."
-                 : "All processes controlled by Tempra have been resumed.")
-                .font(.system(size: 11.5))
-                .foregroundStyle(store.isEnabled
-                                 ? TempraPalette.secondaryText
-                                 : TempraPalette.waiting)
-
-            Divider()
-                .overlay(TempraPalette.separator)
-
-            HStack {
-                Text("Profiles")
-                    .font(.system(size: 13, weight: .semibold))
-
-                Spacer()
-
-                Button {
-                    profileNameDraft = ""
-                    showsNewProfileAlert = true
-                } label: {
-                    Image(systemName: "plus")
-                }
-                .help("Create Profile")
-
-                Button {
-                    guard let profile = store.preferences.activeProfile else { return }
-                    profileNameDraft = profile.name
-                    renameProfileID = profile.id
-                    showsRenameProfileAlert = true
-                } label: {
-                    Image(systemName: "pencil")
-                }
-                .disabled(store.preferences.activeProfile == nil)
-                .help("Rename Active Profile")
-
-                Button {
-                    profilePendingDeletion = store.preferences.activeProfile
-                } label: {
-                    Image(systemName: "trash")
-                }
-                .disabled(store.preferences.activeProfile == nil)
-                .help("Delete Active Profile")
-            }
-            .buttonStyle(.borderless)
-
-            settingsPickerRow("Active profile") {
-                Picker("", selection: Binding(
-                    get: { store.preferences.activeProfileID },
-                    set: { id in store.setActiveManagementProfile(id) }
-                )) {
-                    Text("No Active Profile").tag(nil as UUID?)
-                    ForEach(store.preferences.profiles) { profile in
-                        Text(profile.name).tag(profile.id as UUID?)
-                    }
-                }
-                .labelsHidden()
-                .frame(width: 180)
-            }
-
-            if let profile = store.preferences.activeProfile {
-                profileEditor(profile)
-            } else {
-                Text(store.preferences.profiles.isEmpty
-                     ? "Create a profile to adjust saved app rules for a particular workflow."
-                     : "Choose a profile to edit and apply it.")
+                Text(store.isEnabled
+                     ? "Tempra is applying enabled rules to background apps."
+                     : "All processes controlled by Tempra have been resumed.")
                     .font(.system(size: 11.5))
-                    .foregroundStyle(TempraPalette.secondaryText)
+                    .foregroundStyle(store.isEnabled
+                                     ? TempraPalette.secondaryText
+                                     : TempraPalette.waiting)
+
+                Divider()
+                    .overlay(TempraPalette.separator)
+
+                HStack {
+                    Text("Profiles")
+                        .font(.system(size: 13, weight: .semibold))
+
+                    Spacer()
+
+                    Button {
+                        profileNameDraft = ""
+                        showsNewProfileAlert = true
+                    } label: {
+                        Image(systemName: "plus")
+                    }
+                    .help("Create Profile")
+
+                    Button {
+                        guard let profile = store.preferences.activeProfile else { return }
+                        profileNameDraft = profile.name
+                        renameProfileID = profile.id
+                        showsRenameProfileAlert = true
+                    } label: {
+                        Image(systemName: "pencil")
+                    }
+                    .disabled(store.preferences.activeProfile == nil)
+                    .help("Rename Active Profile")
+
+                    Button {
+                        profilePendingDeletion = store.preferences.activeProfile
+                    } label: {
+                        Image(systemName: "trash")
+                    }
+                    .disabled(store.preferences.activeProfile == nil)
+                    .help("Delete Active Profile")
+                }
+                .buttonStyle(.borderless)
+
+                settingsPickerRow("Active profile") {
+                    Picker("", selection: Binding(
+                        get: { store.preferences.activeProfileID },
+                        set: { id in store.setActiveManagementProfile(id) }
+                    )) {
+                        Text("No Active Profile").tag(nil as UUID?)
+                        ForEach(store.preferences.profiles) { profile in
+                            Text(profile.name).tag(profile.id as UUID?)
+                        }
+                    }
+                    .labelsHidden()
+                    .frame(width: 180)
+                }
+
+                if let automaticProfileID = store.automaticProfileID,
+                   let automaticProfile = store.preferences.profiles.first(
+                    where: { $0.id == automaticProfileID }
+                   ) {
+                    Label(
+                        "Automatic conditions selected \(automaticProfile.name).",
+                        systemImage: "bolt.fill"
+                    )
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(TempraPalette.accent)
                     .fixedSize(horizontal: false, vertical: true)
+                }
+
+                if let profile = store.preferences.activeProfile {
+                    profileEditor(profile)
+                } else {
+                    Text(store.preferences.profiles.isEmpty
+                         ? "Create a profile to adjust saved app rules for a particular workflow."
+                         : "Choose a profile to edit and apply it.")
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(TempraPalette.secondaryText)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
+            .padding(.horizontal, 24)
+            .padding(.vertical, 21)
+            .frame(maxWidth: .infinity, alignment: .topLeading)
         }
-        .settingsPane()
     }
 
     private func profileEditor(_ profile: ManagementProfile) -> some View {
@@ -329,6 +346,47 @@ struct TempraSettingsView: View {
                         .labelsHidden()
                         .frame(width: 92)
                     }
+                }
+            }
+
+            Divider()
+                .overlay(TempraPalette.separator)
+
+            Text("Automatic Activation")
+                .font(.system(size: 12, weight: .semibold))
+
+            settingsPickerRow("Power source") {
+                Picker("", selection: profileBinding(
+                    profile,
+                    keyPath: \.activation.powerCondition
+                )) {
+                    ForEach(ProfilePowerCondition.allCases) { condition in
+                        Text(condition.title).tag(condition)
+                    }
+                }
+                .labelsHidden()
+                .frame(width: 180)
+            }
+
+            Toggle(
+                "Activate after user inactivity",
+                isOn: profileIdleActivationBinding(profile)
+            )
+            .toggleStyle(.checkbox)
+
+            if profile.activation.idleAfterMinutes != nil {
+                HStack {
+                    Spacer()
+                    Stepper(
+                        value: profileIdleMinutesBinding(profile),
+                        in: 1...120,
+                        step: 1
+                    ) {
+                        Text("\(Int(profile.activation.idleAfterMinutes ?? 15)) minutes")
+                            .monospacedDigit()
+                            .frame(width: 86, alignment: .trailing)
+                    }
+                    .fixedSize()
                 }
             }
 
@@ -570,7 +628,56 @@ struct TempraSettingsView: View {
         case .minimum:
             "start delays of at least \(AppRule.delayTitle(profile.delaySeconds).lowercased())"
         }
-        return "Uses \(limitText) and \(delayText)."
+        let activationText: String
+        switch (
+            profile.activation.powerCondition,
+            profile.activation.idleAfterMinutes
+        ) {
+        case (.any, nil):
+            activationText = "Select this profile manually"
+        case let (.any, idleMinutes?):
+            activationText = "Activates after \(Int(idleMinutes)) minutes of inactivity"
+        case let (powerCondition, nil):
+            activationText = "Activates \(powerCondition.title.lowercased())"
+        case let (powerCondition, idleMinutes?):
+            activationText = "Activates \(powerCondition.title.lowercased()) after "
+                + "\(Int(idleMinutes)) minutes of inactivity"
+        }
+        return "Uses \(limitText) and \(delayText). \(activationText)."
+    }
+
+    private func profileIdleActivationBinding(
+        _ profile: ManagementProfile
+    ) -> Binding<Bool> {
+        Binding(
+            get: {
+                store.preferences.profiles.first { $0.id == profile.id }?
+                    .activation.idleAfterMinutes != nil
+            },
+            set: { isEnabled in
+                store.updateManagementProfile(id: profile.id) {
+                    $0.activation.idleAfterMinutes = isEnabled
+                        ? ($0.activation.idleAfterMinutes ?? 15)
+                        : nil
+                }
+            }
+        )
+    }
+
+    private func profileIdleMinutesBinding(
+        _ profile: ManagementProfile
+    ) -> Binding<Double> {
+        Binding(
+            get: {
+                store.preferences.profiles.first { $0.id == profile.id }?
+                    .activation.idleAfterMinutes ?? 15
+            },
+            set: { minutes in
+                store.updateManagementProfile(id: profile.id) {
+                    $0.activation.idleAfterMinutes = minutes
+                }
+            }
+        )
     }
 
     private func profileBinding<Value>(

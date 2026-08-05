@@ -141,6 +141,24 @@ struct AppPersistence {
         try encode(samples, forKey: Keys.cpuHistory, name: "CPU history")
     }
 
+    func loadAppCPUHistory() throws -> [AppCPUHistorySample] {
+        let samples: [AppCPUHistorySample] = try decode(
+            forKey: Keys.appCPUHistory,
+            name: "app CPU history"
+        ) ?? []
+        try validateAppCPUHistory(samples)
+        return samples
+    }
+
+    func saveAppCPUHistory(_ samples: [AppCPUHistorySample]) throws {
+        try validateAppCPUHistory(samples)
+        try encode(
+            samples,
+            forKey: Keys.appCPUHistory,
+            name: "app CPU history"
+        )
+    }
+
     private func decode<Value: Decodable>(
         forKey key: String,
         name: String
@@ -237,6 +255,19 @@ struct AppPersistence {
                   profile.delaySeconds <= 5 * 60 else {
                 throw invalid("preferences", "a profile limit or delay is outside its allowed range")
             }
+            if let idleAfterMinutes = profile.activation.idleAfterMinutes {
+                try validateFinite(
+                    idleAfterMinutes,
+                    field: "profile idle duration",
+                    in: "preferences"
+                )
+                guard (1...120).contains(idleAfterMinutes) else {
+                    throw invalid(
+                        "preferences",
+                        "a profile idle duration is outside its allowed range"
+                    )
+                }
+            }
         }
         guard preferences.ignoredHighCPUAlertBundleIdentifiers.count <= 10_000 else {
             throw invalid("preferences", "there are more than 10,000 ignored applications")
@@ -304,6 +335,33 @@ struct AppPersistence {
         }
     }
 
+    private func validateAppCPUHistory(_ samples: [AppCPUHistorySample]) throws {
+        guard samples.count <= 75_000 else {
+            throw invalid("app CPU history", "there are more than 75,000 samples")
+        }
+        var datesByIdentifier: [String: Set<Date>] = [:]
+        for sample in samples {
+            try validateText(
+                sample.bundleIdentifier,
+                field: "bundle identifier",
+                in: "app CPU history"
+            )
+            guard datesByIdentifier[
+                sample.bundleIdentifier,
+                default: []
+            ].insert(sample.date).inserted,
+                  sample.cpuPercent.isFinite,
+                  sample.cpuPercent >= 0,
+                  sample.estimatedSavedCPUPercent.isFinite,
+                  sample.estimatedSavedCPUPercent >= 0 else {
+                throw invalid(
+                    "app CPU history",
+                    "a sample is duplicated or contains an invalid measurement"
+                )
+            }
+        }
+    }
+
     private func validateOptionalMinutes(_ value: Double?, field: String) throws {
         guard let value else { return }
         try validateFinite(value, field: field, in: "app rules")
@@ -341,5 +399,6 @@ struct AppPersistence {
         static let suspensions = "temper.suspensions.v1"
         static let activity = "temper.activity.v1"
         static let cpuHistory = "temper.cpuHistory.v3"
+        static let appCPUHistory = "temper.appCPUHistory.v1"
     }
 }

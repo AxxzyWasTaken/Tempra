@@ -14,7 +14,7 @@ private func dotAppearance(
     }
 
     switch item.status {
-    case .disabled:
+    case .disabled, .managementPaused:
         return TempraDotAppearance(color: TempraPalette.running, fill: .none)
     case .waiting:
         return TempraDotAppearance(
