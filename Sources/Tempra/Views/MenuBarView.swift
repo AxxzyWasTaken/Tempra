@@ -266,6 +266,26 @@ struct MenuBarView: View {
         VStack(spacing: 0) {
             header
 
+            if presentation.showsPrivilegedAccessOnboarding,
+               !store.privilegedControlStatus.isEnabled {
+                PrivilegedAccessControl(
+                    store: store,
+                    context: .onboarding,
+                    onDismiss: presentation.dismissPrivilegedAccessOnboarding
+                )
+                .padding(10)
+                .background(
+                    TempraPalette.secondaryControlFill,
+                    in: RoundedRectangle(cornerRadius: 9)
+                )
+                .overlay {
+                    RoundedRectangle(cornerRadius: 9)
+                        .stroke(TempraPalette.border.opacity(0.7), lineWidth: 1)
+                }
+                .padding(.horizontal, 11)
+                .padding(.bottom, 7)
+            }
+
             summaryMetrics
                 .fixedSize(horizontal: false, vertical: true)
 
@@ -793,21 +813,28 @@ struct MenuBarView: View {
                         limitPercent: 50,
                         delaySeconds: 0
                     )
-                    requestPrivilegedControlIfNeeded(for: item)
+                    requestPrivilegedControlIfNeeded(
+                        for: item,
+                        requiresPrivateQoS: item.rule?.runOnEfficiencyCores == true
+                    )
                 }
             }
 
             Button(item.rule?.runOnEfficiencyCores == true
                    ? "Stop Using Power-Saving Cores"
                    : "Run on Power-Saving Cores") {
+                let enablesPrivateQoS = item.rule?.runOnEfficiencyCores != true
                 store.setEfficiencyCoreScheduling(
                     bundleIdentifier: item.bundleIdentifier,
                     displayName: item.name,
                     applicationURL: item.applicationURL,
-                    enabled: item.rule?.runOnEfficiencyCores != true,
+                    enabled: enablesPrivateQoS,
                     delaySeconds: 0
                 )
-                requestPrivilegedControlIfNeeded(for: item)
+                requestPrivilegedControlIfNeeded(
+                    for: item,
+                    requiresPrivateQoS: enablesPrivateQoS
+                )
             }
 
             Button("Pause after 30 seconds") {
@@ -854,8 +881,11 @@ struct MenuBarView: View {
         }
     }
 
-    private func requestPrivilegedControlIfNeeded(for item: AppDisplayItem) {
-        guard item.requiresPrivilegedControl,
+    private func requestPrivilegedControlIfNeeded(
+        for item: AppDisplayItem,
+        requiresPrivateQoS: Bool = false
+    ) {
+        guard (item.requiresPrivilegedControl || requiresPrivateQoS),
               !store.privilegedControlStatus.isEnabled else { return }
         Task {
             _ = await store.requestPrivilegedControl()

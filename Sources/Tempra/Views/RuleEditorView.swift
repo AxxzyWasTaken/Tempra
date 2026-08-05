@@ -55,7 +55,9 @@ struct RuleEditorView: View {
 
                     idleControls
 
-                    if item.isStandaloneProcess || item.requiresPrivilegedControl {
+                    if item.isStandaloneProcess
+                        || item.requiresPrivilegedControl
+                        || draft.runOnEfficiencyCores {
                         Divider()
                             .overlay(TempraPalette.separator)
 
@@ -302,7 +304,7 @@ struct RuleEditorView: View {
                 privilegedAccessNotice
             }
             .fixedSize(horizontal: false, vertical: true)
-        } else if item.requiresPrivilegedControl {
+        } else if item.requiresPrivilegedControl || draft.runOnEfficiencyCores {
             privilegedAccessNotice
         } else {
             Text("CPU limit, pause, priority, and force-quit rules work for this process. Hide requires a macOS application.")
@@ -357,6 +359,11 @@ struct RuleEditorView: View {
                 draft.runOnEfficiencyCores = enabled
                 if enabled, draft.action == .pause {
                     draft.action = .none
+                }
+                if enabled, !store.privilegedControlStatus.isEnabled {
+                    Task {
+                        _ = await store.requestPrivilegedControl()
+                    }
                 }
             }
         )) {

@@ -149,6 +149,17 @@ struct UIDerivationTests {
         #expect(presentation.processSort == .currentDescending)
     }
 
+    @Test("Administrator access onboarding can be shown and dismissed")
+    func privilegedAccessOnboardingPresentation() {
+        let presentation = MenuPanelPresentation()
+
+        #expect(!presentation.showsPrivilegedAccessOnboarding)
+        presentation.showPrivilegedAccessOnboarding()
+        #expect(presentation.showsPrivilegedAccessOnboarding)
+        presentation.dismissPrivilegedAccessOnboarding()
+        #expect(!presentation.showsPrivilegedAccessOnboarding)
+    }
+
     @Test("Managed items are derived once with saved-CPU ordering and collapse limits")
     func managedItemOrdering() {
         let collapsed = MenuBarItemLists(

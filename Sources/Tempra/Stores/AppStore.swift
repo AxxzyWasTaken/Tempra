@@ -30,6 +30,7 @@ final class AppStore: ObservableObject {
     @Published private(set) var isEnabled: Bool
     @Published private(set) var launchAtLoginError: String?
     @Published private(set) var privilegedControlStatus: PrivilegedControlStatus
+    @Published private(set) var isRequestingPrivilegedControl = false
     @Published var displayItems: [AppDisplayItem] = []
 
     let managementCoordinator: ProcessManagementCoordinator
@@ -376,12 +377,26 @@ final class AppStore: ObservableObject {
     }
 
     func requestPrivilegedControl() async -> PrivilegedControlStatus {
+        guard !isRequestingPrivilegedControl else { return privilegedControlStatus }
+        isRequestingPrivilegedControl = true
+        defer { isRequestingPrivilegedControl = false }
         let status = await privilegedHelperManager.requestEnable()
         privilegedControlStatus = status
         if status.isEnabled {
             refresh()
         }
         return status
+    }
+
+    var shouldPresentPrivilegedAccessOnboarding: Bool {
+        !preferences.hasPresentedPrivilegedAccessOnboarding
+            && !privilegedControlStatus.isEnabled
+    }
+
+    func markPrivilegedAccessOnboardingPresented() {
+        guard !preferences.hasPresentedPrivilegedAccessOnboarding else { return }
+        preferences.hasPresentedPrivilegedAccessOnboarding = true
+        persistPreferences()
     }
 
     func openPrivilegedControlSettings() {

@@ -75,15 +75,11 @@ struct LiveProcessSystemController: ProcessSystemControlling {
     }
 
     func setBackgroundPriority(_ processes: Set<ProcessIdentity>) async -> ProcessOperationResult {
-        apply(processes) {
-            setpriority(PRIO_DARWIN_PROCESS, id_t($0), PRIO_DARWIN_BG)
-        }
+        ProcessOperationResult(failed: processes)
     }
 
     func restorePriority(_ processes: Set<ProcessIdentity>) async -> ProcessOperationResult {
-        apply(processes) {
-            setpriority(PRIO_DARWIN_PROCESS, id_t($0), 0)
-        }
+        ProcessOperationResult(failed: processes)
     }
 
     func terminate(_ processes: Set<ProcessIdentity>) async -> ProcessOperationResult {
@@ -223,17 +219,13 @@ struct RoutedProcessSystemController: ProcessSystemControlling {
     func setBackgroundPriority(
         _ processes: Set<ProcessIdentity>
     ) async -> ProcessOperationResult {
-        await apply(.setBackgroundPriority, to: processes) {
-            await local.setBackgroundPriority($0)
-        }
+        await applyPrivileged(.setBackgroundPriority, to: processes)
     }
 
     func restorePriority(
         _ processes: Set<ProcessIdentity>
     ) async -> ProcessOperationResult {
-        await apply(.restorePriority, to: processes) {
-            await local.restorePriority($0)
-        }
+        await applyPrivileged(.restorePriority, to: processes)
     }
 
     func terminate(_ processes: Set<ProcessIdentity>) async -> ProcessOperationResult {
@@ -262,6 +254,18 @@ struct RoutedProcessSystemController: ProcessSystemControlling {
             result.failed.formUnion(privilegedProcesses)
         }
         return result
+    }
+
+    private func applyPrivileged(
+        _ action: PrivilegedProcessAction,
+        to processes: Set<ProcessIdentity>
+    ) async -> ProcessOperationResult {
+        guard !processes.isEmpty else { return ProcessOperationResult() }
+        do {
+            return try await privileged.perform(action, processes: processes)
+        } catch {
+            return ProcessOperationResult(failed: processes)
+        }
     }
 
     private func partition(

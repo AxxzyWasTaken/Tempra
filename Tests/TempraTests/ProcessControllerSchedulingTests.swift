@@ -1146,10 +1146,11 @@ struct ProcessControllerSchedulingTests {
     func combinedLimitUsesPowerSavingScheduling() async {
         let manualClock = ManualProcessControlClock()
         let system = RecordingProcessSystem()
+        let watchdog = RecordingProcessCrashWatchdog()
         let controlledProcess = process(207)
         let controller = ProcessController(
             system: system,
-            crashWatchdog: RecordingProcessCrashWatchdog(),
+            crashWatchdog: watchdog,
             frontmostProvider: { nil },
             clock: manualClock.clock
         )
@@ -1178,8 +1179,33 @@ struct ProcessControllerSchedulingTests {
         #expect(!system.didAttemptToRestorePriority(controlledProcess))
         #expect(snapshot.statuses[identifier] == .limited(10))
 
+        system.failResume(for: controlledProcess, attempts: 1)
+        let synchronizationCountBeforeStop = watchdog.synchronizationCallCount
         manualClock.advance(by: .milliseconds(10))
         #expect(await eventually { system.didAttemptToStop(controlledProcess) })
+        #expect(await eventually {
+            watchdog.synchronizationCallCount > synchronizationCountBeforeStop
+        })
+
+        system.clearOperationHistory()
+        let foreground = await controller.update(
+            targets: [target(
+                processIdentities: [controlledProcess],
+                launchedAt: oldLaunchDate,
+                cpuPercent: 100,
+                isFrontmost: true,
+                isHidden: false,
+                windowVisibility: .visible
+            )],
+            rules: [identifier: rule],
+            isEnabled: true,
+            revision: 2
+        )
+
+        #expect(foreground.statuses[identifier] == .normal)
+        #expect(system.didAttemptToRestorePriority(controlledProcess))
+        #expect(system.didAttemptToResume(controlledProcess))
+        #expect(system.priorityRestorePrecedesResume(for: controlledProcess))
 
         await controller.shutdown()
         #expect(system.didAttemptToRestorePriority(controlledProcess))
@@ -2819,7 +2845,16 @@ private final class RecordingProcessCrashWatchdog: ProcessCrashWatchdogControlli
 }
 
 private final class RecordingProcessSystem: ProcessSystemControlling, @unchecked Sendable {
+    private enum RecordedOperation {
+        case stop(Set<ProcessIdentity>)
+        case resume(Set<ProcessIdentity>)
+        case setBackgroundPriority(Set<ProcessIdentity>)
+        case restorePriority(Set<ProcessIdentity>)
+        case terminate(Set<ProcessIdentity>)
+    }
+
     private let lock = NSLock()
+    private var operationHistory: [RecordedOperation] = []
     private var stopAttempts: [Set<ProcessIdentity>] = []
     private var stopAutomaticResumeIntervals: [ProcessIdentity: TimeInterval] = [:]
     private var resumeAttempts: [Set<ProcessIdentity>] = []
@@ -2866,6 +2901,31 @@ private final class RecordingProcessSystem: ProcessSystemControlling, @unchecked
 
     func didAttemptToTerminate(_ process: ProcessIdentity) -> Bool {
         withLock { terminationAttempts.contains { $0.contains(process) } }
+    }
+
+    func clearOperationHistory() {
+        withLock {
+            operationHistory.removeAll()
+        }
+    }
+
+    func priorityRestorePrecedesResume(for process: ProcessIdentity) -> Bool {
+        withLock {
+            let restoreIndex = operationHistory.firstIndex {
+                if case .restorePriority(let processes) = $0 {
+                    return processes.contains(process)
+                }
+                return false
+            }
+            let resumeIndex = operationHistory.firstIndex {
+                if case .resume(let processes) = $0 {
+                    return processes.contains(process)
+                }
+                return false
+            }
+            guard let restoreIndex, let resumeIndex else { return false }
+            return restoreIndex < resumeIndex
+        }
     }
 
     func failNextStop(for process: ProcessIdentity) {
@@ -2929,6 +2989,7 @@ private final class RecordingProcessSystem: ProcessSystemControlling, @unchecked
         automaticResumeAfter: TimeInterval?
     ) -> ProcessOperationResult {
         withLock {
+            operationHistory.append(.stop(processes))
             stopAttempts.append(processes)
             if let automaticResumeAfter {
                 for process in processes {
@@ -2951,6 +3012,7 @@ private final class RecordingProcessSystem: ProcessSystemControlling, @unchecked
 
     func resume(_ processes: Set<ProcessIdentity>) -> ProcessOperationResult {
         withLock {
+            operationHistory.append(.resume(processes))
             resumeAttempts.append(processes)
             var result = ProcessOperationResult()
             for process in processes {
@@ -2968,6 +3030,7 @@ private final class RecordingProcessSystem: ProcessSystemControlling, @unchecked
 
     func setBackgroundPriority(_ processes: Set<ProcessIdentity>) -> ProcessOperationResult {
         withLock {
+            operationHistory.append(.setBackgroundPriority(processes))
             backgroundPriorityAttempts.append(processes)
             return ProcessOperationResult(applied: processes)
         }
@@ -2975,6 +3038,7 @@ private final class RecordingProcessSystem: ProcessSystemControlling, @unchecked
 
     func restorePriority(_ processes: Set<ProcessIdentity>) -> ProcessOperationResult {
         withLock {
+            operationHistory.append(.restorePriority(processes))
             priorityRestoreAttempts.append(processes)
             var result = ProcessOperationResult()
             for process in processes {
@@ -2992,6 +3056,7 @@ private final class RecordingProcessSystem: ProcessSystemControlling, @unchecked
 
     func terminate(_ processes: Set<ProcessIdentity>) -> ProcessOperationResult {
         withLock {
+            operationHistory.append(.terminate(processes))
             terminationAttempts.append(processes)
             return ProcessOperationResult(applied: processes)
         }

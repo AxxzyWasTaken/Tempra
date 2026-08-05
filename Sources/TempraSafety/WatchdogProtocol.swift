@@ -28,6 +28,19 @@ public struct WatchdogResumeDeadline: Codable, Equatable, Sendable {
     }
 }
 
+public struct WatchdogPrivateQoSState: Codable, Equatable, Sendable {
+    public let process: WatchdogProcessIdentity
+    public let originalPolicy: PrivateQoSPolicyState
+
+    public init(
+        process: WatchdogProcessIdentity,
+        originalPolicy: PrivateQoSPolicyState
+    ) {
+        self.process = process
+        self.originalPolicy = originalPolicy
+    }
+}
+
 public struct WatchdogCommand: Codable, Equatable, Sendable {
     public enum Action: String, Codable, Sendable {
         case update

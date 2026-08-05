@@ -930,28 +930,37 @@ actor ProcessController {
             limitDeadlines.remove(identifier: identifier)
             limitRuntimes.removeValue(forKey: identifier)
             pausedBaselineCPU.removeValue(forKey: identifier)
-            guard await resumeStoppedProcesses(for: identifier, attempts: restorationAttempts) else {
+            let priorityPrepared: Bool
+            if rule.usesEfficiencyCoreScheduling {
+                priorityPrepared = await applyBackgroundPriority(to: app)
+            } else {
+                priorityPrepared = await restoreBackgroundPriority(
+                    for: identifier,
+                    attempts: restorationAttempts
+                )
+            }
+            guard workIsCurrent else { return }
+            let resumed = await resumeStoppedProcesses(
+                for: identifier,
+                attempts: restorationAttempts
+            )
+            guard resumed else {
                 await markUnavailable(identifier, detail: "Tempra could not resume every process.")
                 return
             }
             guard workIsCurrent else { return }
-            if rule.usesEfficiencyCoreScheduling {
-                if await applyBackgroundPriority(to: app) {
-                    guard workIsCurrent else { return }
-                    await setStatus(.energyEfficient, for: identifier)
-                }
-            } else if await restoreBackgroundPriority(
-                for: identifier,
-                attempts: restorationAttempts
-            ) {
-                guard workIsCurrent else { return }
-                await setStatus(.normal, for: identifier)
-            } else {
+            guard priorityPrepared else {
+                if rule.usesEfficiencyCoreScheduling { return }
                 await markUnavailable(
                     identifier,
                     detail: "Tempra could not restore normal process priority."
                 )
+                return
             }
+            await setStatus(
+                rule.usesEfficiencyCoreScheduling ? .energyEfficient : .normal,
+                for: identifier
+            )
         case .pause:
             limitDeadlines.remove(identifier: identifier)
             limitRuntimes.removeValue(forKey: identifier)
@@ -2293,15 +2302,15 @@ actor ProcessController {
         attempts: Int,
         resumeReason: ProcessControlSignalReason = .restoration
     ) async -> Bool {
+        let priorityRestored = await restoreBackgroundPriority(
+            for: identifier,
+            attempts: attempts
+        )
+        guard workIsCurrent else { return false }
         let resumed = await restoreDisruptiveControl(
             identifier: identifier,
             attempts: attempts,
             resumeReason: resumeReason
-        )
-        guard workIsCurrent else { return false }
-        let priorityRestored = await restoreBackgroundPriority(
-            for: identifier,
-            attempts: attempts
         )
         guard workIsCurrent else { return false }
         if resetDelay {
@@ -2313,12 +2322,12 @@ actor ProcessController {
     }
 
     private func restoreProcessControl(identifier: String, attempts: Int) async -> Bool {
-        let resumed = await restoreDisruptiveControl(identifier: identifier, attempts: attempts)
-        guard workIsCurrent else { return false }
         let priorityRestored = await restoreBackgroundPriority(
             for: identifier,
             attempts: attempts
         )
+        guard workIsCurrent else { return false }
+        let resumed = await restoreDisruptiveControl(identifier: identifier, attempts: attempts)
         return resumed && priorityRestored && workIsCurrent
     }
 
@@ -2347,29 +2356,33 @@ actor ProcessController {
     ) async -> Bool {
         guard workIsCurrent else { return false }
         let identifier = app.bundleIdentifier
-        guard await restoreDisruptiveControl(
+        let priorityPrepared: Bool
+        if appliesEfficiencyCores, rule.usesEfficiencyCoreScheduling {
+            priorityPrepared = await applyBackgroundPriority(to: app)
+        } else {
+            priorityPrepared = await restoreBackgroundPriority(
+                for: identifier,
+                attempts: restorationAttempts
+            )
+            if !priorityPrepared {
+                await markUnavailable(
+                    identifier,
+                    detail: "Tempra could not restore normal process priority."
+                )
+            }
+        }
+        guard workIsCurrent else { return false }
+
+        let resumed = await restoreDisruptiveControl(
             identifier: identifier,
             attempts: restorationAttempts
-        ) else {
+        )
+        guard resumed else {
             await markUnavailable(identifier, detail: "Tempra could not restore every process.")
             return false
         }
         guard workIsCurrent else { return false }
-
-        if appliesEfficiencyCores, rule.usesEfficiencyCoreScheduling {
-            return await applyBackgroundPriority(to: app)
-        }
-        guard await restoreBackgroundPriority(
-            for: identifier,
-            attempts: restorationAttempts
-        ) else {
-            await markUnavailable(
-                identifier,
-                detail: "Tempra could not restore normal process priority."
-            )
-            return false
-        }
-        return workIsCurrent
+        return priorityPrepared
     }
 
     private func resumeStoppedProcesses(

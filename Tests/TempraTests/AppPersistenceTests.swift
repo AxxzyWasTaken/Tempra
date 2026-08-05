@@ -26,6 +26,28 @@ struct AppPersistenceTests {
         }
     }
 
+    @Test("Administrator access onboarding is recorded after its first presentation")
+    func privilegedAccessOnboardingPersists() throws {
+        try withDefaults { defaults in
+            let persistence = AppPersistence(defaults: defaults)
+            let store = try AppStore(
+                persistence: persistence,
+                managementCoordinator: ProcessManagementCoordinator(),
+                monitoringService: MonitoringService(),
+                launchAtLoginController: TestLaunchAtLoginController(),
+                startsMonitoring: false,
+                persistenceErrorHandler: { _ in }
+            )
+
+            #expect(store.shouldPresentPrivilegedAccessOnboarding)
+            store.markPrivilegedAccessOnboardingPresented()
+
+            #expect(!store.shouldPresentPrivilegedAccessOnboarding)
+            #expect(try persistence.loadPreferences()
+                .hasPresentedPrivilegedAccessOnboarding)
+        }
+    }
+
     @Test("Background and system process rules persist")
     func userOwnedBackgroundRulePersistence() throws {
         try withDefaults { defaults in

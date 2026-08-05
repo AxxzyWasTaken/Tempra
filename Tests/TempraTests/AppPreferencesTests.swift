@@ -40,6 +40,7 @@ struct AppPreferencesTests {
         preferences.appearance = .light
         preferences.includesEssentialSystemProcesses = true
         preferences.continuousMonitoringEnabled = true
+        preferences.hasPresentedPrivilegedAccessOnboarding = true
 
         try AppPreferencesStorage.save(preferences, to: defaults, key: "preferences")
         let loaded = try AppPreferencesStorage.load(from: defaults, key: "preferences")
@@ -69,6 +70,7 @@ struct AppPreferencesTests {
         let restored = try JSONDecoder().decode(AppPreferences.self, from: data)
 
         #expect(!restored.continuousMonitoringEnabled)
+        #expect(!restored.hasPresentedPrivilegedAccessOnboarding)
     }
 
     @Test("Missing active profile IDs decode as no active profile")

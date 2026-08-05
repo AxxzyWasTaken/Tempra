@@ -66,6 +66,7 @@ final class MenuPanelPresentation: ObservableObject {
     @Published var selection: MenuPanelSelection?
     @Published var settingsSection: TempraSettingsSection = .general
     @Published var processSort: ProcessSort = .averageDescending
+    @Published var showsPrivilegedAccessOnboarding = false
     var onShowSettings: (() -> Void)?
 
     func select(bundleIdentifier: String, anchorKey: String, localMidY: CGFloat) {
@@ -106,6 +107,14 @@ final class MenuPanelPresentation: ObservableObject {
         selection = nil
     }
 
+    func showPrivilegedAccessOnboarding() {
+        showsPrivilegedAccessOnboarding = true
+    }
+
+    func dismissPrivilegedAccessOnboarding() {
+        showsPrivilegedAccessOnboarding = false
+    }
+
     func showSettings(section: TempraSettingsSection = .general) {
         selection = nil
         settingsSection = section
@@ -141,6 +150,19 @@ final class MenuPanelCoordinator: NSObject, NSWindowDelegate {
         }
         observeState()
         installMenuTrackingObservers()
+    }
+
+    func presentPrivilegedAccessOnboardingIfNeeded() {
+        guard store.shouldPresentPrivilegedAccessOnboarding else { return }
+        store.markPrivilegedAccessOnboardingPresented()
+        presentation.showPrivilegedAccessOnboarding()
+        Task { @MainActor [weak self] in
+            await Task.yield()
+            guard let self,
+                  !self.isInvalidated,
+                  self.presentation.showsPrivilegedAccessOnboarding else { return }
+            self.showMainPanel()
+        }
     }
 
     func closePanels() {
@@ -342,6 +364,13 @@ final class MenuPanelCoordinator: NSObject, NSWindowDelegate {
         store.$pendingHighCPUAlert
             .sink { [weak self] alert in
                 self?.updateHighCPUAlertPanel(for: alert)
+            }
+            .store(in: &cancellables)
+
+        store.$privilegedControlStatus
+            .filter(\.isEnabled)
+            .sink { [weak self] _ in
+                self?.presentation.dismissPrivilegedAccessOnboarding()
             }
             .store(in: &cancellables)
     }

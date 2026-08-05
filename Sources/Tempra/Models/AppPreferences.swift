@@ -136,6 +136,7 @@ struct AppPreferences: Codable, Equatable {
     var showsCPUHistoryGraph = true
     var showsCPUUsageInMenuBar = true
     var historyRange: CPUHistoryRange = .fiveMinutes
+    var hasPresentedPrivilegedAccessOnboarding = false
 
     var activeProfile: ManagementProfile? {
         guard let activeProfileID else { return nil }
@@ -157,6 +158,7 @@ struct AppPreferences: Codable, Equatable {
         case showsCPUHistoryGraph
         case showsCPUUsageInMenuBar
         case historyRange
+        case hasPresentedPrivilegedAccessOnboarding
     }
 
     init() {}
@@ -219,6 +221,10 @@ struct AppPreferences: Codable, Equatable {
             CPUHistoryRange.self,
             forKey: .historyRange
         ) ?? .fiveMinutes
+        hasPresentedPrivilegedAccessOnboarding = try container.decodeIfPresent(
+            Bool.self,
+            forKey: .hasPresentedPrivilegedAccessOnboarding
+        ) ?? false
     }
 
     static let durationOptions: [TimeInterval] = [10, 30, 60, 300]

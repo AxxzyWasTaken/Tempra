@@ -155,4 +155,25 @@ struct WatchdogProtocolTests {
         #expect(decodedResponse == response)
         #expect(PrivilegedProcessProtocol.maximumProcessCount == 4_096)
     }
+
+    @Test("Watchdog state preserves the exact private QoS policy")
+    func privateQoSStateRoundTrip() throws {
+        let state = WatchdogPrivateQoSState(
+            process: WatchdogProcessIdentity(
+                pid: 42,
+                startTimeMicroseconds: 123_456
+            ),
+            originalPolicy: PrivateQoSPolicyState(
+                darwinRole: 0
+            )
+        )
+
+        let decoded = try JSONDecoder().decode(
+            WatchdogPrivateQoSState.self,
+            from: JSONEncoder().encode(state)
+        )
+
+        #expect(decoded == state)
+        #expect(decoded.originalPolicy.isValid)
+    }
 }

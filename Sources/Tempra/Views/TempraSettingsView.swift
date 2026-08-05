@@ -143,48 +143,57 @@ struct TempraSettingsView: View {
     }
 
     private var generalSettings: some View {
-        VStack(alignment: .leading, spacing: 17) {
-            Toggle("Automatically start Tempra at login", isOn: Binding(
-                get: { store.preferences.launchAtLogin },
-                set: { enabled in store.setLaunchAtLogin(enabled) }
-            ))
-            .toggleStyle(.checkbox)
+        ScrollView(.vertical) {
+            VStack(alignment: .leading, spacing: 17) {
+                Toggle("Automatically start Tempra at login", isOn: Binding(
+                    get: { store.preferences.launchAtLogin },
+                    set: { enabled in store.setLaunchAtLogin(enabled) }
+                ))
+                .toggleStyle(.checkbox)
 
-            if let error = store.launchAtLoginError {
-                settingsError(error)
-            }
+                if let error = store.launchAtLoginError {
+                    settingsError(error)
+                }
 
-            Divider()
-                .overlay(TempraPalette.separator)
+                Divider()
+                    .overlay(TempraPalette.separator)
 
-            Toggle("Continuous Monitoring", isOn: Binding(
-                get: { store.preferences.continuousMonitoringEnabled },
-                set: { enabled in store.setContinuousMonitoringEnabled(enabled) }
-            ))
-            .toggleStyle(.checkbox)
+                PrivilegedAccessControl(store: store, context: .settings)
 
-            Text("Keeps CPU history and high-CPU alerts live while Tempra’s panels are closed.")
-                .font(.system(size: 11.5))
-                .foregroundStyle(TempraPalette.secondaryText)
-                .fixedSize(horizontal: false, vertical: true)
+                Divider()
+                    .overlay(TempraPalette.separator)
 
-            Toggle("Display CPU usage next to the menu bar icon", isOn: Binding(
-                get: { store.preferences.showsCPUUsageInMenuBar },
-                set: { isVisible in store.setShowsCPUUsageInMenuBar(isVisible) }
-            ))
-            .toggleStyle(.checkbox)
+                Toggle("Continuous Monitoring", isOn: Binding(
+                    get: { store.preferences.continuousMonitoringEnabled },
+                    set: { enabled in store.setContinuousMonitoringEnabled(enabled) }
+                ))
+                .toggleStyle(.checkbox)
 
-            HStack(alignment: .top, spacing: 9) {
-                Image(systemName: "menubar.rectangle")
-                    .foregroundStyle(TempraPalette.tertiaryText)
-
-                Text("Tempra stays in the menu bar and does not add a permanent Dock icon.")
+                Text("Keeps CPU history and high-CPU alerts live while Tempra’s panels are closed.")
                     .font(.system(size: 11.5))
                     .foregroundStyle(TempraPalette.secondaryText)
                     .fixedSize(horizontal: false, vertical: true)
+
+                Toggle("Display CPU usage next to the menu bar icon", isOn: Binding(
+                    get: { store.preferences.showsCPUUsageInMenuBar },
+                    set: { isVisible in store.setShowsCPUUsageInMenuBar(isVisible) }
+                ))
+                .toggleStyle(.checkbox)
+
+                HStack(alignment: .top, spacing: 9) {
+                    Image(systemName: "menubar.rectangle")
+                        .foregroundStyle(TempraPalette.tertiaryText)
+
+                    Text("Tempra stays in the menu bar and does not add a permanent Dock icon.")
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(TempraPalette.secondaryText)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
+            .padding(.horizontal, 24)
+            .padding(.vertical, 21)
+            .frame(maxWidth: .infinity, alignment: .topLeading)
         }
-        .settingsPane()
     }
 
     private var controlSettings: some View {

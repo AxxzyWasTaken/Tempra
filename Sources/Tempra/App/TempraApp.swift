@@ -25,7 +25,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 Self.presentPersistenceFailure(error)
             }
             self.store = store
-            menuPanelCoordinator = MenuPanelCoordinator(store: store)
+            let menuPanelCoordinator = MenuPanelCoordinator(store: store)
+            self.menuPanelCoordinator = menuPanelCoordinator
+            menuPanelCoordinator.presentPrivilegedAccessOnboardingIfNeeded()
         } catch {
             Self.presentStartupFailure(error)
             NSApp.terminate(nil)
