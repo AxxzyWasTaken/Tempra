@@ -104,7 +104,7 @@ struct ManagedApp: Identifiable, Sendable {
     let isSystemProcess: Bool
     let requiresPrivilegedControl: Bool
     var windowVisibility: AppWindowVisibility
-    var isProtectedByMenuBarOverlay: Bool
+    var isProtectedByForegroundOverlay: Bool
     var cpuPowerWatts: Double? = nil
     var cpuEnergyJoulesPerCPUSecond: Double? = nil
     var status: ManagementStatus
@@ -127,7 +127,7 @@ struct ManagedApp: Identifiable, Sendable {
         isSystemProcess: Bool,
         requiresPrivilegedControl: Bool? = nil,
         windowVisibility: AppWindowVisibility = .unknown,
-        isProtectedByMenuBarOverlay: Bool = false,
+        isProtectedByForegroundOverlay: Bool = false,
         cpuPowerWatts: Double? = nil,
         cpuEnergyJoulesPerCPUSecond: Double? = nil,
         status: ManagementStatus
@@ -165,7 +165,7 @@ struct ManagedApp: Identifiable, Sendable {
             ?? (processIdentities.contains(where: \.requiresPrivilegedControl)
                 || (isSystemProcess && processIdentities.isEmpty))
         self.windowVisibility = windowVisibility
-        self.isProtectedByMenuBarOverlay = isProtectedByMenuBarOverlay
+        self.isProtectedByForegroundOverlay = isProtectedByForegroundOverlay
         self.cpuPowerWatts = cpuPowerWatts
         self.cpuEnergyJoulesPerCPUSecond = cpuEnergyJoulesPerCPUSecond
         self.status = status

@@ -172,30 +172,41 @@ struct ApplicationInventory: Sendable {
 }
 
 enum ForegroundApplicationPolicy {
-    static func isMenuBarOverlay(
+    static func isForegroundOverlay(
         _ application: RunningApplicationDescriptor?,
         windowSnapshot: WindowVisibilitySnapshot?
     ) -> Bool {
         guard let application, application.activationPolicy != .regular else {
             return false
         }
-        return windowSnapshot?.hasNormalWindow(
-            for: [application.processIdentifier]
-        ) != true
+        guard let windowSnapshot else { return true }
+        return !windowSnapshot.hasNormalWindow(for: [application.processIdentifier])
+            || windowSnapshot.hasDisplaySizedWindow(for: application.processIdentifier)
+    }
+
+    static func displayOverlayProcessIdentifiers(
+        applications: [RunningApplicationDescriptor],
+        windowSnapshot: WindowVisibilitySnapshot?
+    ) -> Set<pid_t> {
+        guard let windowSnapshot else { return [] }
+        return Set(applications.lazy.filter {
+            $0.activationPolicy != .regular
+                && windowSnapshot.hasDisplaySizedWindow(for: $0.processIdentifier)
+        }.map(\.processIdentifier))
     }
 }
 
 struct ForegroundApplicationTracker {
-    private var lastNonMenuBarIdentifier: String?
+    private var lastForegroundIdentifier: String?
 
     mutating func protectedIdentifier(
         frontmostIdentifier: String?,
-        isMenuBarOverlay: Bool
+        isForegroundOverlay: Bool
     ) -> String? {
-        if isMenuBarOverlay {
-            return lastNonMenuBarIdentifier
+        if isForegroundOverlay {
+            return lastForegroundIdentifier
         }
-        lastNonMenuBarIdentifier = frontmostIdentifier
+        lastForegroundIdentifier = frontmostIdentifier
         return nil
     }
 }
@@ -824,13 +835,18 @@ final class ProcessMonitor {
         let frontmostApplication = inventory.applications.first {
             $0.bundleIdentifier == inventory.frontmostBundleIdentifier
         }
-        let frontmostIsMenuBarOverlay = ForegroundApplicationPolicy.isMenuBarOverlay(
+        let frontmostIsForegroundOverlay = ForegroundApplicationPolicy.isForegroundOverlay(
             frontmostApplication,
             windowSnapshot: windowSnapshot
         )
+        let displayOverlayProcessIdentifiers = ForegroundApplicationPolicy
+            .displayOverlayProcessIdentifiers(
+                applications: inventory.applications,
+                windowSnapshot: windowSnapshot
+            )
         let protectedIdentifier = foregroundApplicationTracker.protectedIdentifier(
             frontmostIdentifier: inventory.frontmostBundleIdentifier,
-            isMenuBarOverlay: frontmostIsMenuBarOverlay
+            isForegroundOverlay: frontmostIsForegroundOverlay
         )
 
         var updatedApps = apps.map { app in
@@ -840,7 +856,7 @@ final class ProcessMonitor {
                 updated.isHidden = applications.allSatisfy(\.isHidden)
             }
             updated.isFrontmost = app.bundleIdentifier == inventory.frontmostBundleIdentifier
-            updated.isProtectedByMenuBarOverlay = frontmostIsMenuBarOverlay
+            updated.isProtectedByForegroundOverlay = frontmostIsForegroundOverlay
                 && app.bundleIdentifier == protectedIdentifier
             return updated
         }
@@ -853,7 +869,10 @@ final class ProcessMonitor {
                 isHidden: updatedApps[index].isHidden
             )
         }
-        let visibilities = windowSnapshot?.visibilities(for: requests)
+        let visibilities = windowSnapshot?.visibilities(
+            for: requests,
+            ignoringOccludersOwnedBy: displayOverlayProcessIdentifiers
+        )
         for (requestOffset, appIndex) in requestIndices.enumerated() {
             updatedApps[appIndex].windowVisibility = visibilities?[requestOffset]
                 ?? (updatedApps[appIndex].isHidden ? .hiddenOrMinimized : .unknown)

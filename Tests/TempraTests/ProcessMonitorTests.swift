@@ -6,6 +6,162 @@ import Testing
 
 @Suite("Process monitor metadata cache")
 struct ProcessMonitorTests {
+    @Test("An accessory display window is a foreground overlay")
+    func accessoryDisplayWindowIsForegroundOverlay() {
+        let processIdentifier: pid_t = 200
+        let descriptor = RunningApplicationDescriptor(
+            bundleIdentifier: "example.brightness-overlay",
+            localizedName: "Brightness Overlay",
+            bundleURL: URL(fileURLWithPath: "/Applications/Brightness Overlay.app"),
+            processIdentifier: processIdentifier,
+            activationPolicyRawValue: NSApplication.ActivationPolicy.accessory.rawValue,
+            isHidden: false
+        )
+        let snapshot = WindowVisibilitySnapshot(
+            windowsFrontToBack: [WindowVisibilityRecord(
+                ownerPID: processIdentifier,
+                bounds: CGRect(x: 0, y: 0, width: 1_000, height: 800),
+                layer: 0,
+                alpha: 0.2
+            )],
+            screenBounds: [CGRect(x: 0, y: 0, width: 1_000, height: 800)]
+        )
+
+        #expect(ForegroundApplicationPolicy.isForegroundOverlay(
+            descriptor,
+            windowSnapshot: snapshot
+        ))
+        #expect(ForegroundApplicationPolicy.displayOverlayProcessIdentifiers(
+            applications: [descriptor],
+            windowSnapshot: snapshot
+        ) == [processIdentifier])
+    }
+
+    @Test("A regular full-screen app is not a foreground overlay")
+    func regularFullScreenAppIsNotForegroundOverlay() {
+        let processIdentifier: pid_t = 200
+        let descriptor = RunningApplicationDescriptor(
+            bundleIdentifier: "example.full-screen-app",
+            localizedName: "Full-screen App",
+            bundleURL: URL(fileURLWithPath: "/Applications/Full-screen App.app"),
+            processIdentifier: processIdentifier,
+            activationPolicyRawValue: NSApplication.ActivationPolicy.regular.rawValue,
+            isHidden: false
+        )
+        let snapshot = WindowVisibilitySnapshot(
+            windowsFrontToBack: [WindowVisibilityRecord(
+                ownerPID: processIdentifier,
+                bounds: CGRect(x: 0, y: 0, width: 1_000, height: 800),
+                layer: 0,
+                alpha: 1
+            )],
+            screenBounds: [CGRect(x: 0, y: 0, width: 1_000, height: 800)]
+        )
+
+        #expect(!ForegroundApplicationPolicy.isForegroundOverlay(
+            descriptor,
+            windowSnapshot: snapshot
+        ))
+        #expect(ForegroundApplicationPolicy.displayOverlayProcessIdentifiers(
+            applications: [descriptor],
+            windowSnapshot: snapshot
+        ).isEmpty)
+    }
+
+    @Test("A foreground overlay preserves the preceding app")
+    func foregroundOverlayPreservesPrecedingApp() {
+        var tracker = ForegroundApplicationTracker()
+
+        #expect(tracker.protectedIdentifier(
+            frontmostIdentifier: "example.editor",
+            isForegroundOverlay: false
+        ) == nil)
+        #expect(tracker.protectedIdentifier(
+            frontmostIdentifier: "example.brightness-overlay",
+            isForegroundOverlay: true
+        ) == "example.editor")
+    }
+
+    @Test("A brightness overlay keeps the underlying foreground app protected")
+    func brightnessOverlayKeepsUnderlyingAppProtected() async throws {
+        let editorIdentity = ProcessIdentity(pid: 100, startTimeMicroseconds: 1_000_000)
+        let overlayIdentity = ProcessIdentity(pid: 200, startTimeMicroseconds: 2_000_000)
+        let reader = StubProcessSnapshotReader(
+            snapshots: [
+                editorIdentity.pid: snapshot(editorIdentity, executableName: "Editor"),
+                overlayIdentity.pid: snapshot(
+                    overlayIdentity,
+                    executableName: "BrightnessOverlay"
+                ),
+            ],
+            paths: [
+                editorIdentity.pid: appExecutable("Editor"),
+                overlayIdentity.pid: appExecutable(
+                    "Brightness Overlay",
+                    component: "BrightnessOverlay"
+                ),
+            ]
+        )
+        let editor = RunningApplicationDescriptor(
+            bundleIdentifier: "example.editor",
+            localizedName: "Editor",
+            bundleURL: URL(fileURLWithPath: "/Applications/Editor.app"),
+            processIdentifier: editorIdentity.pid,
+            activationPolicyRawValue: NSApplication.ActivationPolicy.regular.rawValue,
+            isHidden: false
+        )
+        let overlay = RunningApplicationDescriptor(
+            bundleIdentifier: "example.brightness-overlay",
+            localizedName: "Brightness Overlay",
+            bundleURL: URL(fileURLWithPath: "/Applications/Brightness Overlay.app"),
+            processIdentifier: overlayIdentity.pid,
+            activationPolicyRawValue: NSApplication.ActivationPolicy.accessory.rawValue,
+            isHidden: false
+        )
+        let visibilitySnapshot = WindowVisibilitySnapshot(
+            windowsFrontToBack: [
+                WindowVisibilityRecord(
+                    ownerPID: overlayIdentity.pid,
+                    bounds: CGRect(x: 0, y: 0, width: 1_000, height: 800),
+                    layer: 0,
+                    alpha: 0.2
+                ),
+                WindowVisibilityRecord(
+                    ownerPID: editorIdentity.pid,
+                    bounds: CGRect(x: 0, y: 0, width: 1_000, height: 800),
+                    layer: 0,
+                    alpha: 1
+                ),
+            ],
+            screenBounds: [CGRect(x: 0, y: 0, width: 1_000, height: 800)]
+        )
+        let monitor = ProcessMonitor(
+            processReader: reader,
+            currentUserID: 501,
+            uptime: { 1 },
+            audioProcessIdentifiers: { [] },
+            windowSnapshot: { visibilitySnapshot }
+        )
+
+        _ = await monitor.sample(inventory: ApplicationInventory(
+            applications: [editor, overlay],
+            frontmostBundleIdentifier: editor.bundleIdentifier,
+            ownBundleIdentifier: nil
+        ))
+        let overlayFrontmostSample = await monitor.sample(inventory: ApplicationInventory(
+            applications: [editor, overlay],
+            frontmostBundleIdentifier: overlay.bundleIdentifier,
+            ownBundleIdentifier: nil
+        ))
+        let editorResult = try #require(overlayFrontmostSample.first {
+            $0.bundleIdentifier == editor.bundleIdentifier
+        })
+
+        #expect(!editorResult.isFrontmost)
+        #expect(editorResult.isProtectedByForegroundOverlay)
+        #expect(editorResult.windowVisibility == .visible)
+    }
+
     @Test("Stable metadata is cached while CPU counters remain current")
     func stableMetadataAndCurrentCPU() async throws {
         let identity = ProcessIdentity(pid: 100, startTimeMicroseconds: 2_000_000)

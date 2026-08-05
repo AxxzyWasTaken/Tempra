@@ -52,14 +52,17 @@ struct WindowVisibilityRecord: Equatable, Sendable {
 
     func canOccludeWindowsBehind(screenBounds: [CGRect]) -> Bool {
         guard ownerName == "Dock" else { return true }
-        let isDisplayControlWindow = screenBounds.contains { screen in
+        return !occupiesDisplay(in: screenBounds)
+    }
+
+    func occupiesDisplay(in screenBounds: [CGRect]) -> Bool {
+        screenBounds.contains { screen in
             guard screen.area > 0,
                   let intersection = bounds.intersectionOrNil(screen) else {
                 return false
             }
             return intersection.area >= screen.area * 0.99
         }
-        return !isDisplayControlWindow
     }
 }
 
@@ -129,7 +132,8 @@ struct WindowVisibilitySnapshot: Sendable {
 
     func visibility(
         for processIdentifiers: Set<pid_t>,
-        isHidden: Bool
+        isHidden: Bool,
+        ignoringOccludersOwnedBy ignoredProcessIdentifiers: Set<pid_t> = []
     ) -> AppWindowVisibility {
         guard !isHidden else { return .hiddenOrMinimized }
         let targetIndices = normalWindowIndices(for: processIdentifiers)
@@ -140,13 +144,17 @@ struct WindowVisibilitySnapshot: Sendable {
             visibleFraction(
                 of: windowsFrontToBack[targetIndex],
                 behind: windowsFrontToBack[..<targetIndex],
-                ownedBy: processIdentifiers
+                ownedBy: processIdentifiers,
+                ignoringOccludersOwnedBy: ignoredProcessIdentifiers
             ) >= Self.visibleFractionThreshold
         }
         return hasVisibleWindow ? .visible : .covered
     }
 
-    func visibilities(for requests: [Request]) -> [AppWindowVisibility] {
+    func visibilities(
+        for requests: [Request],
+        ignoringOccludersOwnedBy ignoredProcessIdentifiers: Set<pid_t> = []
+    ) -> [AppWindowVisibility] {
         var results = [AppWindowVisibility](
             repeating: .hiddenOrMinimized,
             count: requests.count
@@ -169,13 +177,15 @@ struct WindowVisibilitySnapshot: Sendable {
                     if visibleFraction(
                         of: window,
                         behind: occluders[...],
-                        ownedBy: requests[requestIndex].processIdentifiers
+                        ownedBy: requests[requestIndex].processIdentifiers,
+                        ignoringOccludersOwnedBy: ignoredProcessIdentifiers
                     ) >= Self.visibleFractionThreshold {
                         results[requestIndex] = .visible
                     }
                 }
             }
-            if window.layer >= 0,
+            if !ignoredProcessIdentifiers.contains(window.ownerPID),
+               window.layer >= 0,
                window.alpha > 0.01,
                window.canOccludeWindowsBehind(screenBounds: screenBounds) {
                 occluders.append(window)
@@ -186,6 +196,15 @@ struct WindowVisibilitySnapshot: Sendable {
 
     func hasNormalWindow(for processIdentifiers: Set<pid_t>) -> Bool {
         !normalWindowIndices(for: processIdentifiers).isEmpty
+    }
+
+    func hasDisplaySizedWindow(for processIdentifier: pid_t) -> Bool {
+        windowIndicesByOwnerPID[processIdentifier, default: []].contains { index in
+            let window = windowsFrontToBack[index]
+            return window.layer >= 0
+                && window.alpha > 0.01
+                && window.occupiesDisplay(in: screenBounds)
+        }
     }
 
     private func normalWindowIndices(
@@ -202,7 +221,8 @@ struct WindowVisibilitySnapshot: Sendable {
     private func visibleFraction(
         of target: WindowVisibilityRecord,
         behind windowsInFront: ArraySlice<WindowVisibilityRecord>,
-        ownedBy processIdentifiers: Set<pid_t>
+        ownedBy processIdentifiers: Set<pid_t>,
+        ignoringOccludersOwnedBy ignoredProcessIdentifiers: Set<pid_t>
     ) -> Double {
         let targetArea = target.bounds.area
         guard targetArea > 0 else { return 0 }
@@ -214,6 +234,7 @@ struct WindowVisibilitySnapshot: Sendable {
 
         let occluders = windowsInFront.filter { window in
             !processIdentifiers.contains(window.ownerPID)
+                && !ignoredProcessIdentifiers.contains(window.ownerPID)
                 && window.layer >= 0
                 && window.alpha > 0.01
                 && window.canOccludeWindowsBehind(screenBounds: screenBounds)

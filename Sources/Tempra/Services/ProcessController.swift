@@ -905,7 +905,7 @@ actor ProcessController {
                 now < $0.addingTimeInterval(Self.launchGracePeriod)
             } ?? false
 
-            if app.isProtectedByMenuBarOverlay {
+            if app.isProtectedByForegroundOverlay {
                 backgroundSince.removeValue(forKey: identifier)
                 hideRequested.remove(identifier)
                 quitRequested.remove(identifier)
@@ -2996,7 +2996,7 @@ actor ProcessController {
         for (identifier, rule) in rules where rule.hasBehavior {
             guard let app = groups[identifier],
                   !app.isFrontmost,
-                  !app.isProtectedByMenuBarOverlay else {
+                  !app.isProtectedByForegroundOverlay else {
                 continue
             }
             if statuses[identifier] == .unavailable {

@@ -101,7 +101,7 @@ final class ProcessManagementCoordinator {
                 isHidden: $0.isHidden,
                 isPlayingAudio: $0.isPlayingAudio,
                 windowVisibility: $0.windowVisibility,
-                isProtectedByMenuBarOverlay: $0.isProtectedByMenuBarOverlay,
+                isProtectedByForegroundOverlay: $0.isProtectedByForegroundOverlay,
                 isProtectedAudioInfrastructure: protectedAudioIdentifiers.contains(
                     $0.bundleIdentifier
                 )

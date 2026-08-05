@@ -17,7 +17,7 @@ struct ProcessControllerSchedulingTests {
         isFrontmost: Bool = false,
         isHidden: Bool = true,
         isPlayingAudio: Bool = false,
-        isProtectedByMenuBarOverlay: Bool = false,
+        isProtectedByForegroundOverlay: Bool = false,
         isProtectedAudioInfrastructure: Bool = false,
         windowVisibility: AppWindowVisibility = .hiddenOrMinimized
     ) -> ProcessControlTarget {
@@ -32,7 +32,7 @@ struct ProcessControllerSchedulingTests {
             isHidden: isHidden,
             isPlayingAudio: isPlayingAudio,
             windowVisibility: windowVisibility,
-            isProtectedByMenuBarOverlay: isProtectedByMenuBarOverlay,
+            isProtectedByForegroundOverlay: isProtectedByForegroundOverlay,
             isProtectedAudioInfrastructure: isProtectedAudioInfrastructure
         )
     }
@@ -1381,7 +1381,7 @@ struct ProcessControllerSchedulingTests {
         await controller.shutdown()
     }
 
-    @Test("Menu-bar overlay protection does not bypass launch grace")
+    @Test("Foreground-overlay protection does not bypass launch grace")
     func overlayProtectionRespectsLaunchGrace() async {
         let controller = ProcessController()
         let rule = AppRule(
@@ -1392,7 +1392,7 @@ struct ProcessControllerSchedulingTests {
         let snapshot = await controller.update(
             targets: [target(
                 launchedAt: Date(),
-                isProtectedByMenuBarOverlay: true
+                isProtectedByForegroundOverlay: true
             )],
             rules: [identifier: rule],
             isEnabled: true,

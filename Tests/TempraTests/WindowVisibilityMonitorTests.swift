@@ -42,6 +42,39 @@ struct WindowVisibilityMonitorTests {
         #expect(snapshot.visibility(for: [appPID], isHidden: false) == .covered)
     }
 
+    @Test("An identified display overlay does not cover an app")
+    func identifiedDisplayOverlayDoesNotOcclude() {
+        let snapshot = WindowVisibilitySnapshot(
+            windowsFrontToBack: [
+                window(
+                    pid: otherPID,
+                    x: 0,
+                    width: 1_000,
+                    height: 800,
+                    ownerName: "Brightness Overlay"
+                ),
+                window(pid: appPID, x: 0, width: 1_000, height: 800),
+            ],
+            screenBounds: [screen]
+        )
+        let request = WindowVisibilitySnapshot.Request(
+            processIdentifiers: [appPID],
+            isHidden: false
+        )
+
+        #expect(snapshot.hasDisplaySizedWindow(for: otherPID))
+        #expect(snapshot.visibility(for: [appPID], isHidden: false) == .covered)
+        #expect(snapshot.visibility(
+            for: [appPID],
+            isHidden: false,
+            ignoringOccludersOwnedBy: [otherPID]
+        ) == .visible)
+        #expect(snapshot.visibilities(
+            for: [request],
+            ignoringOccludersOwnedBy: [otherPID]
+        ) == [.visible])
+    }
+
     @Test("A smaller Dock window can still cover an app")
     func smallerDockWindowOccludes() {
         let snapshot = WindowVisibilitySnapshot(

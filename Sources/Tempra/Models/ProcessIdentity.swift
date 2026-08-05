@@ -81,7 +81,7 @@ struct ProcessControlTarget: Sendable {
     let isHidden: Bool
     let isPlayingAudio: Bool
     var windowVisibility: AppWindowVisibility
-    let isProtectedByMenuBarOverlay: Bool
+    let isProtectedByForegroundOverlay: Bool
     let isProtectedAudioInfrastructure: Bool
 
     init(
@@ -95,7 +95,7 @@ struct ProcessControlTarget: Sendable {
         isHidden: Bool,
         isPlayingAudio: Bool,
         windowVisibility: AppWindowVisibility = .unknown,
-        isProtectedByMenuBarOverlay: Bool = false,
+        isProtectedByForegroundOverlay: Bool = false,
         isProtectedAudioInfrastructure: Bool = false
     ) {
         self.bundleIdentifier = bundleIdentifier
@@ -125,7 +125,7 @@ struct ProcessControlTarget: Sendable {
         self.isHidden = isHidden
         self.isPlayingAudio = isPlayingAudio
         self.windowVisibility = windowVisibility
-        self.isProtectedByMenuBarOverlay = isProtectedByMenuBarOverlay
+        self.isProtectedByForegroundOverlay = isProtectedByForegroundOverlay
         self.isProtectedAudioInfrastructure = isProtectedAudioInfrastructure
     }
 }
