@@ -5,6 +5,7 @@ struct HighCPUAlert: Identifiable, Equatable {
     let bundleIdentifier: String
     let displayName: String
     let applicationURL: URL?
+    let processIdentity: ProcessIdentity
     let cpuPercent: Double
     let threshold: Double
     let duration: TimeInterval
@@ -14,6 +15,7 @@ struct HighCPUAlert: Identifiable, Equatable {
         bundleIdentifier: String,
         displayName: String,
         applicationURL: URL?,
+        processIdentity: ProcessIdentity,
         cpuPercent: Double,
         threshold: Double,
         duration: TimeInterval
@@ -22,6 +24,7 @@ struct HighCPUAlert: Identifiable, Equatable {
         self.bundleIdentifier = bundleIdentifier
         self.displayName = displayName
         self.applicationURL = applicationURL
+        self.processIdentity = processIdentity
         self.cpuPercent = cpuPercent
         self.threshold = threshold
         self.duration = duration

@@ -146,14 +146,11 @@ private actor DiagnosticTestMonitoringService: MonitoringServicing {
             generation: request.generation,
             systemCPU: nil,
             apps: nil,
-            didRefreshApplications: false,
-            powerByIdentifier: [:],
-            powerMetricsSupported: false
+            didRefreshApplications: false
         )
     }
 
     func resetApplicationBaseline() {}
-    func resetPowerMetrics() {}
     func setTemperatureSamplingInterval(_ interval: TimeInterval?) {}
     func shutdown() {}
 }

@@ -12,7 +12,6 @@ struct MonitoringDemandTests {
             samplesSystemCPU: true,
             samplesApplications: false,
             includesEssentialSystemProcesses: false,
-            samplesPower: false,
             processChange: nil
         )
 
@@ -34,7 +33,6 @@ struct MonitoringDemandTests {
         #expect(demand == .dormant)
         #expect(demand.sampleInterval == nil)
         #expect(demand.temperatureInterval == nil)
-        #expect(!demand.samplesPower)
     }
 
     @Test("Visible UI takes precedence over continuous monitoring")
@@ -49,7 +47,6 @@ struct MonitoringDemandTests {
         #expect(demand.sampleInterval == 1)
         #expect(demand.temperatureInterval == 2)
         #expect(demand.processTableRefreshInterval == 5)
-        #expect(demand.samplesPower)
         #expect(demand.refreshesAudioActivity)
     }
 
@@ -65,7 +62,6 @@ struct MonitoringDemandTests {
         #expect(demand.sampleInterval == 5)
         #expect(demand.temperatureInterval == 15)
         #expect(demand.processTableRefreshInterval == 15)
-        #expect(!demand.samplesPower)
     }
 
     @Test("Menu-bar CPU uses only a coarse system sample")
@@ -81,7 +77,6 @@ struct MonitoringDemandTests {
         #expect(demand.temperatureInterval == nil)
         #expect(demand.processTableRefreshInterval == 30)
         #expect(!demand.samplesApplications)
-        #expect(!demand.samplesPower)
     }
 
     @Test("Active rules sample applications without enabling optional metrics")
@@ -99,7 +94,26 @@ struct MonitoringDemandTests {
         #expect(demand.samplesApplications)
         #expect(!demand.recordsApplicationMetrics)
         #expect(!demand.samplesSystemCPU)
-        #expect(!demand.samplesPower)
+        #expect(!demand.refreshesAudioActivity)
+    }
+
+    @Test("High CPU alerts use app sampling without optional power metrics")
+    func highCPUAlertIntervals() {
+        let demand = MonitoringDemand.resolve(
+            isPresentationActive: false,
+            isContinuousMonitoringEnabled: false,
+            showsCPUUsageInMenuBar: false,
+            requiresHighCPUDetection: true
+        )
+
+        #expect(demand == .highCPUAlerts(samplesSystemCPU: false))
+        #expect(demand.sampleInterval == 5)
+        #expect(demand.temperatureInterval == nil)
+        #expect(demand.processTableRefreshInterval == 30)
+        #expect(demand.samplesApplications)
+        #expect(demand.detectsHighCPU)
+        #expect(!demand.recordsApplicationMetrics)
+        #expect(!demand.samplesSystemCPU)
         #expect(!demand.refreshesAudioActivity)
     }
 
@@ -131,7 +145,6 @@ struct MonitoringDemandTests {
         #expect(demand.processTableRefreshInterval == 15)
         #expect(demand.recordsApplicationMetrics)
         #expect(demand.samplesSystemCPU)
-        #expect(!demand.samplesPower)
     }
 
     @Test("Automatic profiles keep context sampling active")
@@ -146,7 +159,6 @@ struct MonitoringDemandTests {
         #expect(demand == .menuBar)
         #expect(demand.sampleInterval == 5)
         #expect(!demand.samplesApplications)
-        #expect(!demand.samplesPower)
     }
 
     @Test("Opening the menu keeps the last app values while establishing a baseline")
@@ -211,14 +223,11 @@ private actor BaselineMonitoringService: MonitoringServicing {
             generation: request.generation,
             systemCPU: SystemCPUSnapshot(totalPercent: 10),
             apps: [app],
-            didRefreshApplications: true,
-            powerByIdentifier: [:],
-            powerMetricsSupported: false
+            didRefreshApplications: true
         )
     }
 
     func resetApplicationBaseline() {}
-    func resetPowerMetrics() {}
     func setTemperatureSamplingInterval(_ interval: TimeInterval?) {}
     func shutdown() {}
 }

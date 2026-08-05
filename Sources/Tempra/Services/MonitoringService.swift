@@ -7,7 +7,6 @@ struct MonitoringRequest: Sendable {
     let samplesApplications: Bool
     let includesEssentialSystemProcesses: Bool
     let processTableRefreshInterval: TimeInterval
-    let samplesPower: Bool
     let networkActivityBundleIdentifiers: Set<String>
     let refreshesAudioActivity: Bool
     let isLatencySensitive: Bool
@@ -20,7 +19,6 @@ struct MonitoringRequest: Sendable {
         samplesApplications: Bool,
         includesEssentialSystemProcesses: Bool,
         processTableRefreshInterval: TimeInterval = 5,
-        samplesPower: Bool,
         networkActivityBundleIdentifiers: Set<String> = [],
         refreshesAudioActivity: Bool = false,
         isLatencySensitive: Bool = false,
@@ -32,7 +30,6 @@ struct MonitoringRequest: Sendable {
         self.samplesApplications = samplesApplications
         self.includesEssentialSystemProcesses = includesEssentialSystemProcesses
         self.processTableRefreshInterval = processTableRefreshInterval
-        self.samplesPower = samplesPower
         self.networkActivityBundleIdentifiers = networkActivityBundleIdentifiers
         self.refreshesAudioActivity = refreshesAudioActivity
         self.isLatencySensitive = isLatencySensitive
@@ -49,7 +46,6 @@ struct MonitoringRequest: Sendable {
             samplesApplications: samplesApplications,
             includesEssentialSystemProcesses: includesEssentialSystemProcesses,
             processTableRefreshInterval: processTableRefreshInterval,
-            samplesPower: samplesPower,
             networkActivityBundleIdentifiers: networkActivityBundleIdentifiers,
             refreshesAudioActivity: refreshesAudioActivity,
             isLatencySensitive: isLatencySensitive || processChange != nil,
@@ -66,7 +62,6 @@ struct MonitoringRequest: Sendable {
             samplesApplications: samplesApplications,
             includesEssentialSystemProcesses: includesEssentialSystemProcesses,
             processTableRefreshInterval: processTableRefreshInterval,
-            samplesPower: samplesPower,
             networkActivityBundleIdentifiers: networkActivityBundleIdentifiers,
             refreshesAudioActivity: refreshesAudioActivity,
             isLatencySensitive: true,
@@ -80,9 +75,7 @@ struct MonitoringSample: Sendable {
     let systemCPU: SystemCPUSnapshot?
     let apps: [ManagedApp]?
     let didRefreshApplications: Bool
-    let powerByIdentifier: [String: ProcessPowerSample]
-    let powerMetricsSupported: Bool
-    let batteryPower: BatteryPowerState?
+    let powerSource: PowerSourceState?
     let privilegedAccessError: String?
 
     init(
@@ -90,18 +83,14 @@ struct MonitoringSample: Sendable {
         systemCPU: SystemCPUSnapshot?,
         apps: [ManagedApp]?,
         didRefreshApplications: Bool,
-        powerByIdentifier: [String: ProcessPowerSample],
-        powerMetricsSupported: Bool,
-        batteryPower: BatteryPowerState? = nil,
+        powerSource: PowerSourceState? = nil,
         privilegedAccessError: String? = nil
     ) {
         self.generation = generation
         self.systemCPU = systemCPU
         self.apps = apps
         self.didRefreshApplications = didRefreshApplications
-        self.powerByIdentifier = powerByIdentifier
-        self.powerMetricsSupported = powerMetricsSupported
-        self.batteryPower = batteryPower
+        self.powerSource = powerSource
         self.privilegedAccessError = privilegedAccessError
     }
 
@@ -111,9 +100,7 @@ struct MonitoringSample: Sendable {
             systemCPU: systemCPU,
             apps: nil,
             didRefreshApplications: false,
-            powerByIdentifier: [:],
-            powerMetricsSupported: powerMetricsSupported,
-            batteryPower: batteryPower,
+            powerSource: powerSource,
             privilegedAccessError: privilegedAccessError
         )
     }
@@ -122,32 +109,28 @@ struct MonitoringSample: Sendable {
 protocol MonitoringServicing: Sendable {
     func sample(_ request: MonitoringRequest) async -> MonitoringSample
     func resetApplicationBaseline() async
-    func resetPowerMetrics() async
     func setTemperatureSamplingInterval(_ interval: TimeInterval?) async
     func shutdown() async
 }
 
 actor MonitoringService: MonitoringServicing {
     private let processMonitor: ProcessMonitor
-    private let powerMonitor: ProcessPowerMonitor
-    private let batteryPowerMonitor: BatteryPowerMonitor
+    private let powerSourceMonitor: PowerSourceMonitor
     private let systemMetricsMonitor: SystemMetricsMonitor
 
     init(
         processMonitor: ProcessMonitor = ProcessMonitor(),
-        powerMonitor: ProcessPowerMonitor = ProcessPowerMonitor(),
-        batteryPowerMonitor: BatteryPowerMonitor = BatteryPowerMonitor(),
+        powerSourceMonitor: PowerSourceMonitor = PowerSourceMonitor(),
         systemMetricsMonitor: SystemMetricsMonitor = SystemMetricsMonitor()
     ) {
         self.processMonitor = processMonitor
-        self.powerMonitor = powerMonitor
-        self.batteryPowerMonitor = batteryPowerMonitor
+        self.powerSourceMonitor = powerSourceMonitor
         self.systemMetricsMonitor = systemMetricsMonitor
     }
 
     func sample(_ request: MonitoringRequest) async -> MonitoringSample {
         let systemCPU = request.samplesSystemCPU ? systemMetricsMonitor.sample() : nil
-        let batteryPower = request.samplesSystemCPU ? batteryPowerMonitor.sample() : nil
+        let powerSource = request.samplesSystemCPU ? powerSourceMonitor.sample() : nil
         if let processChange = request.processChange {
             processMonitor.handleProcessChange(processChange)
         }
@@ -157,9 +140,7 @@ actor MonitoringService: MonitoringServicing {
                 systemCPU: systemCPU,
                 apps: nil,
                 didRefreshApplications: false,
-                powerByIdentifier: [:],
-                powerMetricsSupported: powerMonitor.isSupported,
-                batteryPower: batteryPower
+                powerSource: powerSource
             )
         }
 
@@ -171,27 +152,12 @@ actor MonitoringService: MonitoringServicing {
                 || request.processChange?.audioActivityChanged == true,
             networkActivityBundleIdentifiers: request.networkActivityBundleIdentifiers
         )
-        let powerByIdentifier: [String: ProcessPowerSample]
-        if request.samplesPower {
-            powerByIdentifier = powerMonitor.sample(groups: apps.map {
-                ProcessPowerGroup(
-                    identifier: $0.bundleIdentifier,
-                    processIdentifiers: $0.processIdentifiers
-                )
-            })
-        } else {
-            powerMonitor.reset()
-            powerByIdentifier = [:]
-        }
-
         return MonitoringSample(
             generation: request.generation,
             systemCPU: systemCPU,
             apps: apps,
             didRefreshApplications: processMonitor.didRefreshLastSample,
-            powerByIdentifier: powerByIdentifier,
-            powerMetricsSupported: powerMonitor.isSupported,
-            batteryPower: batteryPower,
+            powerSource: powerSource,
             privilegedAccessError: processMonitor.privilegedAccessError
         )
     }
@@ -200,16 +166,11 @@ actor MonitoringService: MonitoringServicing {
         processMonitor.resetSamplingBaseline()
     }
 
-    func resetPowerMetrics() {
-        powerMonitor.reset()
-    }
-
     func setTemperatureSamplingInterval(_ interval: TimeInterval?) {
         systemMetricsMonitor.setTemperatureSamplingInterval(interval)
     }
 
     func shutdown() {
-        powerMonitor.reset()
         systemMetricsMonitor.stop()
     }
 }

@@ -97,8 +97,6 @@ struct UIDerivationTests {
             (.averageAscending, ["alpha", "beta", "delta"]),
             (.currentDescending, ["beta", "delta", "alpha"]),
             (.currentAscending, ["alpha", "delta", "beta"]),
-            (.powerDescending, ["beta", "delta", "alpha"]),
-            (.powerAscending, ["delta", "beta", "alpha"]),
             (.name, ["alpha", "beta", "delta"]),
         ]
 
@@ -261,7 +259,6 @@ struct UIDerivationTests {
             isEnabled: true,
             averageCPUByIdentifier: [:],
             savedCPUByIdentifier: [:],
-            savedPowerByIdentifier: [:],
             activeCPULimitSessionIdentifiers: [identifier],
             attentionIdentifiers: [],
             iconCache: AppIconCache()
@@ -422,14 +419,7 @@ struct UIDerivationTests {
                     generation: 1,
                     systemCPU: SystemCPUSnapshot(totalPercent: 25),
                     apps: [app],
-                    didRefreshApplications: true,
-                    powerByIdentifier: [
-                        app.bundleIdentifier: ProcessPowerSample(
-                            watts: 3.5,
-                            joulesPerCPUSecond: 0.14
-                        ),
-                    ],
-                    powerMetricsSupported: true
+                    didRefreshApplications: true
                 ),
                 demand: .liveUI
             )
@@ -438,7 +428,6 @@ struct UIDerivationTests {
             let projected = try #require(store.displayItems.first)
             #expect(projected.cpuPercent == 25)
             #expect(projected.averageCPUPercent == 25)
-            #expect(projected.cpuPowerWatts == 3.5)
             #expect(projected.residentMemoryBytes == 512 * 1_024 * 1_024)
             #expect(projected.processCount == 2)
             #expect(projected.launchedAt == Date(timeIntervalSince1970: 1_000))
@@ -488,9 +477,7 @@ struct UIDerivationTests {
                     generation: 1,
                     systemCPU: nil,
                     apps: [app],
-                    didRefreshApplications: true,
-                    powerByIdentifier: [:],
-                    powerMetricsSupported: false
+                    didRefreshApplications: true
                 ),
                 demand: .management(samplesSystemCPU: false)
             )
@@ -648,7 +635,6 @@ struct UIDerivationTests {
                 name: String(format: "Process %04d", 999 - index),
                 currentCPU: Double(index % 101),
                 averageCPU: Double(index % 67),
-                power: index.isMultiple(of: 7) ? nil : Double(index % 31),
                 savedCPU: Double(index % 43),
                 rule: savedRule
             ))
@@ -697,15 +683,13 @@ struct UIDerivationTests {
                 identifier: "alpha",
                 name: "Alpha",
                 currentCPU: 1,
-                averageCPU: 10,
-                power: nil
+                averageCPU: 10
             ),
             item(
                 identifier: "beta",
                 name: "Beta",
                 currentCPU: 7,
                 averageCPU: 10,
-                power: 2,
                 savedCPU: betaSavedCPU,
                 rule: rule("beta"),
                 isAttention: true
@@ -715,7 +699,6 @@ struct UIDerivationTests {
                 name: "Third",
                 currentCPU: 0,
                 averageCPU: 0,
-                power: 1,
                 savedCPU: gammaSavedCPU,
                 isRunning: false,
                 rule: rule("gamma")
@@ -725,7 +708,6 @@ struct UIDerivationTests {
                 name: "Delta",
                 currentCPU: 4,
                 averageCPU: 30,
-                power: 1,
                 savedCPU: deltaSavedCPU,
                 rule: rule("delta")
             ),
@@ -739,7 +721,6 @@ struct UIDerivationTests {
         iconOverride: NSImage? = nil,
         currentCPU: Double = 0,
         averageCPU: Double = 0,
-        power: Double? = nil,
         savedCPU: Double = 0,
         isRunning: Bool = true,
         isBackgroundProcess: Bool = false,
@@ -758,7 +739,6 @@ struct UIDerivationTests {
             cpuPercent: currentCPU,
             averageCPUPercent: averageCPU,
             estimatedSavedCPUPercent: savedCPU,
-            cpuPowerWatts: power,
             isRunning: isRunning,
             isFrontmost: false,
             isHidden: false,
@@ -817,14 +797,11 @@ private actor UIDerivationMonitoringService: MonitoringServicing {
             generation: request.generation,
             systemCPU: nil,
             apps: nil,
-            didRefreshApplications: false,
-            powerByIdentifier: [:],
-            powerMetricsSupported: false
+            didRefreshApplications: false
         )
     }
 
     func resetApplicationBaseline() {}
-    func resetPowerMetrics() {}
     func setTemperatureSamplingInterval(_ interval: TimeInterval?) {}
     func shutdown() {}
 

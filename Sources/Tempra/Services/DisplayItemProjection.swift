@@ -10,7 +10,6 @@ enum DisplayItemProjection {
         isEnabled: Bool,
         averageCPUByIdentifier: [String: Double],
         savedCPUByIdentifier: [String: Double],
-        savedPowerByIdentifier: [String: Double],
         activeCPULimitSessionIdentifiers: Set<String> = [],
         protectionReasonsByIdentifier:
             [String: [ProcessIdentity: Set<ProcessProtectionReason>]] = [:],
@@ -40,8 +39,6 @@ enum DisplayItemProjection {
                 cpuPercent: app.cpuPercent,
                 averageCPUPercent: averageCPUByIdentifier[app.bundleIdentifier] ?? 0,
                 estimatedSavedCPUPercent: savedCPUByIdentifier[app.bundleIdentifier] ?? 0,
-                cpuPowerWatts: app.cpuPowerWatts,
-                estimatedSavedPowerWatts: savedPowerByIdentifier[app.bundleIdentifier],
                 residentMemoryBytes: app.residentMemoryBytes,
                 processCount: app.processIdentifiers.count,
                 controllableProcessCount: app.processIdentities.count,

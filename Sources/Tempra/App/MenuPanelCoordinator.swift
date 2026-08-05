@@ -76,6 +76,7 @@ final class MenuPanelPresentation: ObservableObject {
     @Published var processSort: ProcessSort = .averageDescending
     @Published var showsPrivilegedAccessOnboarding = false
     @Published private(set) var isMonitorDetached = false
+    @Published private(set) var highCPUAlertArrowX = TempraLayout.highCPUAlertPanelSize.width / 2
     var onShowSettings: (() -> Void)?
     var onSetMonitorDetached: ((Bool) -> Void)?
 
@@ -138,6 +139,10 @@ final class MenuPanelPresentation: ObservableObject {
     func updateMonitorDetachedState(_ isDetached: Bool) {
         isMonitorDetached = isDetached
     }
+
+    func updateHighCPUAlertArrowX(_ arrowX: CGFloat) {
+        highCPUAlertArrowX = arrowX
+    }
 }
 
 @MainActor
@@ -156,6 +161,7 @@ final class MenuPanelCoordinator: NSObject, NSWindowDelegate {
     private var globalEventMonitor: Any?
     private var menuDismissalGate = MenuDismissalGate()
     private var renderedStatusItemState: StatusItemState?
+    private var presentedHighCPUAlertID: UUID?
     private var isInvalidated = false
 
     init(store: AppStore) {
@@ -188,7 +194,8 @@ final class MenuPanelCoordinator: NSObject, NSWindowDelegate {
     }
 
     func closePanels() {
-        closeTransientPanels()
+        closeTransientPanels(presentsPendingHighCPUAlert: false)
+        hideHighCPUAlertPanel()
         if let detachedMonitorPanel {
             detachedMonitorPanel.delegate = nil
             detachedMonitorPanel.close()
@@ -200,7 +207,7 @@ final class MenuPanelCoordinator: NSObject, NSWindowDelegate {
         removeEventMonitorsIfIdle()
     }
 
-    private func closeTransientPanels() {
+    private func closeTransientPanels(presentsPendingHighCPUAlert: Bool = true) {
         presentation.closeInspector()
         inspectorPanel?.close()
         inspectorPanel?.contentViewController = nil
@@ -212,6 +219,9 @@ final class MenuPanelCoordinator: NSObject, NSWindowDelegate {
         store.setPresentationActive(detachedMonitorPanel?.isVisible == true)
         removeEventMonitorsIfIdle()
         statusItem.button?.highlight(false)
+        if presentsPendingHighCPUAlert {
+            presentPendingHighCPUAlertAfterCurrentTransition()
+        }
     }
 
     func invalidate() {
@@ -341,7 +351,20 @@ final class MenuPanelCoordinator: NSObject, NSWindowDelegate {
 
     private func ensureHighCPUAlertPanel() -> TempraPanel {
         if let highCPUAlertPanel { return highCPUAlertPanel }
-        let panel = makeTempraPanel(size: TempraLayout.highCPUAlertPanelSize)
+        let panel = TempraPanel(
+            contentRect: CGRect(origin: .zero, size: TempraLayout.highCPUAlertPanelSize),
+            styleMask: [.borderless, .nonactivatingPanel],
+            backing: .buffered,
+            defer: false
+        )
+        configure(panel: panel)
+        panel.title = "Sustained High CPU Usage"
+        panel.becomesKeyOnlyIfNeeded = true
+        panel.animationBehavior = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+            ? .none
+            : .utilityWindow
+        panel.setContentSize(TempraLayout.highCPUAlertPanelSize)
+        panel.appearance = store.preferences.appearance.nsAppearance
         panel.contentViewController = NSHostingController(
             rootView: HighCPUAlertPanelRoot(store: store, presentation: presentation)
         )
@@ -487,6 +510,7 @@ final class MenuPanelCoordinator: NSObject, NSWindowDelegate {
         }
         if highCPUAlertPanel?.isVisible == true {
             store.dismissHighCPUAlert()
+            hideHighCPUAlertPanel()
             showMainPanel()
         } else if mainPanel?.isVisible == true {
             closeTransientPanels()
@@ -513,7 +537,8 @@ final class MenuPanelCoordinator: NSObject, NSWindowDelegate {
     }
 
     private func showSettingsPanel() {
-        closeTransientPanels()
+        closeTransientPanels(presentsPendingHighCPUAlert: false)
+        hideHighCPUAlertPanel()
         let settingsPanel = ensureSettingsPanel()
         if !settingsPanel.isVisible {
             settingsPanel.center()
@@ -524,25 +549,50 @@ final class MenuPanelCoordinator: NSObject, NSWindowDelegate {
     }
 
     private func updateHighCPUAlertPanel(for alert: HighCPUAlert?) {
-        guard alert != nil else {
-            highCPUAlertPanel?.close()
-            highCPUAlertPanel?.contentViewController = nil
-            highCPUAlertPanel = nil
-            removeEventMonitorsIfIdle()
-            if mainPanel?.isVisible != true {
-                statusItem.button?.highlight(false)
-            }
+        guard let alert else {
+            hideHighCPUAlertPanel()
+            return
+        }
+        guard canPresentHighCPUAlert else {
+            hideHighCPUAlertPanel()
             return
         }
 
-        closeTransientPanels()
         let highCPUAlertPanel = ensureHighCPUAlertPanel()
         positionHighCPUAlertPanel(highCPUAlertPanel)
         installEventMonitors()
-        NSApp.activate(ignoringOtherApps: true)
         highCPUAlertPanel.orderFrontRegardless()
-        highCPUAlertPanel.makeKey()
         statusItem.button?.highlight(true)
+        if presentedHighCPUAlertID != alert.id {
+            presentedHighCPUAlertID = alert.id
+            store.markHighCPUAlertPresented()
+        }
+    }
+
+    private var canPresentHighCPUAlert: Bool {
+        let hasVisibleTempraSurface = mainPanel?.isVisible == true
+            || settingsPanel?.isVisible == true
+            || detachedMonitorPanel?.isVisible == true
+        return !hasVisibleTempraSurface || !NSApp.isActive
+    }
+
+    private func hideHighCPUAlertPanel() {
+        highCPUAlertPanel?.close()
+        highCPUAlertPanel?.contentViewController = nil
+        highCPUAlertPanel = nil
+        presentedHighCPUAlertID = nil
+        removeEventMonitorsIfIdle()
+        if mainPanel?.isVisible != true {
+            statusItem.button?.highlight(false)
+        }
+    }
+
+    private func presentPendingHighCPUAlertAfterCurrentTransition() {
+        Task { @MainActor [weak self] in
+            await Task.yield()
+            guard let self, !self.isInvalidated else { return }
+            self.updateHighCPUAlertPanel(for: self.store.pendingHighCPUAlert)
+        }
     }
 
     private func positionMainPanel(_ mainPanel: TempraPanel) {
@@ -563,7 +613,12 @@ final class MenuPanelCoordinator: NSObject, NSWindowDelegate {
         let size = TempraLayout.highCPUAlertPanelSize
         let idealX = buttonFrame.midX - size.width / 2
         let x = min(max(idealX, visibleFrame.minX + 6), visibleFrame.maxX - size.width - 6)
-        let y = buttonFrame.minY - size.height + 2
+        let idealY = buttonFrame.minY - size.height + 2
+        let y = min(
+            max(idealY, visibleFrame.minY + 6),
+            visibleFrame.maxY - size.height - 6
+        )
+        presentation.updateHighCPUAlertArrowX(buttonFrame.midX - x)
         highCPUAlertPanel.setFrameOrigin(CGPoint(x: x, y: y))
     }
 
@@ -726,6 +781,7 @@ final class MenuPanelCoordinator: NSObject, NSWindowDelegate {
             return
         }
         removeEventMonitorsIfIdle()
+        presentPendingHighCPUAlertAfterCurrentTransition()
     }
 
     private func setMonitorDetached(_ isDetached: Bool) {
@@ -818,7 +874,8 @@ private struct HighCPUAlertPanelRoot: View {
             if let alert = store.pendingHighCPUAlert {
                 HighCPUAlertView(
                     alert: alert,
-                    onContinue: store.dismissHighCPUAlert,
+                    arrowX: presentation.highCPUAlertArrowX,
+                    onContinue: store.continuePendingHighCPUAlert,
                     onLimit: store.limitPendingHighCPUAlert,
                     onIgnore: {
                         store.ignoreHighCPUAlerts(for: alert.bundleIdentifier)

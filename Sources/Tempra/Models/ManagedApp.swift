@@ -105,8 +105,6 @@ struct ManagedApp: Identifiable, Sendable {
     let requiresPrivilegedControl: Bool
     var windowVisibility: AppWindowVisibility
     var isProtectedByForegroundOverlay: Bool
-    var cpuPowerWatts: Double? = nil
-    var cpuEnergyJoulesPerCPUSecond: Double? = nil
     var status: ManagementStatus
 
     init(
@@ -128,8 +126,6 @@ struct ManagedApp: Identifiable, Sendable {
         requiresPrivilegedControl: Bool? = nil,
         windowVisibility: AppWindowVisibility = .unknown,
         isProtectedByForegroundOverlay: Bool = false,
-        cpuPowerWatts: Double? = nil,
-        cpuEnergyJoulesPerCPUSecond: Double? = nil,
         status: ManagementStatus
     ) {
         self.bundleIdentifier = bundleIdentifier
@@ -166,8 +162,6 @@ struct ManagedApp: Identifiable, Sendable {
                 || (isSystemProcess && processIdentities.isEmpty))
         self.windowVisibility = windowVisibility
         self.isProtectedByForegroundOverlay = isProtectedByForegroundOverlay
-        self.cpuPowerWatts = cpuPowerWatts
-        self.cpuEnergyJoulesPerCPUSecond = cpuEnergyJoulesPerCPUSecond
         self.status = status
     }
 

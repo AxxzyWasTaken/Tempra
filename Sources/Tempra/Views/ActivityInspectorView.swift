@@ -164,11 +164,6 @@ struct ActivityInspectorView: View {
                 value: item.residentMemoryText,
                 help: "The sum of resident memory for this app and its helper processes. Shared memory can be counted more than once."
             )
-            metricRow(
-                "Estimated CPU power",
-                value: item.cpuPowerText,
-                help: "Approximate processor power attributed by macOS. GPU and other system power are not included."
-            )
         }
     }
 

@@ -34,7 +34,6 @@ struct ManagementPauseProjectionTests {
             isEnabled: true,
             averageCPUByIdentifier: [:],
             savedCPUByIdentifier: [:],
-            savedPowerByIdentifier: [:],
             managementPauseUntil: until,
             attentionIdentifiers: [],
             iconCache: AppIconCache()

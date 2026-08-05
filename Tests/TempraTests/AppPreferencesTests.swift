@@ -4,6 +4,22 @@ import Testing
 
 @Suite("App preferences")
 struct AppPreferencesTests {
+    @Test("High CPU notification defaults match the sustained detector")
+    func highCPUNotificationDefaults() throws {
+        let preferences = AppPreferences()
+        let decoded = try JSONDecoder().decode(
+            AppPreferences.self,
+            from: Data("{}".utf8)
+        )
+
+        for value in [preferences, decoded] {
+            #expect(value.highCPUThreshold == 95)
+            #expect(value.highCPUDuration == 30)
+            #expect(value.notificationCooldown == 10 * 60)
+        }
+        #expect(AppPreferences.cooldownOptions.contains(10 * 60))
+    }
+
     @Test("CPU limit range scales with logical cores")
     func cpuLimitRangeScalesWithLogicalCores() {
         #expect(CPULimitRange.maximumPercent(logicalCoreCount: 0) == 100)

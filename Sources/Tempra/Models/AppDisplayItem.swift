@@ -10,8 +10,6 @@ struct AppDisplayItem: Identifiable {
     let cpuPercent: Double
     let averageCPUPercent: Double
     let estimatedSavedCPUPercent: Double
-    let cpuPowerWatts: Double?
-    let estimatedSavedPowerWatts: Double?
     let residentMemoryBytes: UInt64?
     let processCount: Int
     let controllableProcessCount: Int
@@ -40,8 +38,6 @@ struct AppDisplayItem: Identifiable {
         cpuPercent: Double,
         averageCPUPercent: Double,
         estimatedSavedCPUPercent: Double,
-        cpuPowerWatts: Double? = nil,
-        estimatedSavedPowerWatts: Double? = nil,
         residentMemoryBytes: UInt64? = nil,
         processCount: Int = 0,
         controllableProcessCount: Int = 0,
@@ -70,8 +66,6 @@ struct AppDisplayItem: Identifiable {
         self.cpuPercent = cpuPercent
         self.averageCPUPercent = averageCPUPercent
         self.estimatedSavedCPUPercent = estimatedSavedCPUPercent
-        self.cpuPowerWatts = cpuPowerWatts
-        self.estimatedSavedPowerWatts = estimatedSavedPowerWatts
         self.residentMemoryBytes = residentMemoryBytes
         self.processCount = processCount
         self.controllableProcessCount = controllableProcessCount
@@ -126,16 +120,6 @@ struct AppDisplayItem: Identifiable {
     var savedCPUText: String {
         guard isRunning, status.isActivelyLimitingCPU else { return "—" }
         return String(format: "%.1f%%", estimatedSavedCPUPercent)
-    }
-
-    var cpuPowerText: String {
-        guard isRunning else { return "—" }
-        return PowerMetricFormatter.text(watts: cpuPowerWatts)
-    }
-
-    var savedPowerText: String {
-        guard isRunning else { return "—" }
-        return PowerMetricFormatter.text(watts: estimatedSavedPowerWatts)
     }
 
     var residentMemoryText: String {

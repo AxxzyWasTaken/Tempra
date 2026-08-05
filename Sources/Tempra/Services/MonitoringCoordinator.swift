@@ -58,9 +58,6 @@ final class MonitoringCoordinator {
             if !previousDemand.samplesApplications, demand.samplesApplications {
                 await service.resetApplicationBaseline()
             }
-            if !demand.samplesPower {
-                await service.resetPowerMetrics()
-            }
         }
 
         if refreshImmediately, demand != .dormant {
@@ -94,7 +91,6 @@ final class MonitoringCoordinator {
             samplesSystemCPU: demand.samplesSystemCPU,
             samplesApplications: true,
             includesEssentialSystemProcesses: includesEssentialSystemProcesses,
-            samplesPower: demand.samplesPower,
             isLatencySensitive: true,
             processChange: processChange
         ))
@@ -131,16 +127,15 @@ final class MonitoringCoordinator {
                 samplesSystemCPU: true,
                 samplesApplications: false,
                 includesEssentialSystemProcesses: false,
-                samplesPower: false,
                 isLatencySensitive: isLatencySensitive,
                 processChange: nil
             ))
-        case .management, .liveUI, .continuous, .continuousManagement:
+        case .management, .highCPUAlerts, .liveUI, .continuous,
+                .continuousManagement:
             enqueue(makeRequest(
                 samplesSystemCPU: demand.samplesSystemCPU,
                 samplesApplications: true,
                 includesEssentialSystemProcesses: includesEssentialSystemProcesses,
-                samplesPower: demand.samplesPower,
                 isLatencySensitive: isLatencySensitive,
                 processChange: nil
             ))
@@ -151,7 +146,6 @@ final class MonitoringCoordinator {
         samplesSystemCPU: Bool,
         samplesApplications: Bool,
         includesEssentialSystemProcesses: Bool,
-        samplesPower: Bool,
         isLatencySensitive: Bool,
         processChange: ProcessChangeNotification?
     ) -> MonitoringRequest {
@@ -162,7 +156,6 @@ final class MonitoringCoordinator {
             samplesApplications: samplesApplications,
             includesEssentialSystemProcesses: includesEssentialSystemProcesses,
             processTableRefreshInterval: demand.processTableRefreshInterval,
-            samplesPower: samplesPower,
             networkActivityBundleIdentifiers: networkActivityBundleIdentifiers,
             refreshesAudioActivity: demand.refreshesAudioActivity,
             isLatencySensitive: isLatencySensitive,

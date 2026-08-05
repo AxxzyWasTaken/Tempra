@@ -4,6 +4,7 @@ enum MonitoringDemand: Equatable {
     case dormant
     case menuBar
     case management(samplesSystemCPU: Bool)
+    case highCPUAlerts(samplesSystemCPU: Bool)
     case liveUI
     case continuous
     case continuousManagement
@@ -12,7 +13,8 @@ enum MonitoringDemand: Equatable {
         switch self {
         case .dormant:
             nil
-        case .menuBar, .management, .continuous, .continuousManagement:
+        case .menuBar, .management, .highCPUAlerts, .continuous,
+                .continuousManagement:
             5
         case .liveUI:
             1
@@ -21,7 +23,7 @@ enum MonitoringDemand: Equatable {
 
     var temperatureInterval: TimeInterval? {
         switch self {
-        case .dormant, .menuBar, .management:
+        case .dormant, .menuBar, .management, .highCPUAlerts:
             nil
         case .liveUI:
             2
@@ -36,13 +38,9 @@ enum MonitoringDemand: Equatable {
             5
         case .continuous, .continuousManagement:
             15
-        case .dormant, .menuBar, .management:
+        case .dormant, .menuBar, .management, .highCPUAlerts:
             30
         }
-    }
-
-    var samplesPower: Bool {
-        self == .liveUI
     }
 
     var refreshesAudioActivity: Bool {
@@ -51,7 +49,8 @@ enum MonitoringDemand: Equatable {
 
     var samplesApplications: Bool {
         switch self {
-        case .management, .liveUI, .continuous, .continuousManagement:
+        case .management, .highCPUAlerts, .liveUI, .continuous,
+                .continuousManagement:
             true
         case .dormant, .menuBar:
             false
@@ -62,11 +61,22 @@ enum MonitoringDemand: Equatable {
         self == .liveUI || self == .continuous || self == .continuousManagement
     }
 
+    var detectsHighCPU: Bool {
+        switch self {
+        case .highCPUAlerts, .liveUI, .continuous, .continuousManagement:
+            true
+        case .dormant, .menuBar, .management:
+            false
+        }
+    }
+
     var samplesSystemCPU: Bool {
         switch self {
         case .dormant:
             false
         case .management(let samplesSystemCPU):
+            samplesSystemCPU
+        case .highCPUAlerts(let samplesSystemCPU):
             samplesSystemCPU
         case .menuBar, .liveUI, .continuous, .continuousManagement:
             true
@@ -78,6 +88,7 @@ enum MonitoringDemand: Equatable {
         isContinuousMonitoringEnabled: Bool,
         showsCPUUsageInMenuBar: Bool,
         requiresContextMonitoring: Bool = false,
+        requiresHighCPUDetection: Bool = false,
         requiresApplicationMonitoring: Bool = false
     ) -> MonitoringDemand {
         if isPresentationActive {
@@ -88,6 +99,11 @@ enum MonitoringDemand: Equatable {
         }
         if isContinuousMonitoringEnabled {
             return .continuous
+        }
+        if requiresHighCPUDetection {
+            return .highCPUAlerts(
+                samplesSystemCPU: showsCPUUsageInMenuBar || requiresContextMonitoring
+            )
         }
         if requiresApplicationMonitoring {
             return .management(

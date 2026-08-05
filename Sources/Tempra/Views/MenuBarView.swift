@@ -14,8 +14,6 @@ enum ProcessSort: String, CaseIterable, Hashable, Identifiable {
     case averageAscending = "Lowest 1m Average"
     case currentDescending = "Highest Current CPU"
     case currentAscending = "Lowest Current CPU"
-    case powerDescending = "Highest Est. Power"
-    case powerAscending = "Lowest Est. Power"
     case name = "Name"
 
     var id: String { rawValue }
@@ -97,28 +95,6 @@ struct MenuBarItemLists {
         case .currentAscending:
             if lhs.cpuPercent != rhs.cpuPercent {
                 return lhs.cpuPercent < rhs.cpuPercent
-            }
-        case .powerDescending:
-            switch (lhs.cpuPowerWatts, rhs.cpuPowerWatts) {
-            case let (left?, right?) where left != right:
-                return left > right
-            case (_?, nil):
-                return true
-            case (nil, _?):
-                return false
-            default:
-                break
-            }
-        case .powerAscending:
-            switch (lhs.cpuPowerWatts, rhs.cpuPowerWatts) {
-            case let (left?, right?) where left != right:
-                return left < right
-            case (_?, nil):
-                return true
-            case (nil, _?):
-                return false
-            default:
-                break
             }
         case .name:
             break
@@ -562,12 +538,7 @@ struct MenuBarView: View {
     }
 
     private var summaryMetrics: some View {
-        let batteryComparison = store.batteryPowerComparison
-        let batteryResultColor = batteryComparison.savedWatts.map {
-            $0 >= 0 ? TempraPalette.saved : TempraPalette.stopped
-        } ?? TempraPalette.primaryText
-
-        return VStack(spacing: 2) {
+        VStack(spacing: 2) {
             metricLine(
                 "TOTAL CPU USAGE",
                 value: cpuText(displayedCPU.totalPercent),
@@ -596,41 +567,6 @@ struct MenuBarView: View {
                 "CPU USAGE SAVED",
                 value: cpuText(displayedSavedCPU),
                 color: TempraPalette.saved
-            )
-            metricLine(
-                "EST. APP POWER",
-                value: PowerMetricFormatter.text(watts: store.trackedAppCPUPowerWatts),
-                color: TempraPalette.primaryText
-            )
-            .help(
-                "Approximate app power based on processor energy attributed by macOS, "
-                    + "averaged over three seconds. Actual total power may be higher because "
-                    + "GPU, networking, storage, display, and shared system power cannot be "
-                    + "fully attributed to an app."
-            )
-            metricLine(
-                "BATTERY DRAW BEFORE LIMIT",
-                value: BatteryPowerFormatter.beforeLimitText(batteryComparison),
-                color: TempraPalette.primaryText
-            )
-            metricLine(
-                "BATTERY DRAW AFTER LIMIT",
-                value: BatteryPowerFormatter.afterLimitText(batteryComparison),
-                color: batteryResultColor
-            )
-            .help(
-                "Tempra freezes a stable whole-system battery baseline, waits for the limiter "
-                    + "and battery sensor to settle, then measures a separate stable window. "
-                    + "The result is frozen until the limiting session ends."
-            )
-            metricLine(
-                "MEASURED BATTERY CHANGE",
-                value: BatteryPowerFormatter.changeText(batteryComparison),
-                color: batteryResultColor
-            )
-            .help(
-                "This is the observed change in the Mac’s total battery draw. Tempra reports "
-                    + "Inconclusive when the readings are unstable or the set of limited apps changes."
             )
             metricLine(
                 "CPU TEMPERATURE",
@@ -780,15 +716,6 @@ struct MenuBarView: View {
                     : .averageDescending
             }
 
-            sortColumn(
-                "EST. W",
-                width: TempraLayout.powerColumnWidth,
-                isSelected: isPowerSort
-            ) {
-                presentation.processSort = presentation.processSort == .powerDescending
-                    ? .powerAscending
-                    : .powerDescending
-            }
         }
         .padding(.horizontal, TempraLayout.processRowHorizontalInset)
         .foregroundStyle(TempraPalette.secondaryText)
@@ -823,9 +750,6 @@ struct MenuBarView: View {
                         "Current estimated CPU use prevented while the rule is active. "
                             + "This value is not a cumulative total."
                     )
-                Text("EST. W")
-                    .font(TempraTypography.tableHeader)
-                    .frame(width: TempraLayout.powerColumnWidth, alignment: .trailing)
             }
             .padding(.horizontal, TempraLayout.processRowHorizontalInset)
             .foregroundStyle(TempraPalette.secondaryText)
@@ -1184,8 +1108,6 @@ struct MenuBarView: View {
             return switch presentation.processSort {
             case .averageDescending, .currentDescending: "Highest CPU Processes"
             case .averageAscending, .currentAscending: "Lowest CPU Processes"
-            case .powerDescending: "Highest Power Processes"
-            case .powerAscending: "Lowest Power Processes"
             case .name: "Processes by Name"
             }
         }
@@ -1199,11 +1121,6 @@ struct MenuBarView: View {
     private var isAverageSort: Bool {
         presentation.processSort == .averageDescending
             || presentation.processSort == .averageAscending
-    }
-
-    private var isPowerSort: Bool {
-        presentation.processSort == .powerDescending
-            || presentation.processSort == .powerAscending
     }
 
     private func badge(for scope: MenuScope) -> String {

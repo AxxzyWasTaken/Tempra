@@ -11,14 +11,13 @@ enum TempraLayout {
         height: 384
     )
     static let settingsPanelSize = CGSize(width: 420, height: 400)
-    static let highCPUAlertPanelSize = CGSize(width: 320, height: 286)
+    static let highCPUAlertPanelSize = CGSize(width: 344, height: 252)
     static let panelCornerRadius: CGFloat = 14
     static let processRowHeight: CGFloat = 18
     static let processRowHorizontalInset: CGFloat = 4
     static let processColumnSpacing: CGFloat = 5
     static let currentCPUColumnWidth: CGFloat = 43
     static let averageCPUColumnWidth: CGFloat = 47
-    static let powerColumnWidth: CGFloat = 52
 }
 
 enum TempraPalette {
@@ -191,12 +190,17 @@ enum TempraTypography {
 }
 
 struct MainPanelShape: Shape {
+    var arrowX: CGFloat? = nil
+
     func path(in rect: CGRect) -> Path {
         let radius = min(TempraLayout.panelCornerRadius, rect.width / 2)
         let notchHeight = TempraLayout.mainNotchHeight
         let notchHalfWidth: CGFloat = 11
         let bodyTop = rect.minY + notchHeight
-        let midpoint = rect.midX
+        let midpoint = min(
+            max(arrowX ?? rect.midX, rect.minX + radius + notchHalfWidth),
+            rect.maxX - radius - notchHalfWidth
+        )
 
         var path = Path()
         path.move(to: CGPoint(x: rect.minX + radius, y: bodyTop))

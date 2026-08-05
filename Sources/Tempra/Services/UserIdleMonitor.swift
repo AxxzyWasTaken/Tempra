@@ -21,14 +21,3 @@ struct UserIdleMonitor {
         return seconds
     }
 }
-
-extension BatteryPowerState {
-    var profilePowerSource: ProfilePowerSource {
-        switch self {
-        case .discharging:
-            .battery
-        case .externalPower:
-            .externalPower
-        }
-    }
-}

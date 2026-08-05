@@ -399,22 +399,20 @@ struct TempraSettingsView: View {
 
     private var detectionSettings: some View {
         VStack(alignment: .leading, spacing: 15) {
-            if !store.preferences.continuousMonitoringEnabled {
-                Text("Enable Continuous Monitoring in General to use background CPU alerts.")
-                    .font(.system(size: 11.5))
-                    .foregroundStyle(TempraPalette.waiting)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-
             Toggle("Show Tempra alerts for sustained high CPU", isOn: Binding(
                 get: { store.preferences.highCPUAlertsEnabled },
                 set: { enabled in store.setHighCPUAlertsEnabled(enabled) }
             ))
             .toggleStyle(.checkbox)
 
-            Text("Alerts appear below Tempra’s menu bar icon and require no notification permission.")
+            Text(
+                "Alerts appear below Tempra’s menu bar icon and require no notification "
+                    + "permission. Tempra samples running apps every 5 seconds in the "
+                    + "background while this is on."
+            )
                 .font(.system(size: 11.5))
                 .foregroundStyle(TempraPalette.secondaryText)
+                .fixedSize(horizontal: false, vertical: true)
 
             Divider()
                 .overlay(TempraPalette.separator)
@@ -428,7 +426,7 @@ struct TempraSettingsView: View {
                         set: { threshold in store.setHighCPUThreshold(threshold) }
                     ),
                     in: 25...CPULimitRange.maximumPercent,
-                    step: 25
+                    step: 5
                 ) {
                     Text("\(Int(store.preferences.highCPUThreshold))% CPU")
                         .monospacedDigit()
@@ -450,7 +448,7 @@ struct TempraSettingsView: View {
                 .frame(width: 145)
             }
 
-            settingsPickerRow("Alert cooldown") {
+            settingsPickerRow("Remind after continuing") {
                 Picker("", selection: Binding(
                     get: { store.preferences.notificationCooldown },
                     set: { duration in store.setNotificationCooldown(duration) }
@@ -463,9 +461,13 @@ struct TempraSettingsView: View {
                 .frame(width: 145)
             }
 
-            Text("Alerts clear after the app remains below 70% CPU for 10 seconds.")
+            Text(
+                "Tempra waits through launch and foreground activity, skips apps that already "
+                    + "have rules, and closes an alert 8 seconds after the CPU spike ends."
+            )
                 .font(.system(size: 11.5))
                 .foregroundStyle(TempraPalette.secondaryText)
+                .fixedSize(horizontal: false, vertical: true)
 
             if !store.preferences.ignoredHighCPUAlertBundleIdentifiers.isEmpty {
                 HStack {
@@ -489,7 +491,6 @@ struct TempraSettingsView: View {
             }
         }
         .settingsPane()
-        .disabled(!store.preferences.continuousMonitoringEnabled)
     }
 
     private var statsSettings: some View {

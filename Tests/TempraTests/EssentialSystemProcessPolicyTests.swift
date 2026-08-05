@@ -193,13 +193,11 @@ struct BackgroundProcessPolicyTests {
             apps: [app],
             preferences: preferences,
             suspendedIdentifiers: [],
-            pendingAlert: nil,
             now: Date(timeIntervalSince1970: 1_000)
         )
 
         #expect(result.attentionIdentifiers.isEmpty)
-        #expect(result.pendingAlert == nil)
-        #expect(result.events.isEmpty)
+        #expect(result.notificationCandidates.isEmpty)
     }
 
     @Test("Background identities are stable and monitor-only")

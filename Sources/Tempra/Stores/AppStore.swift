@@ -47,6 +47,7 @@ final class AppStore: ObservableObject {
     private let historyStore: AppHistoryStore
     private let suspensionClock: SuspensionExpirationClock
     private let userIdleMonitor: UserIdleMonitor
+    private let doNotDisturbMonitor: DoNotDisturbMonitor
     private let diagnosticExporter: any DiagnosticExporting
     let iconCache: AppIconCache
     let managementLedger: ManagementLedger
@@ -55,6 +56,10 @@ final class AppStore: ObservableObject {
     ) { [weak self] sample in self?.handleMonitoringSample(sample) }
     private let workspaceEventMonitor = WorkspaceEventMonitor()
     private var highCPUDetector = HighCPUDetector()
+    private var highCPUAlertQueue = HighCPUAlertQueue()
+    private var sustainedHighCPUProcessIdentities: Set<ProcessIdentity> = []
+    private var highCPURecoveryTask: Task<Void, Never>?
+    private var highCPURecoveryAlertID: UUID?
     var runtimeMetrics = RuntimeMetrics()
     private(set) var isPresentationActive = false
     private var hasBegunShutdown = false
@@ -98,6 +103,7 @@ final class AppStore: ObservableObject {
         privilegedHelperManager: PrivilegedHelperManager? = nil,
         suspensionClock: SuspensionExpirationClock = .continuous,
         userIdleMonitor: UserIdleMonitor = UserIdleMonitor(),
+        doNotDisturbMonitor: DoNotDisturbMonitor = DoNotDisturbMonitor(),
         diagnosticExporter: (any DiagnosticExporting)? = nil,
         persistenceErrorHandler: @escaping PersistenceErrorHandler
     ) throws {
@@ -141,6 +147,7 @@ final class AppStore: ObservableObject {
         self.historyStore = historyStore
         self.suspensionClock = suspensionClock
         self.userIdleMonitor = userIdleMonitor
+        self.doNotDisturbMonitor = doNotDisturbMonitor
         self.diagnosticExporter = diagnosticExporter ?? NativeDiagnosticExporter()
         self.iconCache = iconCache ?? AppIconCache()
         self.managementLedger = managementLedger
@@ -462,6 +469,9 @@ final class AppStore: ObservableObject {
             reportPersistenceError(error)
             return
         }
+        if !enabled {
+            resetHighCPUNotificationState()
+        }
         applyRulesToCurrentApps()
         configureMonitoringDemand(refreshImmediately: true)
     }
@@ -482,6 +492,7 @@ final class AppStore: ObservableObject {
         guard !hasBegunShutdown, duration.isFinite, duration > 0 else { return }
         preferences.managementPauseUntil = suspensionClock.now().addingTimeInterval(duration)
         guard persistPreferences() else { return }
+        resetHighCPUNotificationState()
         scheduleManagementPauseExpiration()
         applyRulesToCurrentApps()
         configureMonitoringDemand(refreshImmediately: true)
@@ -553,38 +564,67 @@ final class AppStore: ObservableObject {
     }
 
     func setHighCPUAlertsEnabled(_ enabled: Bool) {
+        guard preferences.highCPUAlertsEnabled != enabled else { return }
         preferences.highCPUAlertsEnabled = enabled
         guard persistPreferences() else { return }
         if !enabled {
-            pendingHighCPUAlert = nil
+            resetHighCPUNotificationState()
         }
+        configureMonitoringDemand(refreshImmediately: enabled)
     }
 
     func setHighCPUThreshold(_ threshold: Double) {
-        preferences.highCPUThreshold = min(
+        guard threshold.isFinite else { return }
+        let clampedThreshold = min(
             max(25, threshold),
             CPULimitRange.maximumPercent
         )
-        persistPreferences()
+        guard preferences.highCPUThreshold != clampedThreshold else { return }
+        preferences.highCPUThreshold = clampedThreshold
+        guard persistPreferences() else { return }
+        resetHighCPUNotificationState()
     }
 
     func setHighCPUDuration(_ duration: TimeInterval) {
+        guard duration.isFinite,
+              duration > 0,
+              preferences.highCPUDuration != duration else { return }
         preferences.highCPUDuration = duration
-        persistPreferences()
+        guard persistPreferences() else { return }
+        resetHighCPUNotificationState()
     }
 
     func setNotificationCooldown(_ duration: TimeInterval) {
+        guard duration.isFinite,
+              duration > 0,
+              preferences.notificationCooldown != duration else { return }
         preferences.notificationCooldown = duration
         persistPreferences()
     }
 
+    func markHighCPUAlertPresented() {
+        guard let alert = highCPUAlertQueue.current else { return }
+        highCPUDetector.mute(
+            processIdentity: alert.processIdentity,
+            for: 30
+        )
+    }
+
     func dismissHighCPUAlert() {
-        pendingHighCPUAlert = nil
+        continuePendingHighCPUAlert()
+    }
+
+    func continuePendingHighCPUAlert() {
+        guard let alert = highCPUAlertQueue.current else { return }
+        highCPUDetector.mute(
+            processIdentity: alert.processIdentity,
+            for: preferences.notificationCooldown
+        )
+        finishCurrentHighCPUAlert()
     }
 
     func limitPendingHighCPUAlert() {
-        guard let alert = pendingHighCPUAlert else { return }
-        pendingHighCPUAlert = nil
+        guard let alert = highCPUAlertQueue.current else { return }
         applyQuickRule(
             bundleIdentifier: alert.bundleIdentifier,
             displayName: alert.displayName,
@@ -593,14 +633,16 @@ final class AppStore: ObservableObject {
             limitPercent: 50,
             delaySeconds: 0
         )
+        guard rules[alert.bundleIdentifier]?.action == .limit else { return }
+        finishCurrentHighCPUAlert()
     }
 
     func ignoreHighCPUAlerts(for bundleIdentifier: String) {
         preferences.ignoredHighCPUAlertBundleIdentifiers.insert(bundleIdentifier)
         guard persistPreferences() else { return }
-        if pendingHighCPUAlert?.bundleIdentifier == bundleIdentifier {
-            pendingHighCPUAlert = nil
-        }
+        highCPUAlertQueue.removeAll(bundleIdentifier: bundleIdentifier)
+        synchronizePendingHighCPUAlert()
+        updateHighCPURecoveryDismissal()
     }
 
     func clearIgnoredHighCPUAlerts() {
@@ -755,6 +797,10 @@ final class AppStore: ObservableObject {
             requiresContextMonitoring: preferences.profiles.contains {
                 $0.activation.isAutomatic
             },
+            requiresHighCPUDetection: preferences.highCPUAlertsEnabled
+                && isEnabled
+                && !isManagementPaused
+                && lifecycleSuspensions.isEmpty,
             requiresApplicationMonitoring: requiresApplicationMonitoring
         )
     }
@@ -781,11 +827,11 @@ final class AppStore: ObservableObject {
         let demand = monitoringDemand
         let previousDemand = monitoringCoordinator.demand
 
-        if !demand.recordsApplicationMetrics {
-            runtimeMetrics.resetApplicationMetrics()
-            highCPUDetector.reset()
-            attentionIdentifiers.removeAll()
-            pendingHighCPUAlert = nil
+        if !demand.detectsHighCPU {
+            resetHighCPUNotificationState()
+        }
+        if previousDemand.recordsApplicationMetrics,
+           !demand.recordsApplicationMetrics {
             do {
                 try historyStore.persistCPUHistory()
                 try historyStore.persistAppCPUHistory()
@@ -830,23 +876,13 @@ final class AppStore: ObservableObject {
         guard !hasBegunShutdown else { return }
         var rebuildsDisplayItems = false
         let automaticProfileChanged = updateManagementContext(
-            batteryPower: sample.batteryPower,
+            powerSource: sample.powerSource,
             userIdleDuration: userIdleMonitor.sample()
         )
 
         if let systemCPU = sample.systemCPU {
-            let activeLimitIdentifiers = Set(
-                managementCoordinator.statuses.compactMap { identifier, status in
-                    status.isActivelyLimitingCPU ? identifier : nil
-                }
-            )
-            runtimeMetrics.updateBatteryPower(
-                state: sample.batteryPower,
-                activeLimitIdentifiers: activeLimitIdentifiers
-            )
             self.systemCPU = systemCPU
         }
-        runtimeMetrics.setPowerSupported(sample.powerMetricsSupported)
 
         if let sampledApps = sample.apps {
             apps = sampledApps
@@ -854,7 +890,7 @@ final class AppStore: ObservableObject {
                 runtimeMetrics.updateCPUAverages(apps: apps)
             }
             refreshRuleMetadata()
-            if demand.recordsApplicationMetrics, sample.didRefreshApplications {
+            if demand.detectsHighCPU, sample.didRefreshApplications {
                 updateHighCPUState()
             }
             applyRulesToCurrentApps(rebuildsDisplayItems: false)
@@ -866,14 +902,6 @@ final class AppStore: ObservableObject {
             privilegedControlStatus = .helperUnavailable(privilegedAccessError)
         } else {
             privilegedControlStatus = privilegedHelperManager.status
-        }
-
-        if demand.samplesPower, sample.apps != nil {
-            updatePowerMetrics(powerByIdentifier: sample.powerByIdentifier)
-            rebuildsDisplayItems = true
-        } else if !demand.samplesPower, !runtimeMetrics.savedPowerByIdentifier.isEmpty {
-            runtimeMetrics.clearPowerMetrics()
-            rebuildsDisplayItems = true
         }
 
         if rebuildsDisplayItems {
@@ -903,6 +931,7 @@ final class AppStore: ObservableObject {
             managementPauseExpirationTask?.cancel()
             managementPauseExpirationTask = nil
             managementPauseExpirationID = nil
+            cancelHighCPURecoveryDismissal()
             lifecycleResumeTask?.cancel()
             lifecycleResumeTask = nil
             lifecycleResumeID = nil
@@ -919,7 +948,6 @@ final class AppStore: ObservableObject {
                 reportPersistenceError(error)
             }
             workspaceEventMonitor.stop()
-            runtimeMetrics.clearPowerMetrics()
             await monitoringCoordinator.shutdown()
         }
         let result = await managementCoordinator.shutdown()
@@ -962,35 +990,104 @@ final class AppStore: ObservableObject {
             || rules.keys.contains(where: BackgroundProcessPolicy.isMonitorOnlyIdentifier)
     }
 
-    private func updatePowerMetrics(
-        powerByIdentifier: [String: ProcessPowerSample]
-    ) {
-        apps = runtimeMetrics.updatePower(
-            apps: apps,
-            samples: powerByIdentifier,
-            statuses: managementCoordinator.statuses,
-            savedCPUByIdentifier: managementCoordinator.estimatedSavedCPUByIdentifier
-        )
-    }
-
     private func updateHighCPUState() {
+        let now = Date()
         let result = highCPUDetector.evaluate(
             apps: apps,
             preferences: preferences,
+            managedIdentifiers: Set(rules.values.compactMap { rule in
+                rule.isEnabled && rule.hasBehavior ? rule.bundleIdentifier : nil
+            }),
             suspendedIdentifiers: Set(suspensions.compactMap {
                 $0.value.isActive ? $0.key : nil
             }),
-            pendingAlert: pendingHighCPUAlert
+            isManagementActive: isEnabled
+                && !isManagementPaused
+                && lifecycleSuspensions.isEmpty,
+            canControlPrivilegedProcesses: privilegedControlStatus.isEnabled,
+            isDoNotDisturbEnabled: preferences.highCPUAlertsEnabled
+                && doNotDisturbMonitor.isEnabled(at: now),
+            now: now
         )
         attentionIdentifiers = result.attentionIdentifiers
-        pendingHighCPUAlert = result.pendingAlert
-        for event in result.events {
+        sustainedHighCPUProcessIdentities = result.sustainedProcessIdentities
+        let acceptedAlerts = highCPUAlertQueue.enqueue(result.notificationCandidates)
+        highCPUAlertQueue.removeResolvedQueuedAlerts(
+            sustainedProcessIdentities: result.sustainedProcessIdentities
+        )
+        synchronizePendingHighCPUAlert()
+        updateHighCPURecoveryDismissal()
+        for alert in acceptedAlerts {
             recordActivity(
-                bundleIdentifier: event.bundleIdentifier,
+                bundleIdentifier: alert.bundleIdentifier,
                 kind: .highCPU,
-                detail: String(format: "%.1f%% CPU", event.cpuPercent)
+                detail: String(format: "%.1f%% CPU", alert.cpuPercent)
             )
         }
+    }
+
+    private func resetHighCPUNotificationState() {
+        cancelHighCPURecoveryDismissal()
+        highCPUDetector.reset()
+        highCPUAlertQueue.removeAll()
+        sustainedHighCPUProcessIdentities.removeAll()
+        attentionIdentifiers.removeAll()
+        synchronizePendingHighCPUAlert()
+    }
+
+    private func finishCurrentHighCPUAlert() {
+        cancelHighCPURecoveryDismissal()
+        highCPUAlertQueue.removeCurrent()
+        synchronizePendingHighCPUAlert()
+        updateHighCPURecoveryDismissal()
+    }
+
+    private func synchronizePendingHighCPUAlert() {
+        let nextAlert = highCPUAlertQueue.current
+        if pendingHighCPUAlert != nextAlert {
+            pendingHighCPUAlert = nextAlert
+        }
+    }
+
+    private func updateHighCPURecoveryDismissal() {
+        guard let alert = highCPUAlertQueue.current,
+              !sustainedHighCPUProcessIdentities.contains(alert.processIdentity) else {
+            cancelHighCPURecoveryDismissal()
+            return
+        }
+        guard highCPURecoveryAlertID != alert.id else { return }
+
+        cancelHighCPURecoveryDismissal()
+        highCPURecoveryAlertID = alert.id
+        highCPURecoveryTask = Task { @MainActor [weak self] in
+            do {
+                try await Task.sleep(for: .seconds(8))
+            } catch {
+                return
+            }
+            guard !Task.isCancelled else { return }
+            self?.completeHighCPURecoveryDismissal(alertID: alert.id)
+        }
+    }
+
+    private func completeHighCPURecoveryDismissal(alertID: UUID) {
+        guard highCPURecoveryAlertID == alertID,
+              highCPUAlertQueue.current?.id == alertID,
+              let current = highCPUAlertQueue.current,
+              !sustainedHighCPUProcessIdentities.contains(current.processIdentity) else {
+            return
+        }
+        highCPURecoveryTask = nil
+        highCPURecoveryAlertID = nil
+        highCPUAlertQueue.removeCurrent()
+        synchronizePendingHighCPUAlert()
+        updateHighCPURecoveryDismissal()
+    }
+
+    private func cancelHighCPURecoveryDismissal() {
+        highCPURecoveryTask?.cancel()
+        highCPURecoveryTask = nil
+        highCPURecoveryAlertID = nil
     }
 
     private func refreshRuleMetadata() {
@@ -1064,6 +1161,7 @@ final class AppStore: ObservableObject {
     ) async {
         guard !hasBegunShutdown else { return }
         lifecycleSuspensions.insert(reason)
+        resetHighCPUNotificationState()
         lifecycleResumeTask?.cancel()
         lifecycleResumeTask = nil
         lifecycleResumeID = nil
@@ -1124,11 +1222,11 @@ final class AppStore: ObservableObject {
 
     @discardableResult
     func updateManagementContext(
-        batteryPower: BatteryPowerState?,
+        powerSource: PowerSourceState?,
         userIdleDuration: TimeInterval?
     ) -> Bool {
-        if let batteryPower {
-            managementContext.powerSource = batteryPower.profilePowerSource
+        if let powerSource {
+            managementContext.powerSource = powerSource.profilePowerSource
         }
         managementContext.userIdleDuration = userIdleDuration.flatMap {
             $0.isFinite && $0 >= 0 ? $0 : nil

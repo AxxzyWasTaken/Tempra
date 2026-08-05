@@ -55,9 +55,7 @@ struct AppStoreSuspensionTests {
                         windowVisibility: .hiddenOrMinimized,
                         status: .normal
                     )],
-                    didRefreshApplications: true,
-                    powerByIdentifier: [:],
-                    powerMetricsSupported: false
+                    didRefreshApplications: true
                 ),
                 demand: .dormant
             )
@@ -215,9 +213,7 @@ struct AppStoreSuspensionTests {
                         windowVisibility: .hiddenOrMinimized,
                         status: .normal
                     )],
-                    didRefreshApplications: true,
-                    powerByIdentifier: [:],
-                    powerMetricsSupported: false
+                    didRefreshApplications: true
                 ),
                 demand: .dormant
             )
@@ -289,9 +285,7 @@ struct AppStoreSuspensionTests {
                         windowVisibility: .hiddenOrMinimized,
                         status: .normal
                     )],
-                    didRefreshApplications: true,
-                    powerByIdentifier: [:],
-                    powerMetricsSupported: false
+                    didRefreshApplications: true
                 ),
                 demand: .dormant
             )
@@ -433,14 +427,11 @@ private actor SuspensionTestMonitoringService: MonitoringServicing {
             generation: request.generation,
             systemCPU: nil,
             apps: nil,
-            didRefreshApplications: false,
-            powerByIdentifier: [:],
-            powerMetricsSupported: false
+            didRefreshApplications: false
         )
     }
 
     func resetApplicationBaseline() {}
-    func resetPowerMetrics() {}
     func setTemperatureSamplingInterval(_ interval: TimeInterval?) {}
     func shutdown() {}
 }

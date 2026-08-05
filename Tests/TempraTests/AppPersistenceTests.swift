@@ -268,9 +268,7 @@ struct AppPersistenceTests {
                     generation: 1,
                     systemCPU: systemCPU,
                     apps: nil,
-                    didRefreshApplications: false,
-                    powerByIdentifier: [:],
-                    powerMetricsSupported: true
+                    didRefreshApplications: false
                 ),
                 demand: .menuBar
             )
@@ -283,63 +281,6 @@ struct AppPersistenceTests {
             #expect(!sample.hasEstimatedSavedCPUMeasurement)
             #expect(sample.cpuTemperatureCelsius == nil)
             #expect(try persistence.loadCPUHistory() == store.cpuHistorySamples)
-        }
-    }
-
-    @Test("Application-only samples preserve the battery measurement")
-    func applicationOnlySamplesPreserveBatteryMeasurement() throws {
-        try withDefaults { defaults in
-            let store = try AppStore(
-                persistence: AppPersistence(defaults: defaults),
-                managementCoordinator: ProcessManagementCoordinator(),
-                monitoringService: MonitoringService(),
-                launchAtLoginController: TestLaunchAtLoginController(),
-                startsMonitoring: false,
-                persistenceErrorHandler: { _ in }
-            )
-            let systemCPU = SystemCPUSnapshot(totalPercent: 10)
-
-            store.applyMonitoringSample(
-                MonitoringSample(
-                    generation: 1,
-                    systemCPU: systemCPU,
-                    apps: nil,
-                    didRefreshApplications: false,
-                    powerByIdentifier: [:],
-                    powerMetricsSupported: true,
-                    batteryPower: .discharging(watts: 10)
-                ),
-                demand: .menuBar
-            )
-            #expect(store.batteryPowerComparison.currentWatts == 10)
-            #expect(store.batteryPowerComparison.phase == .collectingBaseline)
-
-            store.applyMonitoringSample(
-                MonitoringSample(
-                    generation: 1,
-                    systemCPU: nil,
-                    apps: nil,
-                    didRefreshApplications: false,
-                    powerByIdentifier: [:],
-                    powerMetricsSupported: true
-                ),
-                demand: .dormant
-            )
-            #expect(store.batteryPowerComparison.currentWatts == 10)
-            #expect(store.batteryPowerComparison.phase == .collectingBaseline)
-
-            store.applyMonitoringSample(
-                MonitoringSample(
-                    generation: 1,
-                    systemCPU: systemCPU,
-                    apps: nil,
-                    didRefreshApplications: false,
-                    powerByIdentifier: [:],
-                    powerMetricsSupported: true
-                ),
-                demand: .menuBar
-            )
-            #expect(store.batteryPowerComparison == BatteryPowerComparison())
         }
     }
 

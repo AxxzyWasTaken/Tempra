@@ -11,7 +11,6 @@ extension AppStore {
             isEnabled: isEnabled,
             averageCPUByIdentifier: runtimeMetrics.averageCPUByIdentifier,
             savedCPUByIdentifier: managementCoordinator.estimatedSavedCPUByIdentifier,
-            savedPowerByIdentifier: runtimeMetrics.savedPowerByIdentifier,
             activeCPULimitSessionIdentifiers: managementCoordinator
                 .activeCPULimitSessionIdentifiers,
             protectionReasonsByIdentifier: managementCoordinator
@@ -45,25 +44,6 @@ extension AppStore {
 
     var estimatedSavedSystemPercent: Double {
         estimatedSavedCPUPercent / Double(max(1, ProcessInfo.processInfo.activeProcessorCount))
-    }
-
-    var trackedAppCPUPowerWatts: Double? {
-        PowerMetricAggregation.trackedPower(
-            apps: apps,
-            isSupported: runtimeMetrics.isPowerSupported
-        )
-    }
-
-    var estimatedSavedCPUPowerWatts: Double? {
-        PowerMetricAggregation.estimatedSavedPower(
-            apps: apps,
-            savingsByIdentifier: runtimeMetrics.savedPowerByIdentifier,
-            isSupported: runtimeMetrics.isPowerSupported
-        )
-    }
-
-    var batteryPowerComparison: BatteryPowerComparison {
-        runtimeMetrics.batteryPowerComparison
     }
 
     var hasActivePowerManagement: Bool {

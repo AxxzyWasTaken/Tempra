@@ -179,9 +179,9 @@ struct ManagementProfile: Codable, Equatable, Identifiable {
 
 struct AppPreferences: Codable, Equatable {
     var highCPUAlertsEnabled = false
-    var highCPUThreshold: Double = 100
+    var highCPUThreshold: Double = 95
     var highCPUDuration: TimeInterval = 30
-    var notificationCooldown: TimeInterval = 15 * 60
+    var notificationCooldown: TimeInterval = 10 * 60
     var ignoredHighCPUAlertBundleIdentifiers: Set<String> = []
     var launchAtLogin = false
     var profiles: [ManagementProfile] = []
@@ -227,9 +227,9 @@ struct AppPreferences: Codable, Equatable {
             Bool.self,
             forKey: .highCPUAlertsEnabled
         ) ?? false
-        highCPUThreshold = try container.decodeIfPresent(Double.self, forKey: .highCPUThreshold) ?? 100
+        highCPUThreshold = try container.decodeIfPresent(Double.self, forKey: .highCPUThreshold) ?? 95
         highCPUDuration = try container.decodeIfPresent(TimeInterval.self, forKey: .highCPUDuration) ?? 30
-        notificationCooldown = try container.decodeIfPresent(TimeInterval.self, forKey: .notificationCooldown) ?? 15 * 60
+        notificationCooldown = try container.decodeIfPresent(TimeInterval.self, forKey: .notificationCooldown) ?? 10 * 60
         ignoredHighCPUAlertBundleIdentifiers = try container.decodeIfPresent(
             Set<String>.self,
             forKey: .ignoredHighCPUAlertBundleIdentifiers
@@ -290,7 +290,13 @@ struct AppPreferences: Codable, Equatable {
     }
 
     static let durationOptions: [TimeInterval] = [10, 30, 60, 300]
-    static let cooldownOptions: [TimeInterval] = [5 * 60, 15 * 60, 30 * 60, 60 * 60]
+    static let cooldownOptions: [TimeInterval] = [
+        5 * 60,
+        10 * 60,
+        15 * 60,
+        30 * 60,
+        60 * 60
+    ]
 
     static func durationTitle(_ duration: TimeInterval) -> String {
         switch duration {

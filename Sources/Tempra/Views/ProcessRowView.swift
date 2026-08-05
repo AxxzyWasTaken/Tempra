@@ -88,18 +88,6 @@ struct ProcessRowView: View {
                     .frame(width: TempraLayout.currentCPUColumnWidth, alignment: .trailing)
                 cpuValue(item.averageCPUPercent)
                     .frame(width: TempraLayout.averageCPUColumnWidth, alignment: .trailing)
-                Text(item.cpuPowerText)
-                    .font(TempraTypography.processValue)
-                    .foregroundStyle(TempraPalette.primaryText)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.85)
-                    .frame(width: TempraLayout.powerColumnWidth, alignment: .trailing)
-                    .help(
-                        "Approximate app power based on processor energy attributed by macOS, "
-                            + "averaged over three seconds. Actual total power may be higher "
-                            + "because GPU, networking, storage, display, and shared system "
-                            + "power cannot be fully attributed to an app."
-                    )
             }
             .padding(.horizontal, TempraLayout.processRowHorizontalInset)
             .frame(height: TempraLayout.processRowHeight)
@@ -212,18 +200,6 @@ struct ManagedProcessRowView: View {
                     .foregroundStyle(TempraPalette.primaryText)
                     .lineLimit(1)
                     .frame(width: TempraLayout.averageCPUColumnWidth, alignment: .trailing)
-
-                Text(savedPowerValue)
-                    .font(TempraTypography.processValue)
-                    .foregroundStyle(TempraPalette.primaryText)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.85)
-                    .frame(width: TempraLayout.powerColumnWidth, alignment: .trailing)
-                    .help(
-                        "Approximate reduction calculated from Tempra’s prevented CPU estimate "
-                            + "and this app’s measured energy per CPU time. GPU and other power "
-                            + "that macOS cannot attribute to the app are not included."
-                    )
             }
             .padding(.horizontal, TempraLayout.processRowHorizontalInset)
             .frame(height: TempraLayout.processRowHeight)
@@ -237,11 +213,6 @@ struct ManagedProcessRowView: View {
 
     private var savedCPUValue: String {
         item.savedCPUText
-    }
-
-    private var savedPowerValue: String {
-        guard item.isRunning, item.status != .disabled else { return "—" }
-        return item.savedPowerText
     }
 
     private var ruleTag: String? {

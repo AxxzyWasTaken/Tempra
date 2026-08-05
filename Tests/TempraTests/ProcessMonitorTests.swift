@@ -967,7 +967,6 @@ struct ProcessMonitorTests {
             samplesSystemCPU: false,
             samplesApplications: true,
             includesEssentialSystemProcesses: false,
-            samplesPower: false,
             processChange: processChange
         )
     }
