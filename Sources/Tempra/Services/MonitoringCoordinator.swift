@@ -85,7 +85,7 @@ final class MonitoringCoordinator {
     ) {
         guard !isStopped else { return }
         enqueue(makeRequest(
-            samplesSystemCPU: demand != .dormant,
+            samplesSystemCPU: demand.samplesSystemCPU,
             samplesApplications: true,
             includesEssentialSystemProcesses: includesEssentialSystemProcesses,
             samplesPower: demand.samplesPower,
@@ -120,9 +120,9 @@ final class MonitoringCoordinator {
                 samplesPower: false,
                 processChange: nil
             ))
-        case .liveUI, .continuous:
+        case .management, .liveUI, .continuous, .continuousManagement:
             enqueue(makeRequest(
-                samplesSystemCPU: true,
+                samplesSystemCPU: demand.samplesSystemCPU,
                 samplesApplications: true,
                 includesEssentialSystemProcesses: includesEssentialSystemProcesses,
                 samplesPower: demand.samplesPower,

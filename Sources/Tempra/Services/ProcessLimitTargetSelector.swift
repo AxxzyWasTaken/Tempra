@@ -67,7 +67,6 @@ enum ProcessLimitTargetSelector {
         let hardProtectedProcesses = Set(normalizedSamples.compactMap { sample in
             !sample.hasCPUMeasurement
                 || (protectsAudio && sample.isPlayingAudio)
-                || criticalActivityProcesses.contains(sample.identity)
                 ? sample.identity
                 : nil
         })
@@ -76,6 +75,9 @@ enum ProcessLimitTargetSelector {
         })
         softProtectedProcesses.formUnion(
             latencySensitiveProcesses.intersection(samplesByIdentity.keys)
+        )
+        softProtectedProcesses.formUnion(
+            criticalActivityProcesses.intersection(samplesByIdentity.keys)
         )
 
         if normalizedSamples.count > 1 {
@@ -93,7 +95,9 @@ enum ProcessLimitTargetSelector {
 
         let totalCPU = normalizedSamples.reduce(0) { $0 + $1.cpuPercent }
         let activationThreshold = ProcessControlMath.activationThreshold(for: requestedLimit)
-        guard normalizedSamples.count == 1 || totalCPU > activationThreshold else {
+        guard normalizedSamples.count == 1
+                || !previousControlledProcesses.isEmpty
+                || totalCPU > activationThreshold else {
             return makeSelection(
                 controlled: [],
                 samples: normalizedSamples,
@@ -104,7 +108,9 @@ enum ProcessLimitTargetSelector {
         }
 
         let eligible = normalizedSamples.filter {
-            !hardProtectedProcesses.contains($0.identity) && $0.cpuPercent > 0
+            !hardProtectedProcesses.contains($0.identity)
+                && ($0.cpuPercent > 0
+                    || previousControlledProcesses.contains($0.identity))
         }
         guard !eligible.isEmpty else {
             return makeSelection(
@@ -234,10 +240,9 @@ enum ProcessLimitTargetSelector {
         let retainedProtectionReasons = protectionReasons.filter { identity, reasons in
             alwaysRunningProcesses.contains(identity) && !reasons.isEmpty
         }
-        let controlledLimit = min(
-            controlledCPU,
-            max(0, requestedLimit - alwaysRunningCPU)
-        )
+        let controlledLimit = controlled.isEmpty
+            ? 0
+            : max(0, requestedLimit - alwaysRunningCPU)
         let minimumControlledCPU = controlledCPU * minimumControlledDutyCycle
         return ProcessLimitSelection(
             controlledProcesses: controlled,

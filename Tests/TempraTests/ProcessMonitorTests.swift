@@ -21,8 +21,8 @@ struct ProcessMonitorTests {
             windowsFrontToBack: [WindowVisibilityRecord(
                 ownerPID: processIdentifier,
                 bounds: CGRect(x: 0, y: 0, width: 1_000, height: 800),
-                layer: 0,
-                alpha: 0.2
+                layer: 1_000,
+                alpha: 1
             )],
             screenBounds: [CGRect(x: 0, y: 0, width: 1_000, height: 800)]
         )
@@ -123,8 +123,8 @@ struct ProcessMonitorTests {
                 WindowVisibilityRecord(
                     ownerPID: overlayIdentity.pid,
                     bounds: CGRect(x: 0, y: 0, width: 1_000, height: 800),
-                    layer: 0,
-                    alpha: 0.2
+                    layer: 1_000,
+                    alpha: 1
                 ),
                 WindowVisibilityRecord(
                     ownerPID: editorIdentity.pid,

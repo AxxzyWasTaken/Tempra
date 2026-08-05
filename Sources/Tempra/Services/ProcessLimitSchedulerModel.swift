@@ -14,6 +14,9 @@ enum ProcessLimitSchedulerModel {
         var estimatedFullSpeedCPU: Double
         var cpuCreditNanoseconds: Double
         var lastMeasuredCPUPercent: Double?
+        var demandProbeCPUNanoseconds: Double
+        var demandProbeWallDuration: TimeInterval
+        var hasActivatedLimit: Bool
         var stoppedAt: ContinuousClock.Instant?
         var generation: UInt64
         var phase: Phase

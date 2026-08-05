@@ -20,6 +20,7 @@ final class ProcessManagementCoordinator {
 
     private(set) var statuses: [String: ManagementStatus] = [:]
     private(set) var estimatedSavedCPUByIdentifier: [String: Double] = [:]
+    private(set) var activeCPULimitSessionIdentifiers: Set<String> = []
     private(set) var protectionReasonsByIdentifier:
         [String: [ProcessIdentity: Set<ProcessProtectionReason>]] = [:]
 
@@ -188,9 +189,20 @@ final class ProcessManagementCoordinator {
     private func handle(_ event: ProcessControllerEvent) {
         guard acceptsControllerResults else { return }
         switch event {
-        case .statusTransition(let eventRevision, let identifier, _, let current):
+        case .statusTransition(
+            let eventRevision,
+            let identifier,
+            _,
+            let current,
+            let isCPULimitSessionActive
+        ):
             guard eventRevision == revision else { return }
             statuses[identifier] = current
+            if isCPULimitSessionActive {
+                activeCPULimitSessionIdentifiers.insert(identifier)
+            } else {
+                activeCPULimitSessionIdentifiers.remove(identifier)
+            }
             stateHandler?(statuses, estimatedSavedCPUByIdentifier)
             eventHandler?(event)
         case .activity(let eventRevision, _, _, _):
@@ -206,6 +218,7 @@ final class ProcessManagementCoordinator {
         guard acceptsControllerResults, snapshot.revision == revision else { return }
         statuses = snapshot.statuses
         estimatedSavedCPUByIdentifier = snapshot.estimatedSavedCPUByIdentifier
+        activeCPULimitSessionIdentifiers = snapshot.activeCPULimitSessionIdentifiers
         protectionReasonsByIdentifier = snapshot.protectionReasonsByIdentifier
         stateHandler?(statuses, estimatedSavedCPUByIdentifier)
     }

@@ -107,6 +107,21 @@ struct ProcessLimitTargetSelectorTests {
         #expect(selection.controlledProcesses == [secondWorker.identity])
     }
 
+    @Test("A limited sample does not release the previously controlled worker")
+    func constrainedSampleKeepsPreviousSelection() {
+        let main = sample(53, cpu: 2, main: true)
+        let worker = sample(54, cpu: 7)
+
+        let selection = ProcessLimitTargetSelector.select(
+            samples: [main, worker],
+            limitPercent: 10,
+            previousControlledProcesses: [worker.identity]
+        )
+
+        #expect(selection.controlledProcesses == [worker.identity])
+        #expect(selection.controlledLimitPercent == 8)
+    }
+
     @Test("A CPU-heavy main process is selected instead of an idle helper")
     func cpuHeavyMainProcessIsSelected() {
         let player = sample(60, cpu: 114, main: true, network: .active)
@@ -184,8 +199,8 @@ struct ProcessLimitTargetSelectorTests {
         #expect(selection.protectionReasons[mediaProcess.identity] == [.audioPlayback])
     }
 
-    @Test("A process with critical file activity remains running")
-    func criticalFileActivityIsProtected() {
+    @Test("Critical file activity remains limitable when the target requires it")
+    func criticalFileActivityRemainsLimitable() {
         let downloader = sample(78, cpu: 20, main: true)
         let worker = sample(79, cpu: 80)
 
@@ -195,9 +210,25 @@ struct ProcessLimitTargetSelectorTests {
             criticalActivityProcesses: [downloader.identity]
         )
 
+        #expect(selection.controlledProcesses == [downloader.identity, worker.identity])
+        #expect(selection.alwaysRunningProcesses.isEmpty)
+        #expect(selection.targetIsReachable)
+    }
+
+    @Test("Low-CPU critical file activity stays running when another worker is enough")
+    func unnecessaryCriticalFileProcessIsNotSelected() {
+        let downloader = sample(80, cpu: 1, main: true)
+        let worker = sample(81, cpu: 80)
+
+        let selection = ProcessLimitTargetSelector.select(
+            samples: [downloader, worker],
+            limitPercent: 10,
+            criticalActivityProcesses: [downloader.identity]
+        )
+
         #expect(selection.controlledProcesses == [worker.identity])
         #expect(selection.alwaysRunningProcesses == [downloader.identity])
-        #expect(!selection.targetIsReachable)
+        #expect(selection.targetIsReachable)
         #expect(selection.protectionReasons[downloader.identity]?.contains(
             .criticalFileActivity
         ) == true)

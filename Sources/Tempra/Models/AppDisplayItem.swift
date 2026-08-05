@@ -29,6 +29,7 @@ struct AppDisplayItem: Identifiable {
     let status: ManagementStatus
     let rule: AppRule?
     let isAttention: Bool
+    let isCPULimitSessionActive: Bool
     private let iconCache: AppIconCache?
 
     init(
@@ -58,6 +59,7 @@ struct AppDisplayItem: Identifiable {
         status: ManagementStatus,
         rule: AppRule?,
         isAttention: Bool,
+        isCPULimitSessionActive: Bool = false,
         iconCache: AppIconCache? = nil
     ) {
         self.bundleIdentifier = bundleIdentifier
@@ -87,6 +89,7 @@ struct AppDisplayItem: Identifiable {
         self.status = status
         self.rule = rule
         self.isAttention = isAttention
+        self.isCPULimitSessionActive = isCPULimitSessionActive
         self.iconCache = iconCache
     }
 
@@ -121,10 +124,8 @@ struct AppDisplayItem: Identifiable {
     }
 
     var savedCPUText: String {
-        guard isRunning else { return "—" }
-        return estimatedSavedCPUPercent < 0.05
-            ? "0%"
-            : String(format: "%.1f%%", estimatedSavedCPUPercent)
+        guard isRunning, status.isActivelyLimitingCPU else { return "—" }
+        return String(format: "%.1f%%", estimatedSavedCPUPercent)
     }
 
     var cpuPowerText: String {

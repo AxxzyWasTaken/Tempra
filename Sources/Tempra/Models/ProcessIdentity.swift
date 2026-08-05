@@ -134,6 +134,7 @@ struct ProcessControlSnapshot: Sendable {
     let revision: UInt64
     let statuses: [String: ManagementStatus]
     let estimatedSavedCPUByIdentifier: [String: Double]
+    let activeCPULimitSessionIdentifiers: Set<String>
     let protectionReasonsByIdentifier:
         [String: [ProcessIdentity: Set<ProcessProtectionReason>]]
     let scheduledTickInterval: TimeInterval?
@@ -144,7 +145,8 @@ enum ProcessControllerEvent: Sendable {
         revision: UInt64,
         bundleIdentifier: String,
         previous: ManagementStatus,
-        current: ManagementStatus
+        current: ManagementStatus,
+        isCPULimitSessionActive: Bool
     )
     case activity(revision: UInt64, bundleIdentifier: String, kind: ActivityKind, detail: String)
     case pauseWakeMonitoringChanged(revision: UInt64, enabled: Bool)

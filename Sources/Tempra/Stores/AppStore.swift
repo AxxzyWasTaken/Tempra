@@ -323,6 +323,7 @@ final class AppStore: ObservableObject {
         )
         scheduleSuspensionExpiration()
         applyRulesToCurrentApps()
+        configureMonitoringDemand(refreshImmediately: true)
     }
 
     func endSnooze(bundleIdentifier: String) {
@@ -330,6 +331,7 @@ final class AppStore: ObservableObject {
         guard persistSuspensions() else { return }
         scheduleSuspensionExpiration()
         applyRulesToCurrentApps()
+        configureMonitoringDemand(refreshImmediately: true)
     }
 
     func resumeTemporarily(bundleIdentifier: String, for duration: TimeInterval) {
@@ -460,6 +462,7 @@ final class AppStore: ObservableObject {
             return
         }
         applyRulesToCurrentApps()
+        configureMonitoringDemand(refreshImmediately: true)
     }
 
     var isManagementPaused: Bool {
@@ -480,6 +483,7 @@ final class AppStore: ObservableObject {
         guard persistPreferences() else { return }
         scheduleManagementPauseExpiration()
         applyRulesToCurrentApps()
+        configureMonitoringDemand(refreshImmediately: true)
     }
 
     func resumeManagement() {
@@ -488,6 +492,7 @@ final class AppStore: ObservableObject {
         guard persistPreferences() else { return }
         scheduleManagementPauseExpiration()
         applyRulesToCurrentApps()
+        configureMonitoringDemand(refreshImmediately: true)
     }
 
     func retryLifecycleRestoration() async {
@@ -679,6 +684,7 @@ final class AppStore: ObservableObject {
         preferences.activeProfileID = id
         guard persistPreferences() else { return }
         applyRulesToCurrentApps()
+        configureMonitoringDemand(refreshImmediately: true)
     }
 
     func setAppearance(_ appearance: AppAppearance) {
@@ -744,15 +750,29 @@ final class AppStore: ObservableObject {
             showsCPUUsageInMenuBar: preferences.showsCPUUsageInMenuBar,
             requiresContextMonitoring: preferences.profiles.contains {
                 $0.activation.isAutomatic
-            }
+            },
+            requiresApplicationMonitoring: requiresApplicationMonitoring
         )
+    }
+
+    private var requiresApplicationMonitoring: Bool {
+        guard isEnabled, !isManagementPaused else { return false }
+        return rules.values.contains { rule in
+            guard rule.isEnabled,
+                  suspensions[rule.bundleIdentifier]?.isActive != true else {
+                return false
+            }
+            return SystemProcessRulePolicy.normalized(
+                effectiveManagementProfile?.applying(to: rule) ?? rule
+            ).action == .limit
+        }
     }
 
     private func configureMonitoringDemand(refreshImmediately: Bool) {
         let demand = monitoringDemand
         let previousDemand = monitoringCoordinator.demand
 
-        if !demand.samplesApplications {
+        if !demand.recordsApplicationMetrics {
             runtimeMetrics.resetApplicationMetrics()
             highCPUDetector.reset()
             attentionIdentifiers.removeAll()
@@ -781,6 +801,7 @@ final class AppStore: ObservableObject {
         guard !hasBegunShutdown else { return }
         if purgeExpiredSuspensions() {
             scheduleSuspensionExpiration()
+            configureMonitoringDemand(refreshImmediately: false)
         }
         monitoringCoordinator.requestEventRefresh(
             includesEssentialSystemProcesses: includesBackgroundAndSystemProcesses
@@ -818,11 +839,11 @@ final class AppStore: ObservableObject {
 
         if let sampledApps = sample.apps {
             apps = sampledApps
-            if demand.samplesApplications, sample.didRefreshApplications {
+            if demand.recordsApplicationMetrics, sample.didRefreshApplications {
                 runtimeMetrics.updateCPUAverages(apps: apps)
             }
             refreshRuleMetadata()
-            if demand.samplesApplications, sample.didRefreshApplications {
+            if demand.recordsApplicationMetrics, sample.didRefreshApplications {
                 updateHighCPUState()
             }
             applyRulesToCurrentApps(rebuildsDisplayItems: false)
@@ -849,10 +870,14 @@ final class AppStore: ObservableObject {
         } else if automaticProfileChanged {
             applyRulesToCurrentApps()
         }
+        if automaticProfileChanged {
+            configureMonitoringDemand(refreshImmediately: true)
+        }
 
         if sample.systemCPU != nil {
             recordCPUHistorySample(
-                includesApplicationMetrics: demand.samplesApplications && sample.apps != nil
+                includesApplicationMetrics: demand.recordsApplicationMetrics
+                    && sample.apps != nil
             )
         }
     }
@@ -903,6 +928,7 @@ final class AppStore: ObservableObject {
             guard let self, !hasBegunShutdown else { return }
             if purgeExpiredSuspensions() {
                 scheduleSuspensionExpiration()
+                configureMonitoringDemand(refreshImmediately: true)
             }
             monitoringCoordinator.requestEventRefresh(
                 includesEssentialSystemProcesses: includesBackgroundAndSystemProcesses,
@@ -1081,6 +1107,7 @@ final class AppStore: ObservableObject {
             return
         }
         applyRulesToCurrentApps()
+        configureMonitoringDemand(refreshImmediately: true)
     }
 
     @discardableResult
@@ -1115,13 +1142,14 @@ final class AppStore: ObservableObject {
         let didExpire = purgeExpiredSuspensions()
         if didExpire {
             applyRulesToCurrentApps()
+            configureMonitoringDemand(refreshImmediately: true)
         }
         scheduleSuspensionExpiration()
     }
 
     private func handleControllerEvent(_ event: ProcessControllerEvent) {
         switch event {
-        case .statusTransition(_, let identifier, let previous, let current):
+        case .statusTransition(_, let identifier, let previous, let current, _):
             let displayName = apps.first { $0.bundleIdentifier == identifier }?.name
                 ?? rules[identifier]?.displayName
                 ?? identifier

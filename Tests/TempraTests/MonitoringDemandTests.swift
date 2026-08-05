@@ -61,6 +61,54 @@ struct MonitoringDemandTests {
         #expect(!demand.samplesPower)
     }
 
+    @Test("Active rules sample applications without enabling optional metrics")
+    func managementIntervals() {
+        let demand = MonitoringDemand.resolve(
+            isPresentationActive: false,
+            isContinuousMonitoringEnabled: false,
+            showsCPUUsageInMenuBar: false,
+            requiresApplicationMonitoring: true
+        )
+
+        #expect(demand == .management(samplesSystemCPU: false))
+        #expect(demand.sampleInterval == 1)
+        #expect(demand.temperatureInterval == nil)
+        #expect(demand.samplesApplications)
+        #expect(!demand.recordsApplicationMetrics)
+        #expect(!demand.samplesSystemCPU)
+        #expect(!demand.samplesPower)
+    }
+
+    @Test("Rule maintenance preserves requested menu-bar CPU sampling")
+    func managementIncludesRequestedSystemCPU() {
+        let demand = MonitoringDemand.resolve(
+            isPresentationActive: false,
+            isContinuousMonitoringEnabled: false,
+            showsCPUUsageInMenuBar: true,
+            requiresApplicationMonitoring: true
+        )
+
+        #expect(demand == .management(samplesSystemCPU: true))
+        #expect(demand.samplesSystemCPU)
+    }
+
+    @Test("Continuous metrics keep the management sampling cadence")
+    func continuousManagementIntervals() {
+        let demand = MonitoringDemand.resolve(
+            isPresentationActive: false,
+            isContinuousMonitoringEnabled: true,
+            showsCPUUsageInMenuBar: false,
+            requiresApplicationMonitoring: true
+        )
+
+        #expect(demand == .continuousManagement)
+        #expect(demand.sampleInterval == 1)
+        #expect(demand.temperatureInterval == 15)
+        #expect(demand.recordsApplicationMetrics)
+        #expect(demand.samplesSystemCPU)
+        #expect(!demand.samplesPower)
+    }
+
     @Test("Automatic profiles keep context sampling active")
     func automaticProfileContextIntervals() {
         let demand = MonitoringDemand.resolve(

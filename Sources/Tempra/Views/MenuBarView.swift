@@ -62,12 +62,7 @@ struct MenuBarItemLists {
                     item.rule != nil && (searchText.isEmpty
                         || Self.matchesSearch(item, searchText: searchText))
                 }
-                .sorted { lhs, rhs in
-                    if lhs.sortName != rhs.sortName {
-                        return lhs.sortName < rhs.sortName
-                    }
-                    return lhs.bundleIdentifier < rhs.bundleIdentifier
-                }
+                .sorted(by: Self.managedOrder)
         } else {
             managedItems = []
         }
@@ -129,6 +124,31 @@ struct MenuBarItemLists {
             break
         }
         return lhs.sortName < rhs.sortName
+    }
+
+    private static func managedOrder(
+        _ lhs: AppDisplayItem,
+        _ rhs: AppDisplayItem
+    ) -> Bool {
+        let leftPriority = managedPriority(lhs)
+        let rightPriority = managedPriority(rhs)
+        if leftPriority != rightPriority {
+            return leftPriority < rightPriority
+        }
+        if lhs.sortName != rhs.sortName {
+            return lhs.sortName < rhs.sortName
+        }
+        return lhs.bundleIdentifier < rhs.bundleIdentifier
+    }
+
+    private static func managedPriority(_ item: AppDisplayItem) -> Int {
+        guard item.isRunning else { return 4 }
+        if item.isCPULimitSessionActive || item.status.isActivelyLimitingCPU {
+            return 0
+        }
+        if item.status.isActivelySavingPower { return 1 }
+        if item.status.isActiveManagement { return 2 }
+        return 3
     }
 }
 

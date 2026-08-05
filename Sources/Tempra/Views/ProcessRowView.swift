@@ -236,8 +236,7 @@ struct ManagedProcessRowView: View {
     }
 
     private var savedCPUValue: String {
-        guard item.isRunning, item.status != .disabled else { return "—" }
-        return String(format: "%.1f%%", item.estimatedSavedCPUPercent)
+        item.savedCPUText
     }
 
     private var savedPowerValue: String {

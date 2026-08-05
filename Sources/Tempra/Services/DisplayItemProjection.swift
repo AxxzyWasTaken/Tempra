@@ -11,6 +11,7 @@ enum DisplayItemProjection {
         averageCPUByIdentifier: [String: Double],
         savedCPUByIdentifier: [String: Double],
         savedPowerByIdentifier: [String: Double],
+        activeCPULimitSessionIdentifiers: Set<String> = [],
         protectionReasonsByIdentifier:
             [String: [ProcessIdentity: Set<ProcessProtectionReason>]] = [:],
         managementPauseUntil: Date? = nil,
@@ -60,6 +61,9 @@ enum DisplayItemProjection {
                 status: status,
                 rule: rule,
                 isAttention: attentionIdentifiers.contains(app.bundleIdentifier),
+                isCPULimitSessionActive: activeCPULimitSessionIdentifiers.contains(
+                    app.bundleIdentifier
+                ),
                 iconCache: iconCache
             )
         }

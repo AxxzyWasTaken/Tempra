@@ -667,14 +667,6 @@ actor ProcessController {
             .union(pauseActivationProbeUntil.keys)
     }
 
-    private func minimumControlledDutyCycle(
-        maximumStopDuration: TimeInterval
-    ) -> Double {
-        let cycleDuration = minimumRunDuration + maximumStopDuration
-        guard cycleDuration > 0 else { return 0 }
-        return min(1, max(0, minimumRunDuration / cycleDuration))
-    }
-
     private func refreshNetworkSensitivity() {
         guard managementIsActive else { return }
         let now = clock.now()
@@ -754,7 +746,10 @@ actor ProcessController {
         guard let app = groups[identifier] else {
             return networkMaximumLimitStopDuration
         }
-        return latencySensitiveProcesses(for: app).isDisjoint(with: processes)
+        let sensitiveProcesses = latencySensitiveProcesses(for: app).union(
+            downloadProtectedProcesses[identifier, default: []]
+        )
+        return sensitiveProcesses.isDisjoint(with: processes)
             ? offlineMaximumLimitStopDuration
             : networkMaximumLimitStopDuration
     }
@@ -826,10 +821,7 @@ actor ProcessController {
             previousControlledProcesses: previousControlledProcesses,
             latencySensitiveProcesses: sensitiveProcesses,
             criticalActivityProcesses: criticalProcesses,
-            protectsAudio: rules[app.bundleIdentifier]?.protectAudio == true,
-            minimumControlledDutyCycle: minimumControlledDutyCycle(
-                maximumStopDuration: offlineMaximumLimitStopDuration
-            )
+            protectsAudio: rules[app.bundleIdentifier]?.protectAudio == true
         )
         guard !offlineSelection.controlledProcesses.isDisjoint(with: sensitiveProcesses) else {
             return offlineSelection
@@ -840,10 +832,7 @@ actor ProcessController {
             previousControlledProcesses: previousControlledProcesses,
             latencySensitiveProcesses: sensitiveProcesses,
             criticalActivityProcesses: criticalProcesses,
-            protectsAudio: rules[app.bundleIdentifier]?.protectAudio == true,
-            minimumControlledDutyCycle: minimumControlledDutyCycle(
-                maximumStopDuration: networkMaximumLimitStopDuration
-            )
+            protectsAudio: rules[app.bundleIdentifier]?.protectAudio == true
         )
     }
 
@@ -1370,6 +1359,9 @@ actor ProcessController {
             estimatedFullSpeedCPU: initialEstimate,
             cpuCreditNanoseconds: initialCredit,
             lastMeasuredCPUPercent: nil,
+            demandProbeCPUNanoseconds: 0,
+            demandProbeWallDuration: 0,
+            hasActivatedLimit: isStopped || startsAboveLimit,
             stoppedAt: isStopped ? now : nil,
             generation: 0,
             phase: isStopped ? .stopped : (startsAboveLimit ? .running : .observing),
@@ -1388,6 +1380,11 @@ actor ProcessController {
                 estimatedFullSpeedCPU: initialEstimate,
                 cpuCreditNanoseconds: initialCredit,
                 lastMeasuredCPUPercent: nil,
+                demandProbeCPUNanoseconds: 0,
+                demandProbeWallDuration: 0,
+                hasActivatedLimit: runtime.hasActivatedLimit
+                    || isStopped
+                    || startsAboveLimit,
                 stoppedAt: isStopped ? now : nil,
                 generation: runtime.generation,
                 phase: isStopped ? .stopped : (startsAboveLimit ? .running : .observing),
@@ -1435,25 +1432,9 @@ actor ProcessController {
                 return
             }
 
+            runtime.hasActivatedLimit = true
             runtime.phase = .running
             runtime.runStartedAt = now
-        } else if runtime.phase == .running,
-                  let measuredCPU = runtime.lastMeasuredCPUPercent,
-                  measuredCPU <= ProcessControlMath.releaseThreshold(for: limitPercent) {
-            runtime.phase = .observing
-            runtime.runStartedAt = now
-            runtime.cpuCreditNanoseconds = initialCredit
-            runtime.generation = ProcessControlMath.nextGeneration(after: runtime.generation)
-            scheduleLimitObservation(
-                for: identifier,
-                runtime: runtime,
-                limitPercent: limitPercent,
-                now: now,
-                after: limitObservationInterval
-            )
-            limitRuntimes[identifier] = runtime
-            await setStatus(.normal, for: identifier)
-            return
         }
 
         let wasStopped = runtime.phase == .stopped
@@ -1469,36 +1450,14 @@ actor ProcessController {
             frameDuration,
             max(minimumRunDuration, controlInterval)
         )
-        var runDuration = min(maximumPulseDuration, affordableRunDuration)
-        if runDuration < minimumRunDuration, runtime.phase == .stopped {
-            let stoppedAt = runtime.stoppedAt ?? now
-            runtime.stoppedAt = stoppedAt
-            if now >= stoppedAt.advanced(
-                by: ProcessControlMath.duration(maximumStopDuration)
-            ) {
-                runDuration = minimumRunDuration
-            }
-        }
+        let runDuration = min(maximumPulseDuration, affordableRunDuration)
         runtime.lastCPUNanoseconds = nowCPU
         runtime.generation = ProcessControlMath.nextGeneration(after: runtime.generation)
         let generation = runtime.generation
         limitRuntimes[identifier] = runtime
         limitDeadlines.remove(identifier: identifier)
 
-        guard runDuration >= minimumRunDuration else {
-            if runtime.phase == .stopped {
-                scheduleLimitEvaluation(
-                    for: identifier,
-                    runtime: runtime,
-                    limitPercent: limitPercent,
-                    now: now
-                )
-                await setStatus(
-                    limitStatus(for: identifier, fallback: requestedLimitPercent),
-                    for: identifier
-                )
-                return
-            }
+        if runDuration <= 0, !wasStopped {
             await finishLimitCycle(
                 identifier: identifier,
                 generation: generation,
@@ -1591,6 +1550,15 @@ actor ProcessController {
             expectedEnd: stopDeadline
         )
         limitRuntimes[identifier] = runtime
+        if runDuration <= 0 {
+            await finishLimitCycle(
+                identifier: identifier,
+                generation: generation,
+                limitPercent: limitPercent,
+                processIdentities: controlledProcesses
+            )
+            return
+        }
         limitDeadlines.upsert(LimitDeadline(
             identifier: identifier,
             deadline: stopDeadline,
@@ -1646,10 +1614,7 @@ actor ProcessController {
             limitPercent: limitPercent,
             maximumStopDuration: maximumStopDuration
         ) * allowedCPUPerSecond
-        let maximumCredit = max(
-            allowedFrameCredit,
-            minimumSliceCost
-        )
+        let maximumCredit = allowedFrameCredit
         let maximumDebt = max(allowedFrameCredit, minimumSliceCost)
         runtime.cpuCreditNanoseconds = min(
             maximumCredit,
@@ -1688,20 +1653,17 @@ actor ProcessController {
             for: identifier,
             processes: runtime.processIdentities
         )
-        let estimatedCPUPerWallSecond = max(runtime.estimatedFullSpeedCPU / 100, 0.01)
-        let minimumSliceCost = minimumRunDuration
-            * estimatedCPUPerWallSecond
-            * 1_000_000_000
-        let creditNeeded = max(0, minimumSliceCost - runtime.cpuCreditNanoseconds)
         let allowedCPUPerSecond = max(0, limitPercent) / 100 * 1_000_000_000
-        let creditWait = allowedCPUPerSecond > 0
-            ? creditNeeded / allowedCPUPerSecond
-            : maximumStopDuration
         let frameDuration = limitFrameDuration(
             estimatedFullSpeedCPU: runtime.estimatedFullSpeedCPU,
             limitPercent: limitPercent,
             maximumStopDuration: maximumStopDuration
         )
+        let frameCredit = frameDuration * allowedCPUPerSecond
+        let creditNeeded = max(0, frameCredit - runtime.cpuCreditNanoseconds)
+        let creditWait = allowedCPUPerSecond > 0
+            ? creditNeeded / allowedCPUPerSecond
+            : maximumStopDuration
         let estimatedDemand = max(runtime.estimatedFullSpeedCPU, 0.01)
         let targetDutyCycle = min(1, max(0, limitPercent) / estimatedDemand)
         let targetRunDuration = frameDuration * targetDutyCycle
@@ -1741,17 +1703,43 @@ actor ProcessController {
         limitPercent: Double,
         maximumStopDuration: TimeInterval
     ) -> Double {
-        let estimatedCPUPerWallSecond = max(estimatedFullSpeedCPU / 100, 0.01)
-        let minimumSliceCost = minimumRunDuration
-            * estimatedCPUPerWallSecond
-            * 1_000_000_000
         let allowedCPUPerSecond = max(0, limitPercent) / 100 * 1_000_000_000
         let frameCredit = limitFrameDuration(
             estimatedFullSpeedCPU: estimatedFullSpeedCPU,
             limitPercent: limitPercent,
             maximumStopDuration: maximumStopDuration
         ) * allowedCPUPerSecond
-        return max(frameCredit, minimumSliceCost)
+        return frameCredit
+    }
+
+    private func updateDemandProbe(
+        runtime: inout LimitRuntime,
+        cpuDeltaNanoseconds: UInt64?,
+        wallDuration: TimeInterval?
+    ) -> Double? {
+        guard let cpuDeltaNanoseconds,
+              let wallDuration,
+              wallDuration.isFinite,
+              wallDuration > 0 else {
+            return nil
+        }
+        runtime.demandProbeCPUNanoseconds = min(
+            Double.greatestFiniteMagnitude,
+            runtime.demandProbeCPUNanoseconds + Double(cpuDeltaNanoseconds)
+        )
+        runtime.demandProbeWallDuration = min(
+            Double.greatestFiniteMagnitude,
+            runtime.demandProbeWallDuration + wallDuration
+        )
+        guard runtime.demandProbeWallDuration >= minimumRunDuration else {
+            return nil
+        }
+        let measuredCPU = runtime.demandProbeCPUNanoseconds
+            / (runtime.demandProbeWallDuration * 1_000_000_000)
+            * 100
+        runtime.demandProbeCPUNanoseconds = 0
+        runtime.demandProbeWallDuration = 0
+        return measuredCPU
     }
 
     private func prepareLimitStop(
@@ -2254,6 +2242,11 @@ actor ProcessController {
                     processes: processIdentities
                 )
             )
+            let demandProbeCPU = updateDemandProbe(
+                runtime: &runtime,
+                cpuDeltaNanoseconds: pulseCPUDelta,
+                wallDuration: pulseWallDuration
+            )
             await signalTelemetry.recordMeasurement(ProcessLimitMeasurement(
                 date: Date(),
                 bundleIdentifier: identifier,
@@ -2266,8 +2259,8 @@ actor ProcessController {
                 activePulseCount: limitPulseArbiter.activeCount,
                 serviceGap: nil
             ))
-            if let measuredCPU,
-               measuredCPU <= ProcessControlMath.releaseThreshold(for: limitPercent) {
+            if let demandProbeCPU,
+               demandProbeCPU <= ProcessControlMath.releaseThreshold(for: limitPercent) {
                 guard await resumeStoppedProcesses(
                     for: identifier,
                     attempts: restorationAttempts
@@ -2790,7 +2783,8 @@ actor ProcessController {
             revision: eventRevision,
             bundleIdentifier: identifier,
             previous: previous,
-            current: status
+            current: status,
+            isCPULimitSessionActive: limitRuntimes[identifier]?.hasActivatedLimit == true
         ))
     }
 
@@ -3134,6 +3128,9 @@ actor ProcessController {
             statuses: statuses,
             estimatedSavedCPUByIdentifier: Dictionary(uniqueKeysWithValues: groups.keys.map {
                 ($0, estimatedSavedCPU(for: $0))
+            }),
+            activeCPULimitSessionIdentifiers: Set(limitRuntimes.compactMap { entry in
+                entry.value.hasActivatedLimit ? entry.key : nil
             }),
             protectionReasonsByIdentifier: limitSelections.mapValues {
                 $0.protectionReasons

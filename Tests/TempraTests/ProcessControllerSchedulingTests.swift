@@ -251,19 +251,25 @@ struct ProcessControllerSchedulingTests {
             revision: 1
         )
 
-        system.setCPUTimeNanoseconds(40_000_000)
-        manualClock.advance(by: .milliseconds(5))
+        system.setCPUTimeNanoseconds(5_000_000)
+        manualClock.advance(by: .microseconds(625))
         #expect(await eventually { system.didAttemptToStop(firstProcess) })
         #expect(await eventually { system.didAttemptToStop(secondProcess) })
         let steadyStateStartedAt = Date()
 
-        manualClock.advance(by: .milliseconds(500))
+        let registrationsBeforeFirstPulse = manualClock.sleepRegistrationCount
+        manualClock.advance(by: .milliseconds(499))
+        manualClock.advance(by: .microseconds(375))
         #expect(await eventually {
             system.resumeAttemptCount(for: firstProcess)
                 + system.resumeAttemptCount(for: secondProcess) == 1
         })
+        #expect(await eventually {
+            manualClock.sleepRegistrationCount > registrationsBeforeFirstPulse
+        })
         let registrationsBeforePulseEnd = manualClock.sleepRegistrationCount
-        manualClock.advance(by: .milliseconds(5))
+        manualClock.advance(by: .microseconds(625))
+        #expect(await eventually { system.stopAttemptCount == 3 })
         #expect(await eventually {
             manualClock.sleepRegistrationCount > registrationsBeforePulseEnd
         })
@@ -330,8 +336,8 @@ struct ProcessControllerSchedulingTests {
         await controller.shutdown()
     }
 
-    @Test("An active download helper stays running while its worker is limited")
-    func activeDownloadHelperIsProtected() async {
+    @Test("An active download helper joins the limit when the target requires it")
+    func activeDownloadHelperRemainsLimitable() async {
         let manualClock = ManualProcessControlClock()
         let system = RecordingProcessSystem()
         let downloader = process(224)
@@ -368,15 +374,15 @@ struct ProcessControllerSchedulingTests {
             revision: 1
         )
 
+        system.setCPUTimeNanoseconds(10_000_000)
         manualClock.advance(by: .milliseconds(12))
         #expect(await eventuallyAsync {
             await controller.currentSnapshot().statuses[identifier]
-                == .limitedWithProtectedProcesses(5)
+                == .limited(5)
         })
-        system.setCPUTimeNanoseconds(4_000_000)
-        manualClock.advance(by: .milliseconds(5))
         #expect(await eventually { system.didAttemptToStop(worker) })
-        #expect(!system.didAttemptToStop(downloader))
+        #expect(await eventually { system.didAttemptToStop(downloader) })
+        #expect(system.stopAutomaticResumeInterval(for: downloader) == 0.1)
         await controller.shutdown()
     }
 
@@ -2253,6 +2259,7 @@ struct ProcessControllerSchedulingTests {
 
         #expect(system.didAttemptToResume(controlledProcess))
         #expect(activated.statuses[identifier] == .normal)
+        #expect(!activated.activeCPULimitSessionIdentifiers.contains(identifier))
         #expect(!watchdog.isTracking(controlledProcess))
         let activationMeasurement = await controller.recentLimitMeasurements().last {
             $0.kind == .activation && $0.bundleIdentifier == identifier
@@ -2511,14 +2518,12 @@ struct ProcessControllerSchedulingTests {
         #expect(stopped.statuses[identifier] == .limited(50))
 
         #expect(await eventually { manualClock.pendingSleepCount == 2 })
-        manualClock.advance(by: .milliseconds(499))
-        #expect(!system.didAttemptToResume(controlledProcess))
-        manualClock.advance(by: .milliseconds(1))
+        manualClock.advance(by: .milliseconds(500))
         #expect(await eventually { system.didAttemptToResume(controlledProcess) })
         await controller.shutdown()
     }
 
-    @Test("An offline low CPU limit receives a slice within 500 milliseconds")
+    @Test("An offline one-percent limit scales its run slice below five milliseconds")
     func offlineLowLimitReceivesEfficientSlice() async {
         let manualClock = ManualProcessControlClock()
         let system = RecordingProcessSystem()
@@ -2544,8 +2549,10 @@ struct ProcessControllerSchedulingTests {
         )
         #expect(await eventually { manualClock.pendingSleepCount == 2 })
 
-        system.setCPUTimeNanoseconds(40_000_000)
-        manualClock.advance(by: .milliseconds(5))
+        manualClock.advance(by: .microseconds(624))
+        #expect(!system.didAttemptToStop(controlledProcess))
+        system.setCPUTimeNanoseconds(5_000_000)
+        manualClock.advance(by: .microseconds(1))
         #expect(await eventually { system.didAttemptToStop(controlledProcess) })
         #expect(watchdog.automaticResumeArmCallCount == 1)
         #expect(watchdog.isAutomaticallyResuming(controlledProcess))
@@ -2555,7 +2562,7 @@ struct ProcessControllerSchedulingTests {
 
         manualClock.advance(by: .milliseconds(499))
         #expect(!system.didAttemptToResume(controlledProcess))
-        manualClock.advance(by: .milliseconds(1))
+        manualClock.advance(by: .microseconds(375))
         #expect(await eventually { system.didAttemptToResume(controlledProcess) })
         #expect(await eventually { !watchdog.isAutomaticallyResuming(controlledProcess) })
         let events = await controller.recentSignalEvents()
@@ -2566,7 +2573,38 @@ struct ProcessControllerSchedulingTests {
         await controller.shutdown()
     }
 
-    @Test("A seven-percent limit keeps five-millisecond run slices and reports its floor")
+    @Test("A short unscheduled pulse does not release an active CPU limit")
+    func shortUnscheduledPulseKeepsLimitActive() async {
+        let manualClock = ManualProcessControlClock()
+        let system = RecordingProcessSystem()
+        let controlledProcess = process(36)
+        let controller = ProcessController(
+            system: system,
+            crashWatchdog: RecordingProcessCrashWatchdog(),
+            frontmostProvider: { nil },
+            clock: manualClock.clock
+        )
+
+        _ = await controller.update(
+            targets: [target(
+                processIdentities: [controlledProcess],
+                launchedAt: oldLaunchDate,
+                cpuPercent: 800
+            )],
+            rules: [identifier: limitRule(identifier, limitPercent: 1)],
+            isEnabled: true,
+            revision: 1
+        )
+        #expect(await eventually { manualClock.pendingSleepCount == 2 })
+
+        manualClock.advance(by: .microseconds(625))
+        #expect(await eventually { system.didAttemptToStop(controlledProcess) })
+        #expect(!system.didAttemptToResume(controlledProcess))
+        #expect(await controller.currentSnapshot().statuses[identifier] == .limited(1))
+        await controller.shutdown()
+    }
+
+    @Test("A seven-percent limit remains reachable for an eight-core workload")
     func sevenPercentLimitUsesResponsiveRunSlices() async {
         let manualClock = ManualProcessControlClock()
         let system = RecordingProcessSystem()
@@ -2592,18 +2630,20 @@ struct ProcessControllerSchedulingTests {
         )
         #expect(await eventually { manualClock.pendingSleepCount == 2 })
 
-        system.setCPUTimeNanoseconds(40_000_000)
-        manualClock.advance(by: .milliseconds(5))
+        manualClock.advance(by: .microseconds(4_374))
+        #expect(!system.didAttemptToStop(controlledProcess))
+        system.setCPUTimeNanoseconds(35_000_000)
+        manualClock.advance(by: .microseconds(1))
         #expect(await eventually { system.didAttemptToStop(controlledProcess) })
         #expect(await eventually { manualClock.pendingSleepCount == 2 })
         #expect(await eventuallyAsync {
             await controller.currentSnapshot().statuses[identifier]
-                == .limitedWithProtectedProcesses(7)
+                == .limited(7)
         })
 
-        manualClock.advance(by: .milliseconds(499))
+        manualClock.advance(by: .milliseconds(495))
         #expect(!system.didAttemptToResume(controlledProcess))
-        manualClock.advance(by: .milliseconds(1))
+        manualClock.advance(by: .microseconds(625))
         #expect(await eventually { system.didAttemptToResume(controlledProcess) })
         #expect(await eventually { !watchdog.isAutomaticallyResuming(controlledProcess) })
         #expect(watchdog.isTracking(controlledProcess))
@@ -2635,6 +2675,7 @@ struct ProcessControllerSchedulingTests {
         )
 
         #expect(initial.statuses[identifier] == .normal)
+        #expect(initial.activeCPULimitSessionIdentifiers.isEmpty)
         #expect(!system.didAttemptToSetBackgroundPriority(controlledProcess))
         #expect(!system.didAttemptToStop(controlledProcess))
         #expect(await eventually { manualClock.pendingSleepCount == 2 })
@@ -2643,6 +2684,7 @@ struct ProcessControllerSchedulingTests {
         manualClock.advance(by: .seconds(1))
         #expect(await eventually { manualClock.deadlineWakeCount >= 1 })
         #expect(await controller.currentSnapshot().statuses[identifier] == .normal)
+        #expect(await controller.currentSnapshot().activeCPULimitSessionIdentifiers.isEmpty)
         #expect(!system.didAttemptToStop(controlledProcess))
         #expect(await eventually { manualClock.pendingSleepCount == 2 })
 
@@ -2652,6 +2694,46 @@ struct ProcessControllerSchedulingTests {
         #expect(await eventuallyAsync {
             await controller.currentSnapshot().statuses[identifier] == .limited(20)
         })
+        #expect(await controller.currentSnapshot()
+            .activeCPULimitSessionIdentifiers.contains(identifier))
+        await controller.shutdown()
+    }
+
+    @Test("An engaged CPU limit session survives its observation phase")
+    func engagedLimitSessionSurvivesObservation() async {
+        let manualClock = ManualProcessControlClock()
+        let system = RecordingProcessSystem()
+        let controlledProcess = process(219)
+        let controller = ProcessController(
+            system: system,
+            crashWatchdog: RecordingProcessCrashWatchdog(),
+            frontmostProvider: { nil },
+            clock: manualClock.clock
+        )
+
+        let initial = await controller.update(
+            targets: [target(
+                processIdentities: [controlledProcess],
+                launchedAt: oldLaunchDate,
+                cpuPercent: 100
+            )],
+            rules: [identifier: limitRule(identifier, limitPercent: 20)],
+            isEnabled: true,
+            revision: 1
+        )
+
+        #expect(initial.statuses[identifier] == .limited(20))
+        #expect(initial.activeCPULimitSessionIdentifiers.contains(identifier))
+        #expect(await eventually { manualClock.pendingSleepCount == 2 })
+
+        manualClock.advance(by: .milliseconds(20))
+        #expect(await eventually { system.didAttemptToStop(controlledProcess) })
+        #expect(await eventuallyAsync {
+            await controller.currentSnapshot().statuses[identifier] == .normal
+        })
+
+        let observing = await controller.currentSnapshot()
+        #expect(observing.activeCPULimitSessionIdentifiers.contains(identifier))
         await controller.shutdown()
     }
 

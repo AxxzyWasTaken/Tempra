@@ -154,31 +154,120 @@ struct UIDerivationTests {
         #expect(!presentation.showsPrivilegedAccessOnboarding)
     }
 
-    @Test("Managed items keep every rule in stable name order as live savings change")
+    @Test("Managed items keep active CPU limit sessions visible during observation")
     func managedItemOrdering() {
-        let initial = MenuBarItemLists(
-            displayItems: menuFixtures(),
-            includesBackgroundAndSystemProcesses: true,
-            scope: .running,
-            processSort: .name,
-            searchText: ""
-        )
-        #expect(initial.managedItems.map(\.bundleIdentifier) == ["beta", "delta", "gamma"])
-
-        let changedSavings = MenuBarItemLists(
-            displayItems: menuFixtures(
-                betaSavedCPU: 50,
-                gammaSavedCPU: 0,
-                deltaSavedCPU: 25
+        let items = [
+            item(
+                identifier: "closed",
+                name: "Alpha Closed",
+                isRunning: false,
+                rule: rule("closed")
             ),
+            item(
+                identifier: "running",
+                name: "Beta Running",
+                rule: rule("running")
+            ),
+            item(
+                identifier: "waiting",
+                name: "Charlie Waiting",
+                rule: rule("waiting"),
+                status: .waiting
+            ),
+            item(
+                identifier: "efficient",
+                name: "Delta Efficient",
+                rule: rule("efficient"),
+                status: .energyEfficient
+            ),
+            item(
+                identifier: "limited-a",
+                name: "Echo Limited",
+                savedCPU: 5,
+                rule: rule("limited-a"),
+                status: .normal,
+                isCPULimitSessionActive: true
+            ),
+            item(
+                identifier: "limited-b",
+                name: "Foxtrot Limited",
+                savedCPU: 50,
+                rule: rule("limited-b"),
+                status: .limited(25)
+            ),
+        ]
+        let lists = MenuBarItemLists(
+            displayItems: items,
             includesBackgroundAndSystemProcesses: true,
             scope: .running,
             processSort: .name,
             searchText: ""
         )
-        #expect(changedSavings.managedItems.map(\.bundleIdentifier) == [
-            "beta", "delta", "gamma",
+        #expect(lists.managedItems.map(\.bundleIdentifier) == [
+            "limited-a", "limited-b", "efficient", "waiting", "running", "closed",
         ])
+    }
+
+    @Test("Saved CPU text only appears while CPU control is active")
+    func savedCPUTextApplicability() {
+        #expect(item(
+            identifier: "limited",
+            name: "Limited",
+            savedCPU: 12.34,
+            rule: rule("limited"),
+            status: .limited(50)
+        ).savedCPUText == "12.3%")
+        #expect(item(
+            identifier: "efficient",
+            name: "Efficient",
+            rule: rule("efficient"),
+            status: .energyEfficient
+        ).savedCPUText == "—")
+        #expect(item(
+            identifier: "configured",
+            name: "Configured",
+            savedCPU: 12.34,
+            rule: rule("configured")
+        ).savedCPUText == "—")
+        #expect(item(
+            identifier: "closed",
+            name: "Closed",
+            savedCPU: 12.34,
+            isRunning: false,
+            rule: rule("closed"),
+            status: .limited(50)
+        ).savedCPUText == "—")
+    }
+
+    @Test("Display projection carries an active CPU limit session")
+    func activeCPULimitSessionProjection() throws {
+        let identifier = "active-limit"
+        let app = ManagedApp(
+            bundleIdentifier: identifier,
+            name: "Active Limit",
+            bundleURL: nil,
+            processIdentifiers: [],
+            cpuPercent: 10,
+            isFrontmost: false,
+            isHidden: true,
+            isPlayingAudio: false,
+            isSystemProcess: false,
+            status: .normal
+        )
+        let projected = try #require(DisplayItemProjection.project(
+            apps: [app],
+            rules: [identifier: rule(identifier)],
+            suspensions: [:],
+            isEnabled: true,
+            averageCPUByIdentifier: [:],
+            savedCPUByIdentifier: [:],
+            savedPowerByIdentifier: [:],
+            activeCPULimitSessionIdentifiers: [identifier],
+            attentionIdentifiers: [],
+            iconCache: AppIconCache()
+        ).first)
+
+        #expect(projected.isCPULimitSessionActive)
     }
 
     @Test("Background and system processes stay hidden from Running when disabled")
@@ -594,7 +683,9 @@ struct UIDerivationTests {
         isSystemProcess: Bool = false,
         rule: AppRule? = nil,
         isAttention: Bool = false,
-        iconCache: AppIconCache? = nil
+        iconCache: AppIconCache? = nil,
+        status: ManagementStatus? = nil,
+        isCPULimitSessionActive: Bool = false
     ) -> AppDisplayItem {
         AppDisplayItem(
             bundleIdentifier: identifier,
@@ -611,9 +702,10 @@ struct UIDerivationTests {
             isPlayingAudio: false,
             isBackgroundProcess: isBackgroundProcess,
             isSystemProcess: isSystemProcess,
-            status: isRunning ? .normal : .notRunning,
+            status: status ?? (isRunning ? .normal : .notRunning),
             rule: rule,
             isAttention: isAttention,
+            isCPULimitSessionActive: isCPULimitSessionActive,
             iconCache: iconCache
         )
     }

@@ -11,6 +11,8 @@ extension AppStore {
             averageCPUByIdentifier: runtimeMetrics.averageCPUByIdentifier,
             savedCPUByIdentifier: managementCoordinator.estimatedSavedCPUByIdentifier,
             savedPowerByIdentifier: runtimeMetrics.savedPowerByIdentifier,
+            activeCPULimitSessionIdentifiers: managementCoordinator
+                .activeCPULimitSessionIdentifiers,
             protectionReasonsByIdentifier: managementCoordinator
                 .protectionReasonsByIdentifier,
             managementPauseUntil: preferences.managementPauseUntil,
