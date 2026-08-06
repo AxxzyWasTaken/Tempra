@@ -19,8 +19,8 @@ the app when you return to it or make one of its windows visible again.
 - Limit an app from 1% of one logical CPU core up to the Mac's total logical CPU
   capacity. In Tempra, 100% equals one logical CPU core.
 - Pause an app in the background and resume it in the foreground.
-- Run an app on power-saving CPU cores, with or without a CPU limit. This action
-  requires Tempra's optional administrator helper.
+- Lower an app's CPU priority, with or without a CPU limit. This action requires
+  Tempra's optional administrator helper.
 - Apply a rule only when an app is hidden or after a set delay.
 - Wait while an app plays audio before applying its rule.
 - Hide or quit an app after a set period in the background.
@@ -57,7 +57,7 @@ Monitoring** to keep CPU history and high-CPU alerts active in the background.
 
 1. Open Tempra from the menu bar.
 2. Select a running app.
-3. Choose a CPU limit, pause action, power-saving scheduling, or idle action.
+3. Choose a CPU limit, pause action, lower CPU priority, or idle action.
 4. Set the start delay and the conditions for the rule.
 
 Tempra saves each rule automatically by bundle identifier. For apps with more
@@ -77,15 +77,15 @@ normally.
 ## Safety
 
 Tempra manages ordinary apps and supported user-owned background services. Its
-optional administrator helper enables power-saving scheduling and control of
-supported processes that the app cannot manage directly. Tempra shows an
-explicit error if the helper is unavailable; it does not replace the requested
-action with a weaker one.
+optional administrator helper can lower CPU priority and control supported
+processes that the app cannot manage directly. Tempra shows an explicit error
+if the helper is unavailable. It does not replace the requested action with a
+weaker one.
 
-Tempra keeps SoundSource audio components in monitor-only mode. It does not
-apply CPU limits to WindowServer because stopping WindowServer can freeze the
-desktop. Tempra can apply power-saving scheduling to WindowServer when the
-administrator helper is enabled.
+Tempra keeps SoundSource audio components and protected macOS processes in
+monitor-only mode. Protected processes include WindowServer, Finder, Dock,
+SystemUIServer, loginwindow, and WindowManager. Tempra does not stop, lower the
+priority of, or terminate these processes.
 
 Before Tempra stops a process, an independent watchdog records its process ID
 and start time. The watchdog resumes only the matching process if Tempra exits

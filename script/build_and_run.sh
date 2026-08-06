@@ -8,7 +8,7 @@ PRIVILEGED_HELPER_NAME="TempraPrivilegedHelper"
 LEGACY_APP_NAME="Temper"
 BUNDLE_ID="io.github.temperapp.Temper"
 MIN_SYSTEM_VERSION="14.2"
-APP_VERSION="0.2.0"
+APP_VERSION="0.3.0"
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DIST_DIR="$ROOT_DIR/dist"
@@ -104,7 +104,7 @@ cat >"$INFO_PLIST" <<PLIST
   <key>CFBundleShortVersionString</key>
   <string>$APP_VERSION</string>
   <key>CFBundleVersion</key>
-  <string>2</string>
+  <string>3</string>
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>LSMinimumSystemVersion</key>
