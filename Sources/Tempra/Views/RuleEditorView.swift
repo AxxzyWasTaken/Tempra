@@ -428,8 +428,9 @@ struct RuleEditorView: View {
             }
         )) {
             Text("Run this app on the CPU’s power-saving cores")
-                .lineLimit(1)
-                .minimumScaleFactor(0.78)
+                .font(TempraTypography.body)
+                .fixedSize(horizontal: false, vertical: true)
+                .multilineTextAlignment(.leading)
         }
         .toggleStyle(TempraCheckboxToggleStyle())
         .controlSize(.small)
