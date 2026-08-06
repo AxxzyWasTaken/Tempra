@@ -51,7 +51,7 @@ struct TempraDiagnosticReport: Codable, Equatable {
         let bundleIdentifier: String
         let displayName: String
         let action: String
-        let runOnEfficiencyCores: Bool
+        let lowersCPUPriority: Bool
         let limitPercent: Double
         let delaySeconds: TimeInterval
         let protectAudio: Bool
@@ -157,7 +157,7 @@ struct TempraDiagnosticReport: Codable, Equatable {
                 bundleIdentifier: diagnosticIdentifier(rule.bundleIdentifier),
                 displayName: rule.displayName,
                 action: rule.action.rawValue,
-                runOnEfficiencyCores: rule.runOnEfficiencyCores,
+                lowersCPUPriority: rule.lowersCPUPriority,
                 limitPercent: rule.limitPercent,
                 delaySeconds: rule.delaySeconds,
                 protectAudio: rule.protectAudio,
@@ -334,7 +334,7 @@ struct TempraDiagnosticReport: Codable, Equatable {
         case .limitedWithProtectedProcesses(let percent):
             "best-effort-limited-\(Int(percent))"
         case .paused: "paused"
-        case .energyEfficient: "energy-efficient"
+        case .lowerPriority: "lower-priority"
         case .audioProtected: "audio-protected"
         case .networkProtected: "network-protected"
         case .snoozed: "temporarily-resumed"

@@ -31,7 +31,7 @@ protocol ProcessSystemControlling: Sendable {
         automaticResumeAfter: TimeInterval?
     ) async -> ProcessOperationResult
     func resume(_ processes: Set<ProcessIdentity>) async -> ProcessOperationResult
-    func setBackgroundPriority(_ processes: Set<ProcessIdentity>) async -> ProcessOperationResult
+    func lowerPriority(_ processes: Set<ProcessIdentity>) async -> ProcessOperationResult
     func restorePriority(_ processes: Set<ProcessIdentity>) async -> ProcessOperationResult
     func terminate(_ processes: Set<ProcessIdentity>) async -> ProcessOperationResult
 }
@@ -74,7 +74,7 @@ struct LiveProcessSystemController: ProcessSystemControlling {
         apply(processes) { kill($0, SIGCONT) }
     }
 
-    func setBackgroundPriority(_ processes: Set<ProcessIdentity>) async -> ProcessOperationResult {
+    func lowerPriority(_ processes: Set<ProcessIdentity>) async -> ProcessOperationResult {
         ProcessOperationResult(failed: processes)
     }
 
@@ -216,10 +216,10 @@ struct RoutedProcessSystemController: ProcessSystemControlling {
         await apply(.resume, to: processes) { await local.resume($0) }
     }
 
-    func setBackgroundPriority(
+    func lowerPriority(
         _ processes: Set<ProcessIdentity>
     ) async -> ProcessOperationResult {
-        await applyPrivileged(.setBackgroundPriority, to: processes)
+        await applyPrivileged(.lowerPriority, to: processes)
     }
 
     func restorePriority(

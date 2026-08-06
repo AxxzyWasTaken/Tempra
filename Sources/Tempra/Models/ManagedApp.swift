@@ -7,7 +7,7 @@ enum ManagementStatus: Equatable, Sendable {
     case limited(Double)
     case limitedWithProtectedProcesses(Double)
     case paused
-    case energyEfficient
+    case lowerPriority
     case audioProtected
     case networkProtected
     case snoozed(Date)
@@ -23,7 +23,7 @@ enum ManagementStatus: Equatable, Sendable {
         case .limited(let percent): "Limited to \(Int(percent))%"
         case .limitedWithProtectedProcesses: "Best-effort CPU limit"
         case .paused: "Paused"
-        case .energyEfficient: "Power-saving cores"
+        case .lowerPriority: "Lower CPU priority"
         case .audioProtected: "Audio active"
         case .networkProtected: "Network active"
         case .snoozed(let until):
@@ -43,7 +43,7 @@ enum ManagementStatus: Equatable, Sendable {
         case .limited: "gauge.with.dots.needle.33percent"
         case .limitedWithProtectedProcesses: "gauge.with.dots.needle.33percent"
         case .paused: "pause.circle.fill"
-        case .energyEfficient: "leaf.fill"
+        case .lowerPriority: "arrow.down.circle.fill"
         case .audioProtected: "speaker.wave.2.fill"
         case .networkProtected: "network"
         case .snoozed: "moon.zzz.fill"
@@ -57,7 +57,7 @@ enum ManagementStatus: Equatable, Sendable {
     var isActiveManagement: Bool {
         switch self {
         case .waiting, .limited, .limitedWithProtectedProcesses, .paused,
-                .energyEfficient, .audioProtected, .networkProtected:
+                .lowerPriority, .audioProtected, .networkProtected:
             true
         case .normal, .snoozed, .managementPaused, .disabled, .notRunning,
                 .unavailable:
@@ -67,7 +67,7 @@ enum ManagementStatus: Equatable, Sendable {
 
     var isActivelySavingPower: Bool {
         switch self {
-        case .limited, .limitedWithProtectedProcesses, .paused, .energyEfficient:
+        case .limited, .limitedWithProtectedProcesses, .paused, .lowerPriority:
             true
         case .normal, .waiting, .audioProtected, .networkProtected, .snoozed,
                 .managementPaused, .disabled, .notRunning, .unavailable:
@@ -79,7 +79,7 @@ enum ManagementStatus: Equatable, Sendable {
         switch self {
         case .limited, .limitedWithProtectedProcesses, .paused:
             true
-        case .normal, .waiting, .energyEfficient, .audioProtected, .networkProtected,
+        case .normal, .waiting, .lowerPriority, .audioProtected, .networkProtected,
                 .snoozed, .managementPaused, .disabled, .notRunning, .unavailable:
             false
         }

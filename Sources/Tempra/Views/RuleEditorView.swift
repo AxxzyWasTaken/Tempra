@@ -39,27 +39,33 @@ struct RuleEditorView: View {
 
             ScrollView(.vertical) {
                 VStack(alignment: .leading, spacing: 14) {
-                    inspectorSection("When not in front") {
-                        backgroundControls
-                    }
-
-                    inspectorSection("Conditions") {
-                        conditionControls
-                    }
-
-                    inspectorSection("When idle") {
-                        idleControls
-                    }
-
-                    if !displayedRuleGuidance.isEmpty {
-                        inspectorSection("Guidance") {
-                            ruleGuidanceSection
+                    if item.canManageProcess {
+                        inspectorSection("When not in front") {
+                            backgroundControls
                         }
-                    }
 
-                    if item.isStandaloneProcess
-                        || item.requiresPrivilegedControl
-                        || draft.runOnEfficiencyCores {
+                        inspectorSection("Conditions") {
+                            conditionControls
+                        }
+
+                        inspectorSection("When idle") {
+                            idleControls
+                        }
+
+                        if !displayedRuleGuidance.isEmpty {
+                            inspectorSection("Guidance") {
+                                ruleGuidanceSection
+                            }
+                        }
+
+                        if item.isStandaloneProcess
+                            || item.requiresPrivilegedControl
+                            || draft.lowersCPUPriority {
+                            inspectorSection("Process control") {
+                                processControlNotice
+                            }
+                        }
+                    } else {
                         inspectorSection("Process control") {
                             processControlNotice
                         }
@@ -114,54 +120,56 @@ struct RuleEditorView: View {
             Spacer(minLength: 8)
 
             HStack(spacing: 6) {
-                Menu {
-                    Toggle("Rule Enabled", isOn: $draft.isEnabled)
+                if item.canManageProcess {
+                    Menu {
+                        Toggle("Rule Enabled", isOn: $draft.isEnabled)
 
-                    Divider()
-                    if item.canLimitCPU {
-                        Button("Gentle · 50%") {
-                            draft.action = .limit
-                            draft.limitPercent = 50
-                        }
-                        Button("Strict · 20%") {
-                            draft.action = .limit
-                            draft.limitPercent = 20
-                        }
-                    }
-                    Button("Pause") {
-                        draft.action = .pause
-                        draft.runOnEfficiencyCores = false
-                    }
-
-                    if store.suspensionUntil(for: item.bundleIdentifier) != nil {
-                        Button("End Temporary Resume") {
-                            store.endSnooze(bundleIdentifier: item.bundleIdentifier)
-                        }
-                    } else if store.rules[item.bundleIdentifier] != nil {
-                        Button("Resume for 1 Hour") {
-                            store.resumeTemporarily(
-                                bundleIdentifier: item.bundleIdentifier,
-                                for: 60 * 60
-                            )
-                            onClose()
-                        }
-                    }
-
-                    if store.rules[item.bundleIdentifier] != nil {
                         Divider()
-                        Button("Remove Rule", role: .destructive) {
-                            isRemovingRule = true
-                            store.removeRule(bundleIdentifier: item.bundleIdentifier)
-                            onClose()
+                        if item.canLimitCPU {
+                            Button("Gentle · 50%") {
+                                draft.action = .limit
+                                draft.limitPercent = 50
+                            }
+                            Button("Strict · 20%") {
+                                draft.action = .limit
+                                draft.limitPercent = 20
+                            }
                         }
+                        Button("Pause") {
+                            draft.action = .pause
+                            draft.lowersCPUPriority = false
+                        }
+
+                        if store.suspensionUntil(for: item.bundleIdentifier) != nil {
+                            Button("End Temporary Resume") {
+                                store.endSnooze(bundleIdentifier: item.bundleIdentifier)
+                            }
+                        } else if store.rules[item.bundleIdentifier] != nil {
+                            Button("Resume for 1 Hour") {
+                                store.resumeTemporarily(
+                                    bundleIdentifier: item.bundleIdentifier,
+                                    for: 60 * 60
+                                )
+                                onClose()
+                            }
+                        }
+
+                        if store.rules[item.bundleIdentifier] != nil {
+                            Divider()
+                            Button("Remove Rule", role: .destructive) {
+                                isRemovingRule = true
+                                store.removeRule(bundleIdentifier: item.bundleIdentifier)
+                                onClose()
+                            }
+                        }
+                    } label: {
+                        Image(systemName: "ellipsis.circle")
+                            .frame(width: 24, height: 24)
                     }
-                } label: {
-                    Image(systemName: "ellipsis.circle")
-                        .frame(width: 24, height: 24)
+                    .menuStyle(.borderlessButton)
+                    .fixedSize()
+                    .help("Rule Options")
                 }
-                .menuStyle(.borderlessButton)
-                .fixedSize()
-                .help("Rule Options")
 
                 Button(action: onClose) {
                     Image(systemName: "xmark")
@@ -209,7 +217,7 @@ struct RuleEditorView: View {
             }
 
             pauseToggle
-            efficiencyToggle
+            lowerPriorityToggle
             if item.canLimitCPU {
                 limitToggle
             }
@@ -349,19 +357,15 @@ struct RuleEditorView: View {
 
     @ViewBuilder
     private var processControlNotice: some View {
-        if !item.canLimitCPU {
-            VStack(alignment: .leading, spacing: 7) {
-                Label(
-                    "WindowServer can use power-saving cores. CPU limits are unavailable because they can freeze the desktop.",
-                    systemImage: "exclamationmark.shield"
-                )
-                .font(TempraTypography.ruleTag)
-                .foregroundStyle(TempraPalette.secondaryText)
-
-                privilegedAccessNotice
-            }
+        if !item.canManageProcess {
+            Label(
+                "Tempra monitors this protected process. Process control is unavailable.",
+                systemImage: "checkmark.shield"
+            )
+            .font(TempraTypography.ruleTag)
+            .foregroundStyle(TempraPalette.secondaryText)
             .fixedSize(horizontal: false, vertical: true)
-        } else if item.requiresPrivilegedControl || draft.runOnEfficiencyCores {
+        } else if item.requiresPrivilegedControl || draft.lowersCPUPriority {
             privilegedAccessNotice
         } else {
             Text("CPU limit, pause, priority, and force-quit rules work for this process. Hide requires a macOS application.")
@@ -401,7 +405,7 @@ struct RuleEditorView: View {
             set: { enabled in
                 draft.action = enabled ? .pause : .none
                 if enabled {
-                    draft.runOnEfficiencyCores = false
+                    draft.lowersCPUPriority = false
                 }
             }
         ))
@@ -409,11 +413,11 @@ struct RuleEditorView: View {
         .controlSize(.small)
     }
 
-    private var efficiencyToggle: some View {
+    private var lowerPriorityToggle: some View {
         Toggle(isOn: Binding(
-            get: { draft.runOnEfficiencyCores },
+            get: { draft.lowersCPUPriority },
             set: { enabled in
-                draft.runOnEfficiencyCores = enabled
+                draft.lowersCPUPriority = enabled
                 if enabled, draft.action == .pause {
                     draft.action = .none
                 }
@@ -424,7 +428,7 @@ struct RuleEditorView: View {
                 }
             }
         )) {
-            Text("Run this app on the CPU’s power-saving cores")
+            Text("Lower this app’s CPU priority")
                 .font(TempraTypography.body)
                 .fixedSize(horizontal: false, vertical: true)
                 .multilineTextAlignment(.leading)

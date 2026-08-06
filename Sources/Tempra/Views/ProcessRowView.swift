@@ -25,7 +25,7 @@ private func dotAppearance(
         return TempraDotAppearance(color: TempraPalette.slowed, fill: .full)
     case .paused:
         return TempraDotAppearance(color: TempraPalette.stopped, fill: .full)
-    case .energyEfficient:
+    case .lowerPriority:
         return TempraDotAppearance(color: TempraPalette.waiting, fill: .full)
     case .audioProtected:
         return TempraDotAppearance(color: .purple, fill: .half)
@@ -45,7 +45,7 @@ private func dotAppearance(
         if rule.action == .limit {
             return TempraDotAppearance(color: TempraPalette.slowed, fill: .half)
         }
-        if rule.runOnEfficiencyCores {
+        if rule.lowersCPUPriority {
             return TempraDotAppearance(color: TempraPalette.waiting, fill: .half)
         }
         return TempraDotAppearance(color: TempraPalette.running, fill: .none)
@@ -134,7 +134,7 @@ struct ProcessRowView: View {
         guard let rule = item.rule else { return item.isService ? "service" : nil }
         guard rule.isEnabled, item.status != .disabled else { return "off" }
         return switch rule.action {
-        case .none: rule.runOnEfficiencyCores ? "efficient" : nil
+        case .none: rule.lowersCPUPriority ? "priority" : nil
         case .limit: "< \(Int(rule.limitPercent))%"
         case .pause: "paused"
         }
@@ -225,7 +225,7 @@ struct ManagedProcessRowView: View {
         guard let rule = item.rule else { return nil }
         guard rule.isEnabled, item.status != .disabled else { return "off" }
         return switch rule.action {
-        case .none: rule.runOnEfficiencyCores ? "efficient" : nil
+        case .none: rule.lowersCPUPriority ? "priority" : nil
         case .limit: "< \(Int(rule.limitPercent))%"
         case .pause: "paused"
         }

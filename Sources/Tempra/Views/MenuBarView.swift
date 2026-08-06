@@ -945,25 +945,25 @@ struct MenuBarView: View {
                     )
                     requestPrivilegedControlIfNeeded(
                         for: item,
-                        requiresPrivateQoS: item.rule?.runOnEfficiencyCores == true
+                        requiresLowerPriority: item.rule?.lowersCPUPriority == true
                     )
                 }
             }
 
-            Button(item.rule?.runOnEfficiencyCores == true
-                   ? "Stop Using Power-Saving Cores"
-                   : "Run on Power-Saving Cores") {
-                let enablesPrivateQoS = item.rule?.runOnEfficiencyCores != true
-                store.setEfficiencyCoreScheduling(
+            Button(item.rule?.lowersCPUPriority == true
+                   ? "Restore Normal CPU Priority"
+                   : "Lower CPU Priority") {
+                let enablesLowerPriority = item.rule?.lowersCPUPriority != true
+                store.setLowerCPUPriority(
                     bundleIdentifier: item.bundleIdentifier,
                     displayName: item.name,
                     applicationURL: item.applicationURL,
-                    enabled: enablesPrivateQoS,
+                    enabled: enablesLowerPriority,
                     delaySeconds: 0
                 )
                 requestPrivilegedControlIfNeeded(
                     for: item,
-                    requiresPrivateQoS: enablesPrivateQoS
+                    requiresLowerPriority: enablesLowerPriority
                 )
             }
 
@@ -1013,15 +1013,17 @@ struct MenuBarView: View {
                 }
             }
         } else {
-            Text("Protected for SoundSource compatibility")
+            Text(item.isSoundSourceComponent
+                 ? "Protected for SoundSource compatibility"
+                 : "Protected system process · monitor only")
         }
     }
 
     private func requestPrivilegedControlIfNeeded(
         for item: AppDisplayItem,
-        requiresPrivateQoS: Bool = false
+        requiresLowerPriority: Bool = false
     ) {
-        guard (item.requiresPrivilegedControl || requiresPrivateQoS),
+        guard (item.requiresPrivilegedControl || requiresLowerPriority),
               !store.privilegedControlStatus.isEnabled else { return }
         Task {
             _ = await store.requestPrivilegedControl()

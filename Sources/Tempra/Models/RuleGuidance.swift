@@ -74,12 +74,12 @@ enum RuleGuidanceEvaluator {
             ))
         }
 
-        if rule.runOnEfficiencyCores {
+        if rule.lowersCPUPriority {
             guidance.append(RuleGuidance(
                 kind: .administratorAccessRequired,
                 severity: .information,
                 title: "Administrator access is required",
-                message: "macOS requires Tempra’s verified helper to change process scheduling policy.",
+                message: "macOS requires Tempra’s verified helper to lower process priority.",
                 symbolName: "lock.shield"
             ))
         }

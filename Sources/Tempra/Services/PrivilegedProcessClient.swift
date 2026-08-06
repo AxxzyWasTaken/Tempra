@@ -321,6 +321,7 @@ actor PrivilegedProcessClient {
                 PrivilegedProcessResponse.self,
                 from: data
               ),
+              response.protocolVersion == PrivilegedProcessProtocol.version,
               response.snapshots.count <= PrivilegedProcessProtocol.maximumProcessCount,
               response.applied.count <= PrivilegedProcessProtocol.maximumProcessCount,
               response.stale.count <= PrivilegedProcessProtocol.maximumProcessCount,

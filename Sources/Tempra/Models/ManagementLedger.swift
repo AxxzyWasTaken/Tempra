@@ -6,7 +6,7 @@ enum ManagementMetricCategory: String, Codable, Equatable, Sendable {
 
     init?(status: ManagementStatus) {
         switch status {
-        case .limited, .limitedWithProtectedProcesses, .energyEfficient:
+        case .limited, .limitedWithProtectedProcesses, .lowerPriority:
             self = .limited
         case .paused:
             self = .paused

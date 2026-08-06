@@ -3,6 +3,7 @@ import Foundation
 import Security
 
 public enum PrivilegedProcessProtocol {
+    public static let version = 2
     public static let daemonPlistName = "io.github.temperapp.Temper.PrivilegedHelper.plist"
     public static let machServiceName = "io.github.temperapp.Temper.PrivilegedHelper"
     public static let applicationIdentifier = "io.github.temperapp.Temper"
@@ -22,7 +23,7 @@ public enum PrivilegedProcessAction: String, Codable, Sendable {
     case totalCPUTime
     case stop
     case resume
-    case setBackgroundPriority
+    case lowerPriority
     case restorePriority
     case terminate
 }
@@ -38,17 +39,20 @@ public struct PrivilegedProcessIdentity: Codable, Hashable, Sendable {
 }
 
 public struct PrivilegedProcessRequest: Codable, Equatable, Sendable {
+    public let protocolVersion: Int
     public let action: PrivilegedProcessAction
     public let processIdentifiers: [Int32]
     public let processes: [PrivilegedProcessIdentity]
     public let automaticResumeAfterMilliseconds: UInt32?
 
     public init(
+        protocolVersion: Int = PrivilegedProcessProtocol.version,
         action: PrivilegedProcessAction,
         processIdentifiers: [Int32] = [],
         processes: [PrivilegedProcessIdentity] = [],
         automaticResumeAfterMilliseconds: UInt32? = nil
     ) {
+        self.protocolVersion = protocolVersion
         self.action = action
         self.processIdentifiers = processIdentifiers
         self.processes = processes
@@ -93,6 +97,7 @@ public enum PrivilegedProcessErrorCode: String, Codable, Sendable {
 }
 
 public struct PrivilegedProcessResponse: Codable, Equatable, Sendable {
+    public let protocolVersion: Int
     public let snapshots: [PrivilegedProcessSnapshot]
     public let applied: [PrivilegedProcessIdentity]
     public let stale: [PrivilegedProcessIdentity]
@@ -102,6 +107,7 @@ public struct PrivilegedProcessResponse: Codable, Equatable, Sendable {
     public let errorMessage: String?
 
     public init(
+        protocolVersion: Int = PrivilegedProcessProtocol.version,
         snapshots: [PrivilegedProcessSnapshot] = [],
         applied: [PrivilegedProcessIdentity] = [],
         stale: [PrivilegedProcessIdentity] = [],
@@ -110,6 +116,7 @@ public struct PrivilegedProcessResponse: Codable, Equatable, Sendable {
         errorCode: PrivilegedProcessErrorCode? = nil,
         errorMessage: String? = nil
     ) {
+        self.protocolVersion = protocolVersion
         self.snapshots = snapshots
         self.applied = applied
         self.stale = stale

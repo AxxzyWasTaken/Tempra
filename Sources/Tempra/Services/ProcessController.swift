@@ -115,7 +115,7 @@ actor ProcessController {
     private var rules: [String: AppRule] = [:]
     private var backgroundSince: [String: Date] = [:]
     private var stoppedByTempra: [String: Set<ProcessIdentity>] = [:]
-    private var backgroundedByTempra: [String: Set<ProcessIdentity>] = [:]
+    private var loweredByTempra: [String: Set<ProcessIdentity>] = [:]
     private var limitRuntimes: [String: LimitRuntime] = [:]
     private var limitSelections: [String: ProcessLimitSelection] = [:]
     private var pausedBaselineCPU: [String: Double] = [:]
@@ -449,7 +449,7 @@ actor ProcessController {
         lastFrontmostProbeAt = clock.now()
         let isManaged = rules[bundleIdentifier]?.hasBehavior == true
             || stoppedByTempra[bundleIdentifier]?.isEmpty == false
-            || backgroundedByTempra[bundleIdentifier]?.isEmpty == false
+            || loweredByTempra[bundleIdentifier]?.isEmpty == false
             || limitRuntimes[bundleIdentifier] != nil
         guard isManaged else { return snapshot() }
 
@@ -688,7 +688,7 @@ actor ProcessController {
     private var trackedIdentifiers: Set<String> {
         Set(statuses.keys)
             .union(stoppedByTempra.keys)
-            .union(backgroundedByTempra.keys)
+            .union(loweredByTempra.keys)
             .union(limitRuntimes.keys)
             .union(pausedBaselineCPU.keys)
             .union(pauseActivationProbeUntil.keys)
@@ -928,13 +928,13 @@ actor ProcessController {
                 if await prepareForDeferredAction(
                     rule: rule,
                     app: app,
-                    appliesEfficiencyCores: !isWithinLaunchGrace
+                    appliesLowerPriority: !isWithinLaunchGrace
                 ) {
                     guard workIsCurrent else { return }
                     await setStatus(
                         isWithinLaunchGrace
                             ? .waiting
-                            : (rule.usesEfficiencyCoreScheduling ? .energyEfficient : .normal),
+                            : (rule.usesLowerCPUPriority ? .lowerPriority : .normal),
                         for: identifier
                     )
                 }
@@ -945,7 +945,7 @@ actor ProcessController {
                 if await prepareForDeferredAction(
                     rule: rule,
                     app: app,
-                    appliesEfficiencyCores: false
+                    appliesLowerPriority: false
                 ) {
                     guard workIsCurrent else { return }
                     backgroundSince[identifier] = Date()
@@ -962,7 +962,7 @@ actor ProcessController {
                 if await prepareForDeferredAction(
                     rule: rule,
                     app: app,
-                    appliesEfficiencyCores: false
+                    appliesLowerPriority: false
                 ) {
                     guard workIsCurrent else { return }
                     backgroundSince[identifier] = backgroundStart
@@ -994,12 +994,12 @@ actor ProcessController {
                 continue
             }
 
-            if (rule.action != .none || rule.runOnEfficiencyCores),
+            if (rule.action != .none || rule.lowersCPUPriority),
                app.windowVisibility.protectsFromDisruptiveManagement {
                 if await prepareForDeferredAction(
                     rule: rule,
                     app: app,
-                    appliesEfficiencyCores: false
+                    appliesLowerPriority: false
                 ) {
                     guard workIsCurrent else { return }
                     backgroundSince[identifier] = backgroundStart
@@ -1012,7 +1012,7 @@ actor ProcessController {
                 if await prepareForDeferredAction(
                     rule: rule,
                     app: app,
-                    appliesEfficiencyCores: false
+                    appliesLowerPriority: false
                 ) {
                     guard workIsCurrent else { return }
                     backgroundSince[identifier] = backgroundStart
@@ -1029,19 +1029,19 @@ actor ProcessController {
                 if await prepareForDeferredAction(
                     rule: rule,
                     app: app,
-                    appliesEfficiencyCores: true
+                    appliesLowerPriority: true
                 ) {
                     guard workIsCurrent else { return }
                     backgroundSince[identifier] = backgroundStart
                     await setStatus(
-                        rule.usesEfficiencyCoreScheduling ? .energyEfficient : .waiting,
+                        rule.usesLowerCPUPriority ? .lowerPriority : .waiting,
                         for: identifier
                     )
                 }
                 continue
             }
 
-            if (rule.action != .none || rule.runOnEfficiencyCores),
+            if (rule.action != .none || rule.lowersCPUPriority),
                app.processIdentities.isEmpty {
                 await markUnavailable(
                     identifier,
@@ -1078,10 +1078,10 @@ actor ProcessController {
             limitRuntimes.removeValue(forKey: identifier)
             pausedBaselineCPU.removeValue(forKey: identifier)
             let priorityPrepared: Bool
-            if rule.usesEfficiencyCoreScheduling {
-                priorityPrepared = await applyBackgroundPriority(to: app)
+            if rule.usesLowerCPUPriority {
+                priorityPrepared = await applyLowerPriority(to: app)
             } else {
-                priorityPrepared = await restoreBackgroundPriority(
+                priorityPrepared = await restoreLowerPriority(
                     for: identifier,
                     attempts: restorationAttempts
                 )
@@ -1097,7 +1097,7 @@ actor ProcessController {
             }
             guard workIsCurrent else { return }
             guard priorityPrepared else {
-                if rule.usesEfficiencyCoreScheduling { return }
+                if rule.usesLowerCPUPriority { return }
                 await markUnavailable(
                     identifier,
                     detail: "Tempra could not restore normal process priority."
@@ -1105,13 +1105,13 @@ actor ProcessController {
                 return
             }
             await setStatus(
-                rule.usesEfficiencyCoreScheduling ? .energyEfficient : .normal,
+                rule.usesLowerCPUPriority ? .lowerPriority : .normal,
                 for: identifier
             )
         case .pause:
             limitDeadlines.remove(identifier: identifier)
             limitRuntimes.removeValue(forKey: identifier)
-            guard await restoreBackgroundPriority(
+            guard await restoreLowerPriority(
                 for: identifier,
                 attempts: restorationAttempts
             ) else {
@@ -1130,10 +1130,10 @@ actor ProcessController {
             }
         case .limit:
             pausedBaselineCPU.removeValue(forKey: identifier)
-            if rule.usesEfficiencyCoreScheduling {
-                guard await applyBackgroundPriority(to: app) else { return }
+            if rule.usesLowerCPUPriority {
+                guard await applyLowerPriority(to: app) else { return }
             } else {
-                guard await restoreBackgroundPriority(
+                guard await restoreLowerPriority(
                     for: identifier,
                     attempts: restorationAttempts
                 ) else {
@@ -1249,10 +1249,10 @@ actor ProcessController {
         return await setStoppedProcesses(stopped, for: identifier)
     }
 
-    private func applyBackgroundPriority(to app: ProcessControlTarget) async -> Bool {
+    private func applyLowerPriority(to app: ProcessControlTarget) async -> Bool {
         guard workIsCurrent else { return false }
         let identifier = app.bundleIdentifier
-        var existing = backgroundedByTempra[identifier, default: []]
+        var existing = loweredByTempra[identifier, default: []]
             .intersection(app.processIdentities)
         var protectedProcesses = latencySensitiveProcesses(for: app)
         protectedProcesses.formUnion(
@@ -1268,11 +1268,11 @@ actor ProcessController {
             let restoreResult = await system.restorePriority(noLongerDesired)
             existing.subtract(restoreResult.applied.union(restoreResult.stale))
             guard workIsCurrent else {
-                backgroundedByTempra[identifier] = existing
+                loweredByTempra[identifier] = existing
                 return false
             }
             guard restoreResult.failed.isEmpty else {
-                backgroundedByTempra[identifier] = existing.union(restoreResult.failed)
+                loweredByTempra[identifier] = existing.union(restoreResult.failed)
                 await markUnavailable(
                     identifier,
                     detail: "Tempra could not restore network or critical-activity processes to normal priority."
@@ -1281,28 +1281,28 @@ actor ProcessController {
             }
         }
 
-        let result = await system.setBackgroundPriority(
+        let result = await system.lowerPriority(
             desired.subtracting(existing)
         )
         if !workIsCurrent {
-            backgroundedByTempra[identifier] = existing.union(result.applied)
+            loweredByTempra[identifier] = existing.union(result.applied)
             return false
         }
         guard result.failed.isEmpty else {
             let rollback = await system.restorePriority(existing.union(result.applied))
-            backgroundedByTempra[identifier] = rollback.failed
+            loweredByTempra[identifier] = rollback.failed
             await markUnavailable(
                 identifier,
-                detail: "Tempra could not change every process to background priority."
+                detail: "Tempra could not lower the priority of every process."
             )
             return false
         }
 
         let backgrounded = existing.union(result.applied).intersection(desired)
         if backgrounded.isEmpty {
-            backgroundedByTempra.removeValue(forKey: identifier)
+            loweredByTempra.removeValue(forKey: identifier)
         } else {
-            backgroundedByTempra[identifier] = backgrounded
+            loweredByTempra[identifier] = backgrounded
         }
         return true
     }
@@ -2082,12 +2082,12 @@ actor ProcessController {
             limitRuntimes.removeValue(forKey: identifier)
             _ = await setStoppedProcesses(rollback.failed, for: identifier)
             let priorityRollback = await system.restorePriority(
-                backgroundedByTempra[identifier, default: []]
+                loweredByTempra[identifier, default: []]
             )
             if priorityRollback.failed.isEmpty {
-                backgroundedByTempra.removeValue(forKey: identifier)
+                loweredByTempra.removeValue(forKey: identifier)
             } else {
-                backgroundedByTempra[identifier] = priorityRollback.failed
+                loweredByTempra[identifier] = priorityRollback.failed
             }
             await markUnavailable(identifier, detail: "Tempra could not limit every process.")
             return
@@ -2216,12 +2216,12 @@ actor ProcessController {
             limitRuntimes.removeValue(forKey: identifier)
             _ = await setStoppedProcesses(rollback.failed, for: identifier)
             let priorityRollback = await system.restorePriority(
-                backgroundedByTempra[identifier, default: []]
+                loweredByTempra[identifier, default: []]
             )
             if priorityRollback.failed.isEmpty {
-                backgroundedByTempra.removeValue(forKey: identifier)
+                loweredByTempra.removeValue(forKey: identifier)
             } else {
-                backgroundedByTempra[identifier] = priorityRollback.failed
+                loweredByTempra[identifier] = priorityRollback.failed
             }
             await markUnavailable(identifier, detail: "Tempra could not limit every process.")
             scheduleNextTick()
@@ -2416,7 +2416,7 @@ actor ProcessController {
 
     private func reconcileControlledProcesses() async {
         guard workIsCurrent else { return }
-        for identifier in Set(stoppedByTempra.keys).union(backgroundedByTempra.keys) {
+        for identifier in Set(stoppedByTempra.keys).union(loweredByTempra.keys) {
             guard workIsCurrent else { return }
             let current = groups[identifier]?.processIdentities ?? []
 
@@ -2433,11 +2433,11 @@ actor ProcessController {
                 guard workIsCurrent else { return }
             }
 
-            let retiredBackgrounded = backgroundedByTempra[identifier, default: []]
+            let retiredBackgrounded = loweredByTempra[identifier, default: []]
                 .subtracting(current)
             if !retiredBackgrounded.isEmpty {
                 let result = await system.restorePriority(retiredBackgrounded)
-                backgroundedByTempra[identifier]?.subtract(result.applied.union(result.stale))
+                loweredByTempra[identifier]?.subtract(result.applied.union(result.stale))
                 guard workIsCurrent else { return }
             }
         }
@@ -2450,7 +2450,7 @@ actor ProcessController {
         attempts: Int,
         resumeReason: ProcessControlSignalReason = .restoration
     ) async -> Bool {
-        let priorityRestored = await restoreBackgroundPriority(
+        let priorityRestored = await restoreLowerPriority(
             for: identifier,
             attempts: attempts
         )
@@ -2470,7 +2470,7 @@ actor ProcessController {
     }
 
     private func restoreProcessControl(identifier: String, attempts: Int) async -> Bool {
-        let priorityRestored = await restoreBackgroundPriority(
+        let priorityRestored = await restoreLowerPriority(
             for: identifier,
             attempts: attempts
         )
@@ -2500,15 +2500,15 @@ actor ProcessController {
     private func prepareForDeferredAction(
         rule: AppRule,
         app: ProcessControlTarget,
-        appliesEfficiencyCores: Bool
+        appliesLowerPriority: Bool
     ) async -> Bool {
         guard workIsCurrent else { return false }
         let identifier = app.bundleIdentifier
         let priorityPrepared: Bool
-        if appliesEfficiencyCores, rule.usesEfficiencyCoreScheduling {
-            priorityPrepared = await applyBackgroundPriority(to: app)
+        if appliesLowerPriority, rule.usesLowerCPUPriority {
+            priorityPrepared = await applyLowerPriority(to: app)
         } else {
-            priorityPrepared = await restoreBackgroundPriority(
+            priorityPrepared = await restoreLowerPriority(
                 for: identifier,
                 attempts: restorationAttempts
             )
@@ -2729,21 +2729,21 @@ actor ProcessController {
     private func restorationResult() -> ProcessRestorationResult {
         ProcessRestorationState.result(
             stoppedByIdentifier: stoppedByTempra,
-            backgroundedByIdentifier: backgroundedByTempra
+            backgroundedByIdentifier: loweredByTempra
         )
     }
 
-    private func restoreBackgroundPriority(for identifier: String, attempts: Int) async -> Bool {
+    private func restoreLowerPriority(for identifier: String, attempts: Int) async -> Bool {
         let unresolved = await performWithRetries(
-            backgroundedByTempra[identifier, default: []],
+            loweredByTempra[identifier, default: []],
             attempts: attempts,
             operation: { await system.restorePriority($0) }
         )
         if unresolved.isEmpty {
-            backgroundedByTempra.removeValue(forKey: identifier)
+            loweredByTempra.removeValue(forKey: identifier)
             return workIsCurrent
         }
-        backgroundedByTempra[identifier] = unresolved
+        loweredByTempra[identifier] = unresolved
         return false
     }
 
@@ -3067,10 +3067,10 @@ actor ProcessController {
                !quitRequested.contains(identifier) {
                 include(backgroundStart.addingTimeInterval(quitAfterMinutes * 60).timeIntervalSince(now))
             }
-            if rule.action != .none || rule.runOnEfficiencyCores {
+            if rule.action != .none || rule.lowersCPUPriority {
                 include(visibilityRecheckInterval)
             }
-            if (rule.action != .none || rule.runOnEfficiencyCores),
+            if (rule.action != .none || rule.lowersCPUPriority),
                app.windowVisibility.protectsFromDisruptiveManagement {
                 continue
             }

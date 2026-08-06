@@ -223,8 +223,8 @@ struct AppPersistence {
             }
             try validateOptionalMinutes(rule.hideAfterMinutes, field: "hide delay")
             try validateOptionalMinutes(rule.quitAfterMinutes, field: "quit delay")
-            guard rule.action != .pause || !rule.runOnEfficiencyCores else {
-                throw invalid("app rules", "a paused rule cannot use power-saving core scheduling")
+            guard rule.action != .pause || !rule.lowersCPUPriority else {
+                throw invalid("app rules", "a paused rule cannot lower CPU priority")
             }
         }
     }

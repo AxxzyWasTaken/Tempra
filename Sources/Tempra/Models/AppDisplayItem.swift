@@ -157,15 +157,21 @@ struct AppDisplayItem: Identifiable {
 
     var canLimitCPU: Bool {
         canManageProcess
-            && !SystemProcessRulePolicy.isWindowServer(bundleIdentifier: bundleIdentifier)
     }
 
     var canManageProcess: Bool {
-        !isSoundSourceComponent
+        !isSoundSourceComponent && !isProtectedSystemProcess
     }
 
     var isSoundSourceComponent: Bool {
         SoundSourceCompatibilityPolicy.isProtected(
+            bundleIdentifier: bundleIdentifier,
+            applicationURL: applicationURL
+        )
+    }
+
+    var isProtectedSystemProcess: Bool {
+        SystemProcessRulePolicy.isProtected(
             bundleIdentifier: bundleIdentifier,
             applicationURL: applicationURL
         )

@@ -17,7 +17,7 @@ private enum PrivilegedHelperFailure: LocalizedError {
 
 private struct PrivilegedWatchdogState: Codable {
     let stopped: [WatchdogProcessIdentity]
-    let privateQoS: [WatchdogPrivateQoSState]
+    let priorities: [WatchdogProcessPriorityState]
     let automaticResumeDeadlines: [WatchdogResumeDeadline]
 }
 
@@ -38,11 +38,11 @@ private struct PrivilegedWatchdogStream {
             guard !frame.isEmpty else { continue }
             let state = try JSONDecoder().decode(PrivilegedWatchdogState.self, from: frame)
             guard state.stopped.count <= PrivilegedProcessProtocol.maximumProcessCount,
-                  state.privateQoS.count <= PrivilegedProcessProtocol.maximumProcessCount,
+                  state.priorities.count <= PrivilegedProcessProtocol.maximumProcessCount,
                   state.automaticResumeDeadlines.count
                     <= PrivilegedProcessProtocol.maximumProcessCount,
-                  Set(state.privateQoS.map(\.process)).count == state.privateQoS.count,
-                  state.privateQoS.allSatisfy(\.originalPolicy.isValid),
+                  Set(state.priorities.map(\.process)).count == state.priorities.count,
+                  state.priorities.allSatisfy(\.originalPriority.isValid),
                   Set(state.automaticResumeDeadlines.map(\.process)).count
                     == state.automaticResumeDeadlines.count,
                   Set(state.automaticResumeDeadlines.map(\.process)).isSubset(
@@ -70,10 +70,12 @@ private struct PrivilegedWatchdogStream {
 
 private final class PrivilegedSafetyWatchdog {
     private static let acknowledgementTimeoutMilliseconds: Int32 = 1_000
+    private static let shutdownTimeout: DispatchTimeInterval = .milliseconds(1_000)
     private let executableURL: URL
     private var process: Process?
     private var inputHandle: FileHandle?
     private var outputHandle: FileHandle?
+    private var exitSignal: DispatchSemaphore?
 
     init(executableURL: URL) {
         self.executableURL = executableURL
@@ -81,22 +83,22 @@ private final class PrivilegedSafetyWatchdog {
 
     func synchronize(
         stopped: Set<PrivilegedProcessIdentity>,
-        privateQoSPolicies: [PrivilegedProcessIdentity: PrivateQoSPolicyState],
+        priorities: [PrivilegedProcessIdentity: ProcessPriorityPolicyState],
         automaticResumeMillisecondsByProcess:
             [PrivilegedProcessIdentity: UInt32]
     ) throws {
         if stopped.isEmpty,
-           privateQoSPolicies.isEmpty,
+           priorities.isEmpty,
            process == nil {
             return
         }
         try ensureRunning()
         let state = PrivilegedWatchdogState(
             stopped: stopped.map(Self.watchdogIdentity).sorted(by: Self.identityOrder),
-            privateQoS: privateQoSPolicies.map { process, policy in
-                WatchdogPrivateQoSState(
+            priorities: priorities.map { process, policy in
+                WatchdogProcessPriorityState(
                     process: Self.watchdogIdentity(process),
-                    originalPolicy: policy
+                    originalPriority: policy
                 )
             }.sorted {
                 Self.identityOrder($0.process, $1.process)
@@ -120,76 +122,147 @@ private final class PrivilegedSafetyWatchdog {
         var frame = encoded
         frame.append(0x0A)
         do {
-            try inputHandle?.write(contentsOf: frame)
+            guard let inputHandle else {
+                throw PrivilegedHelperFailure.safetyHelper(
+                    "The privileged safety input channel is unavailable."
+                )
+            }
+            try inputHandle.write(contentsOf: frame)
             try awaitAcknowledgement()
         } catch {
-            close()
+            _ = triggerRecovery()
             throw PrivilegedHelperFailure.safetyHelper(error.localizedDescription)
         }
     }
 
-    func disarm() {
-        inputHandle?.closeFile()
-        outputHandle?.closeFile()
-        inputHandle = nil
-        outputHandle = nil
-        process = nil
+    func disarm() throws {
+        guard try stopAndWaitForRecovery() else {
+            throw PrivilegedHelperFailure.safetyHelper(
+                "The privileged safety process did not stop cleanly."
+            )
+        }
     }
 
-    func triggerRecovery() {
-        inputHandle?.closeFile()
-        outputHandle?.closeFile()
-        inputHandle = nil
-        outputHandle = nil
-        process = nil
+    @discardableResult
+    func triggerRecovery() -> Bool {
+        do {
+            return try stopAndWaitForRecovery()
+        } catch {
+            return false
+        }
     }
 
     private func ensureRunning() throws {
         if let process,
            process.isRunning,
            inputHandle != nil,
-           outputHandle != nil {
+           outputHandle != nil,
+           exitSignal != nil {
             return
         }
-        close()
+        if process != nil, !triggerRecovery() {
+            throw PrivilegedHelperFailure.safetyHelper(
+                "Tempra could not stop the prior privileged safety process."
+            )
+        }
 
         let inputPipe = Pipe()
         let outputPipe = Pipe()
+        let childInputHandle = inputPipe.fileHandleForReading
+        let parentInputHandle = inputPipe.fileHandleForWriting
+        let parentOutputHandle = outputPipe.fileHandleForReading
+        let childOutputHandle = outputPipe.fileHandleForWriting
+        guard fcntl(parentInputHandle.fileDescriptor, F_SETNOSIGPIPE, 1) == 0 else {
+            let detail = String(cString: strerror(errno))
+            childInputHandle.closeFile()
+            parentInputHandle.closeFile()
+            parentOutputHandle.closeFile()
+            childOutputHandle.closeFile()
+            throw PrivilegedHelperFailure.safetyHelper(
+                "Tempra could not configure the privileged safety connection: \(detail)"
+            )
+        }
+
         let process = Process()
+        let exitSignal = DispatchSemaphore(value: 0)
         process.executableURL = executableURL
         process.arguments = ["--watchdog"]
-        process.standardInput = inputPipe
-        process.standardOutput = outputPipe
+        process.standardInput = childInputHandle
+        process.standardOutput = childOutputHandle
         process.standardError = FileHandle.nullDevice
+        process.terminationHandler = { _ in
+            exitSignal.signal()
+        }
         do {
             try process.run()
         } catch {
+            childInputHandle.closeFile()
+            parentInputHandle.closeFile()
+            parentOutputHandle.closeFile()
+            childOutputHandle.closeFile()
             throw PrivilegedHelperFailure.safetyHelper(
                 "Tempra could not start the privileged safety process: "
                     + error.localizedDescription
             )
         }
-        let inputHandle = inputPipe.fileHandleForWriting
-        let outputHandle = outputPipe.fileHandleForReading
-        guard fcntl(inputHandle.fileDescriptor, F_SETNOSIGPIPE, 1) == 0 else {
-            let detail = String(cString: strerror(errno))
-            inputHandle.closeFile()
-            outputHandle.closeFile()
-            throw PrivilegedHelperFailure.safetyHelper(
-                "Tempra could not configure the privileged safety connection: \(detail)"
-            )
-        }
+        childInputHandle.closeFile()
+        childOutputHandle.closeFile()
         self.process = process
-        self.inputHandle = inputHandle
-        self.outputHandle = outputHandle
+        inputHandle = parentInputHandle
+        outputHandle = parentOutputHandle
+        self.exitSignal = exitSignal
     }
 
-    private func close() {
+    private func stopAndWaitForRecovery() throws -> Bool {
+        guard let process else {
+            closeHandles()
+            return true
+        }
+
+        inputHandle?.closeFile()
+        inputHandle = nil
+        var exited = waitForExit(process)
+        if !exited, process.isRunning {
+            process.terminate()
+            exited = waitForExit(process)
+        }
+        if !exited, process.isRunning {
+            let processIdentifier = process.processIdentifier
+            guard kill(processIdentifier, SIGKILL) == 0 || errno == ESRCH else {
+                throw PrivilegedHelperFailure.safetyHelper(
+                    "Tempra could not stop the privileged safety process."
+                )
+            }
+            exited = waitForExit(process)
+        }
+        guard exited || !process.isRunning else {
+            throw PrivilegedHelperFailure.safetyHelper(
+                "The privileged safety process did not exit within the safety limit."
+            )
+        }
+
+        let recovered = process.terminationReason == .exit
+            && process.terminationStatus == EXIT_SUCCESS
+        closeHandles()
+        return recovered
+    }
+
+    private func waitForExit(_ process: Process) -> Bool {
+        if !process.isRunning { return true }
+        guard let exitSignal else { return false }
+        if exitSignal.wait(timeout: .now() + Self.shutdownTimeout) == .success {
+            return true
+        }
+        return !process.isRunning
+    }
+
+    private func closeHandles() {
         inputHandle?.closeFile()
         outputHandle?.closeFile()
         inputHandle = nil
         outputHandle = nil
         process = nil
+        exitSignal = nil
     }
 
     private func awaitAcknowledgement() throws {
@@ -256,10 +329,10 @@ private final class PrivilegedProcessSession: NSObject, PrivilegedProcessXPCProt
     private let helperPID = getpid()
     private let helperExecutablePath: String
     private let watchdog: PrivilegedSafetyWatchdog
-    private let privateQoSController = PrivateQoSController()
+    private let priorityController = ProcessPriorityController()
     private var stopped: Set<PrivilegedProcessIdentity> = []
-    private var privateQoSOriginalPolicies:
-        [PrivilegedProcessIdentity: PrivateQoSPolicyState] = [:]
+    private var originalPriorities:
+        [PrivilegedProcessIdentity: ProcessPriorityPolicyState] = [:]
     private var automaticResumeMillisecondsByProcess:
         [PrivilegedProcessIdentity: UInt32] = [:]
     private var isInvalidated = false
@@ -286,10 +359,7 @@ private final class PrivilegedProcessSession: NSObject, PrivilegedProcessXPCProt
         queue.async { [weak self] in
             guard let self, !isInvalidated else { return }
             isInvalidated = true
-            watchdog.triggerRecovery()
-            stopped.removeAll()
-            privateQoSOriginalPolicies.removeAll()
-            automaticResumeMillisecondsByProcess.removeAll()
+            _ = emergencyRecover()
         }
     }
 
@@ -303,6 +373,12 @@ private final class PrivilegedProcessSession: NSObject, PrivilegedProcessXPCProt
             request = try JSONDecoder().decode(PrivilegedProcessRequest.self, from: data)
         } catch {
             return failure(.invalidRequest, "The privileged request is invalid.")
+        }
+        guard request.protocolVersion == PrivilegedProcessProtocol.version else {
+            return failure(
+                .invalidRequest,
+                "The app and privileged helper use different protocol versions."
+            )
         }
         guard request.processIdentifiers.count <= PrivilegedProcessProtocol.maximumProcessCount,
               request.processes.count <= PrivilegedProcessProtocol.maximumProcessCount else {
@@ -344,8 +420,8 @@ private final class PrivilegedProcessSession: NSObject, PrivilegedProcessXPCProt
             return stop(request)
         case .resume:
             return resume(request)
-        case .setBackgroundPriority:
-            return setBackgroundPriority(request)
+        case .lowerPriority:
+            return lowerPriority(request)
         case .restorePriority:
             return restorePriority(request)
         case .terminate:
@@ -376,6 +452,12 @@ private final class PrivilegedProcessSession: NSObject, PrivilegedProcessXPCProt
         guard let identities = validatedOperationIdentities(request) else {
             return failure(.invalidRequest, "The stop request is invalid.")
         }
+        guard canApplyDisruptiveControl(to: identities) else {
+            return failure(
+                .invalidRequest,
+                "Tempra cannot stop a protected system process."
+            )
+        }
         let current = Set(identities.filter { Self.currentIdentity(for: $0.pid) == $0 })
         let proposedStopped = stopped.union(current)
         var proposedAutomaticResume = automaticResumeMillisecondsByProcess
@@ -389,11 +471,17 @@ private final class PrivilegedProcessSession: NSObject, PrivilegedProcessXPCProt
         do {
             try watchdog.synchronize(
                 stopped: proposedStopped,
-                privateQoSPolicies: privateQoSOriginalPolicies,
+                priorities: originalPriorities,
                 automaticResumeMillisecondsByProcess: proposedAutomaticResume
             )
         } catch {
-            return failure(.safetyHelperFailed, error.localizedDescription)
+            let recoverySucceeded = emergencyRecover()
+            return failure(
+                .safetyHelperFailed,
+                recoverySucceeded
+                    ? "Tempra could not prepare its safety process. Managed processes were restored."
+                    : error.localizedDescription
+            )
         }
 
         var result = apply(identities) { kill($0, SIGSTOP) }
@@ -404,7 +492,7 @@ private final class PrivilegedProcessSession: NSObject, PrivilegedProcessXPCProt
         do {
             try watchdog.synchronize(
                 stopped: stopped,
-                privateQoSPolicies: privateQoSOriginalPolicies,
+                priorities: originalPriorities,
                 automaticResumeMillisecondsByProcess:
                     automaticResumeMillisecondsByProcess
             )
@@ -427,23 +515,35 @@ private final class PrivilegedProcessSession: NSObject, PrivilegedProcessXPCProt
         guard let identities = validatedOperationIdentities(request) else {
             return failure(.invalidRequest, "The resume request is invalid.")
         }
+        guard Set(identities).isSubset(of: stopped) else {
+            return failure(
+                .invalidRequest,
+                "Tempra can resume only processes that this helper stopped."
+            )
+        }
         let result = apply(identities) { kill($0, SIGCONT) }
-        stopped.subtract(result.applied)
+        stopped.subtract(result.applied.union(result.stale))
         for process in result.applied.union(result.stale) {
             automaticResumeMillisecondsByProcess.removeValue(forKey: process)
         }
         return finishStateChange(result)
     }
 
-    private func setBackgroundPriority(
+    private func lowerPriority(
         _ request: PrivilegedProcessRequest
     ) -> PrivilegedProcessResponse {
         guard let identities = validatedOperationIdentities(request) else {
             return failure(.invalidRequest, "The priority request is invalid.")
         }
+        guard canApplyDisruptiveControl(to: identities) else {
+            return failure(
+                .invalidRequest,
+                "Tempra cannot lower the priority of a protected system process."
+            )
+        }
 
         var result = OperationResult()
-        var proposedPolicies = privateQoSOriginalPolicies
+        var proposedPolicies = originalPriorities
         var candidates: [PrivilegedProcessIdentity] = []
         for process in identities {
             guard Self.currentIdentity(for: process.pid) == process else {
@@ -453,7 +553,7 @@ private final class PrivilegedProcessSession: NSObject, PrivilegedProcessXPCProt
             }
             if proposedPolicies[process] == nil {
                 do {
-                    proposedPolicies[process] = try privateQoSController.state(
+                    proposedPolicies[process] = try priorityController.state(
                         for: process.pid
                     )
                 } catch {
@@ -472,23 +572,36 @@ private final class PrivilegedProcessSession: NSObject, PrivilegedProcessXPCProt
         do {
             try watchdog.synchronize(
                 stopped: stopped,
-                privateQoSPolicies: proposedPolicies,
+                priorities: proposedPolicies,
                 automaticResumeMillisecondsByProcess:
                     automaticResumeMillisecondsByProcess
             )
         } catch {
-            return failure(.safetyHelperFailed, error.localizedDescription)
+            let recoverySucceeded = emergencyRecover()
+            return failure(
+                .safetyHelperFailed,
+                recoverySucceeded
+                    ? "Tempra could not prepare its safety process. Managed processes were restored."
+                    : error.localizedDescription
+            )
         }
 
         for process in candidates {
-            let wasManaged = privateQoSOriginalPolicies[process] != nil
+            let wasManaged = originalPriorities[process] != nil
             guard Self.currentIdentity(for: process.pid) == process else {
                 proposedPolicies.removeValue(forKey: process)
                 result.stale.insert(process)
                 continue
             }
             do {
-                try privateQoSController.applyEnergyEfficientPolicy(to: process.pid)
+                guard let originalPriority = proposedPolicies[process] else {
+                    result.failed.insert(process)
+                    continue
+                }
+                try priorityController.lowerPriority(
+                    from: originalPriority,
+                    for: process.pid
+                )
             } catch {
                 if !wasManaged {
                     proposedPolicies.removeValue(forKey: process)
@@ -497,7 +610,7 @@ private final class PrivilegedProcessSession: NSObject, PrivilegedProcessXPCProt
                 continue
             }
             guard Self.currentIdentity(for: process.pid) == process else {
-                return recoverAfterUncertainPrivateQoSMutation(
+                return recoverAfterUncertainPriorityMutation(
                     identities: identities,
                     proposedPolicies: proposedPolicies,
                     partialResult: result
@@ -509,11 +622,11 @@ private final class PrivilegedProcessSession: NSObject, PrivilegedProcessXPCProt
         for process in result.stale {
             proposedPolicies.removeValue(forKey: process)
         }
-        privateQoSOriginalPolicies = proposedPolicies
+        originalPriorities = proposedPolicies
         do {
             try watchdog.synchronize(
                 stopped: stopped,
-                privateQoSPolicies: privateQoSOriginalPolicies,
+                priorities: originalPriorities,
                 automaticResumeMillisecondsByProcess:
                     automaticResumeMillisecondsByProcess
             )
@@ -538,38 +651,44 @@ private final class PrivilegedProcessSession: NSObject, PrivilegedProcessXPCProt
         guard let identities = validatedOperationIdentities(request) else {
             return failure(.invalidRequest, "The priority restore request is invalid.")
         }
+        guard Set(identities).isSubset(of: Set(originalPriorities.keys)) else {
+            return failure(
+                .invalidRequest,
+                "Tempra can restore only priorities that this helper changed."
+            )
+        }
 
         var result = OperationResult()
         for process in identities {
             guard Self.currentIdentity(for: process.pid) == process else {
-                privateQoSOriginalPolicies.removeValue(forKey: process)
+                originalPriorities.removeValue(forKey: process)
                 result.stale.insert(process)
                 continue
             }
 
             var failed = false
-            var privatePolicyRestored = privateQoSOriginalPolicies[process] == nil
-            if let originalPolicy = privateQoSOriginalPolicies[process] {
+            var priorityRestored = false
+            if let originalPriority = originalPriorities[process] {
                 do {
-                    try privateQoSController.restore(
-                        originalPolicy,
+                    try priorityController.restore(
+                        originalPriority,
                         to: process.pid
                     )
-                    privateQoSOriginalPolicies.removeValue(forKey: process)
-                    privatePolicyRestored = true
+                    originalPriorities.removeValue(forKey: process)
+                    priorityRestored = true
                 } catch {
                     failed = true
                 }
             }
             guard Self.currentIdentity(for: process.pid) == process else {
-                if privatePolicyRestored {
-                    privateQoSOriginalPolicies.removeValue(forKey: process)
+                if priorityRestored {
+                    originalPriorities.removeValue(forKey: process)
                     result.stale.insert(process)
                     continue
                 }
-                return recoverAfterUncertainPrivateQoSMutation(
+                return recoverAfterUncertainPriorityMutation(
                     identities: identities,
-                    proposedPolicies: privateQoSOriginalPolicies,
+                    proposedPolicies: originalPriorities,
                     partialResult: result
                 )
             }
@@ -582,12 +701,12 @@ private final class PrivilegedProcessSession: NSObject, PrivilegedProcessXPCProt
         return finishStateChange(result)
     }
 
-    private func recoverAfterUncertainPrivateQoSMutation(
+    private func recoverAfterUncertainPriorityMutation(
         identities: [PrivilegedProcessIdentity],
-        proposedPolicies: [PrivilegedProcessIdentity: PrivateQoSPolicyState],
+        proposedPolicies: [PrivilegedProcessIdentity: ProcessPriorityPolicyState],
         partialResult: OperationResult
     ) -> PrivilegedProcessResponse {
-        privateQoSOriginalPolicies = proposedPolicies
+        originalPriorities = proposedPolicies
 
         var result = partialResult
         result.failed.formUnion(Set(identities).subtracting(result.stale))
@@ -597,8 +716,8 @@ private final class PrivilegedProcessSession: NSObject, PrivilegedProcessXPCProt
             result,
             errorCode: .operationFailed,
             errorMessage: recoverySucceeded
-                ? "A process identity changed during a private QoS update. Tempra restored all managed processes."
-                : "A process identity changed during a private QoS update. Tempra's safety process attempted recovery."
+                ? "A process identity changed during a process priority update. Tempra restored all managed processes."
+                : "A process identity changed during a process priority update. Tempra's safety process attempted recovery."
         )
     }
 
@@ -606,11 +725,17 @@ private final class PrivilegedProcessSession: NSObject, PrivilegedProcessXPCProt
         guard let identities = validatedOperationIdentities(request) else {
             return failure(.invalidRequest, "The terminate request is invalid.")
         }
+        guard canApplyDisruptiveControl(to: identities) else {
+            return failure(
+                .invalidRequest,
+                "Tempra cannot terminate a protected system process."
+            )
+        }
         var result = OperationResult()
         for process in identities {
             guard Self.currentIdentity(for: process.pid) == process else {
                 stopped.remove(process)
-                privateQoSOriginalPolicies.removeValue(forKey: process)
+                originalPriorities.removeValue(forKey: process)
                 automaticResumeMillisecondsByProcess.removeValue(forKey: process)
                 result.stale.insert(process)
                 continue
@@ -623,7 +748,7 @@ private final class PrivilegedProcessSession: NSObject, PrivilegedProcessXPCProt
             automaticResumeMillisecondsByProcess.removeValue(forKey: process)
             if kill(process.pid, PrivilegedProcessProtocol.forceQuitSignal) == 0 {
                 result.applied.insert(process)
-                privateQoSOriginalPolicies.removeValue(forKey: process)
+                originalPriorities.removeValue(forKey: process)
             } else {
                 result.failed.insert(process)
             }
@@ -635,13 +760,13 @@ private final class PrivilegedProcessSession: NSObject, PrivilegedProcessXPCProt
         do {
             try watchdog.synchronize(
                 stopped: stopped,
-                privateQoSPolicies: privateQoSOriginalPolicies,
+                priorities: originalPriorities,
                 automaticResumeMillisecondsByProcess:
                     automaticResumeMillisecondsByProcess
             )
             if stopped.isEmpty,
-               privateQoSOriginalPolicies.isEmpty {
-                watchdog.disarm()
+               originalPriorities.isEmpty {
+                try watchdog.disarm()
             }
             return response(result)
         } catch {
@@ -657,11 +782,12 @@ private final class PrivilegedProcessSession: NSObject, PrivilegedProcessXPCProt
     }
 
     private func emergencyRecover() -> Bool {
+        let watchdogRecovered = watchdog.triggerRecovery()
         var succeeded = true
-        for (process, originalPolicy) in privateQoSOriginalPolicies
+        for (process, originalPriority) in originalPriorities
             where Self.currentIdentity(for: process.pid) == process {
             do {
-                try privateQoSController.restore(originalPolicy, to: process.pid)
+                try priorityController.restore(originalPriority, to: process.pid)
             } catch {
                 succeeded = false
             }
@@ -672,10 +798,24 @@ private final class PrivilegedProcessSession: NSObject, PrivilegedProcessXPCProt
             }
         }
         stopped.removeAll()
-        privateQoSOriginalPolicies.removeAll()
+        originalPriorities.removeAll()
         automaticResumeMillisecondsByProcess.removeAll()
-        watchdog.triggerRecovery()
-        return succeeded
+        return succeeded && watchdogRecovered
+    }
+
+    private func canApplyDisruptiveControl(
+        to identities: [PrivilegedProcessIdentity]
+    ) -> Bool {
+        for process in identities {
+            guard Self.currentIdentity(for: process.pid) == process else { continue }
+            guard let executablePath = Self.executablePath(for: process.pid),
+                  !ProtectedSystemProcessPolicy.isProtectedExecutablePath(
+                    executablePath
+                  ) else {
+                return false
+            }
+        }
+        return true
     }
 
     private func validatedOperationIdentities(
@@ -748,7 +888,7 @@ private final class PrivilegedProcessSession: NSObject, PrivilegedProcessXPCProt
             return encoded
         } catch {
             return Data(
-                "{\"errorCode\":\"operationFailed\",\"errorMessage\":\"The helper could not encode its response.\",\"snapshots\":[],\"applied\":[],\"stale\":[],\"failed\":[],\"totalCPUTimeNanoseconds\":0}".utf8
+                "{\"protocolVersion\":2,\"errorCode\":\"operationFailed\",\"errorMessage\":\"The helper could not encode its response.\",\"snapshots\":[],\"applied\":[],\"stale\":[],\"failed\":[],\"totalCPUTimeNanoseconds\":0}".utf8
             )
         }
     }
@@ -952,7 +1092,7 @@ private enum TempraPrivilegedHelperMain {
         var stream = PrivilegedWatchdogStream()
         var state = PrivilegedWatchdogState(
             stopped: [],
-            privateQoS: [],
+            priorities: [],
             automaticResumeDeadlines: []
         )
         var automaticResumeStates: [WatchdogProcessIdentity: AutomaticResumeState] = [:]
@@ -1097,13 +1237,13 @@ private enum TempraPrivilegedHelperMain {
 
     private static func recover(_ state: PrivilegedWatchdogState) -> Bool {
         var succeeded = true
-        let privateQoSController = PrivateQoSController()
-        for entry in state.privateQoS {
+        let priorityController = ProcessPriorityController()
+        for entry in state.priorities {
             let process = entry.process
             guard currentIdentity(for: process.pid) == process else { continue }
             do {
-                try privateQoSController.restore(
-                    entry.originalPolicy,
+                try priorityController.restore(
+                    entry.originalPriority,
                     to: process.pid
                 )
             } catch {

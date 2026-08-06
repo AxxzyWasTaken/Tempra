@@ -83,13 +83,13 @@ struct PrivilegedAccessControl: View {
     private var detail: String {
         switch store.privilegedControlStatus {
         case .notRegistered:
-            "Install Tempra’s helper to use power-saving scheduling and manage supported apps "
+            "Install Tempra’s helper to lower CPU priority and manage supported apps "
                 + "that require administrator access."
         case .requiresApproval, .helperUnavailable, .unavailable:
             store.privilegedControlStatus.message
                 ?? "Administrator access is not available."
         case .enabled:
-            "Tempra can use power-saving scheduling and manage supported apps that require "
+            "Tempra can lower CPU priority and manage supported apps that require "
                 + "administrator access."
         }
     }

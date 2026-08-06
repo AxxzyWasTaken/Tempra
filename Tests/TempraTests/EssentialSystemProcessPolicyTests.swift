@@ -1,4 +1,5 @@
 import AppKit
+import TempraSafety
 import Testing
 @testable import Tempra
 
@@ -155,13 +156,13 @@ struct BackgroundProcessPolicyTests {
             bundleIdentifier: SoundSourceCompatibilityPolicy.primaryBundleIdentifier,
             displayName: "SoundSource",
             action: .limit,
-            runOnEfficiencyCores: true,
+            lowersCPUPriority: true,
             hideAfterMinutes: 1,
             quitAfterMinutes: 2
         ))
 
         #expect(normalized.action == .none)
-        #expect(!normalized.runOnEfficiencyCores)
+        #expect(!normalized.lowersCPUPriority)
         #expect(normalized.hideAfterMinutes == nil)
         #expect(normalized.quitAfterMinutes == nil)
         #expect(!normalized.hasBehavior)
@@ -217,7 +218,7 @@ struct BackgroundProcessPolicyTests {
         ) == "logd")
     }
 
-    @Test("WindowServer is recognized across executable path variants")
+    @Test("WindowServer path variants use one protected identity")
     func windowServerIdentity() {
         let direct = BackgroundProcessPolicy.identifier(
             command: "/System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer",
@@ -228,17 +229,67 @@ struct BackgroundProcessPolicyTests {
             pid: 100
         )
 
-        #expect(SystemProcessRulePolicy.isWindowServer(bundleIdentifier: direct))
-        #expect(SystemProcessRulePolicy.isWindowServer(bundleIdentifier: versioned))
-        #expect(SystemProcessRulePolicy.isWindowServer(
-            bundleIdentifier: "com.apple.WindowServer"
-        ))
-        #expect(!SystemProcessRulePolicy.isWindowServer(
+        #expect(direct == "com.apple.WindowServer")
+        #expect(versioned == direct)
+        #expect(BackgroundProcessPolicy.isMonitorOnlyIdentifier(direct))
+        #expect(SystemProcessRulePolicy.isProtected(bundleIdentifier: direct))
+        #expect(!SystemProcessRulePolicy.isProtected(
             bundleIdentifier: BackgroundProcessPolicy.identifier(
                 command: "/usr/libexec/logd",
                 pid: 101
             )
         ))
+    }
+
+    @Test("Protected executable names map to canonical bundle identifiers")
+    func protectedExecutableIdentityMapping() {
+        let expectedIdentifiersByPath = [
+            "/System/Library/CoreServices/Finder.app/Contents/MacOS/Finder":
+                "com.apple.finder",
+            "/System/Library/CoreServices/Dock.app/Contents/MacOS/Dock":
+                "com.apple.dock",
+            "/System/Library/CoreServices/SystemUIServer.app/Contents/MacOS/SystemUIServer":
+                "com.apple.systemuiserver",
+            "/System/Library/CoreServices/loginwindow.app/Contents/MacOS/loginwindow":
+                "com.apple.loginwindow",
+            "/System/Library/CoreServices/WindowManager.app/Contents/MacOS/WindowManager":
+                "com.apple.WindowManager",
+            "/System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer":
+                "com.apple.WindowServer",
+        ]
+
+        for (path, expectedIdentifier) in expectedIdentifiersByPath {
+            #expect(ProtectedSystemProcessPolicy.canonicalBundleIdentifier(
+                forExecutablePath: path
+            ) == expectedIdentifier)
+            #expect(ProtectedSystemProcessPolicy.isProtectedExecutablePath(path))
+        }
+        #expect(ProtectedSystemProcessPolicy.canonicalBundleIdentifier(
+            forBundleIdentifier: "COM.APPLE.WINDOWSERVER"
+        ) == "com.apple.WindowServer")
+        #expect(!ProtectedSystemProcessPolicy.isProtectedExecutablePath(
+            "/usr/libexec/logd"
+        ))
+    }
+
+    @Test("Protected system rules normalize to monitor-only behavior")
+    func protectedSystemRuleNormalization() {
+        for identifier in ProtectedSystemProcessPolicy.bundleIdentifiers {
+            let normalized = SystemProcessRulePolicy.normalized(AppRule(
+                bundleIdentifier: identifier,
+                displayName: identifier,
+                action: .limit,
+                lowersCPUPriority: true,
+                hideAfterMinutes: 1,
+                quitAfterMinutes: 2
+            ))
+
+            #expect(normalized.action == .none)
+            #expect(!normalized.lowersCPUPriority)
+            #expect(normalized.hideAfterMinutes == nil)
+            #expect(normalized.quitAfterMinutes == nil)
+            #expect(!normalized.hasBehavior)
+        }
     }
 
     @Test("User-owned background identities are stable and editable")

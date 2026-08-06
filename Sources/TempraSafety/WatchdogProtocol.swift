@@ -28,16 +28,16 @@ public struct WatchdogResumeDeadline: Codable, Equatable, Sendable {
     }
 }
 
-public struct WatchdogPrivateQoSState: Codable, Equatable, Sendable {
+public struct WatchdogProcessPriorityState: Codable, Equatable, Sendable {
     public let process: WatchdogProcessIdentity
-    public let originalPolicy: PrivateQoSPolicyState
+    public let originalPriority: ProcessPriorityPolicyState
 
     public init(
         process: WatchdogProcessIdentity,
-        originalPolicy: PrivateQoSPolicyState
+        originalPriority: ProcessPriorityPolicyState
     ) {
         self.process = process
-        self.originalPolicy = originalPolicy
+        self.originalPriority = originalPriority
     }
 }
 

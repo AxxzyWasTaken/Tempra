@@ -92,7 +92,7 @@ struct AppPersistenceTests {
         }
     }
 
-    @Test("WindowServer CPU limits migrate to efficiency-only rules")
+    @Test("WindowServer rules migrate to monitor-only state")
     func windowServerLimitMigration() throws {
         try withDefaults { defaults in
             let persistence = AppPersistence(defaults: defaults)
@@ -116,41 +116,44 @@ struct AppPersistenceTests {
                 persistenceErrorHandler: { _ in }
             )
 
-            let inMemoryRule = try #require(store.rules[identifier])
-            let savedRule = try #require(persistence.loadRules()[identifier])
-            #expect(inMemoryRule.action == .none)
-            #expect(inMemoryRule.runOnEfficiencyCores)
-            #expect(savedRule.action == .none)
-            #expect(savedRule.runOnEfficiencyCores)
+            #expect(identifier == "com.apple.WindowServer")
+            #expect(store.rules[identifier] == nil)
+            #expect(try persistence.loadRules()[identifier] == nil)
 
-            var attemptedLimit = savedRule
-            attemptedLimit.action = .limit
-            attemptedLimit.limitPercent = 5
+            let attemptedLimit = AppRule(
+                bundleIdentifier: identifier,
+                displayName: "WindowServer",
+                action: .limit,
+                lowersCPUPriority: true,
+                limitPercent: 5,
+                hideAfterMinutes: 1,
+                quitAfterMinutes: 2
+            )
             store.save(attemptedLimit)
-            #expect(store.rules[identifier]?.action == RuleAction.none)
-            #expect(store.rules[identifier]?.runOnEfficiencyCores == true)
+            #expect(store.rules[identifier] == nil)
+            #expect(try persistence.loadRules()[identifier] == nil)
         }
     }
 
-    @Test("CPU-limit rules preserve power-saving scheduling")
-    func cpuLimitRulesPreservePowerSavingScheduling() throws {
+    @Test("CPU-limit rules preserve lower priority")
+    func cpuLimitRulesPreserveLowerPriority() throws {
         try withDefaults { defaults in
             let persistence = AppPersistence(defaults: defaults)
             let combinedRule = AppRule(
                 bundleIdentifier: "example.game",
                 displayName: "Example Game",
                 action: .limit,
-                runOnEfficiencyCores: true,
+                lowersCPUPriority: true,
                 limitPercent: 7
             )
-            #expect(combinedRule.runOnEfficiencyCores)
+            #expect(combinedRule.lowersCPUPriority)
             try persistence.saveRules([combinedRule.bundleIdentifier: combinedRule])
 
             let loadedRule = try #require(
                 persistence.loadRules()[combinedRule.bundleIdentifier]
             )
             #expect(loadedRule.action == .limit)
-            #expect(loadedRule.runOnEfficiencyCores)
+            #expect(loadedRule.lowersCPUPriority)
 
             let store = try AppStore(
                 persistence: persistence,
@@ -161,7 +164,7 @@ struct AppPersistenceTests {
                 persistenceErrorHandler: { _ in }
             )
             #expect(store.rules[combinedRule.bundleIdentifier]?.action == .limit)
-            #expect(store.rules[combinedRule.bundleIdentifier]?.runOnEfficiencyCores == true)
+            #expect(store.rules[combinedRule.bundleIdentifier]?.lowersCPUPriority == true)
 
             store.applyQuickRule(
                 bundleIdentifier: combinedRule.bundleIdentifier,
@@ -172,18 +175,18 @@ struct AppPersistenceTests {
                 delaySeconds: 0
             )
             #expect(store.rules[combinedRule.bundleIdentifier]?.limitPercent == 20)
-            #expect(store.rules[combinedRule.bundleIdentifier]?.runOnEfficiencyCores == true)
+            #expect(store.rules[combinedRule.bundleIdentifier]?.lowersCPUPriority == true)
 
-            store.setEfficiencyCoreScheduling(
+            store.setLowerCPUPriority(
                 bundleIdentifier: combinedRule.bundleIdentifier,
                 displayName: combinedRule.displayName,
                 applicationURL: nil,
                 enabled: false
             )
             #expect(store.rules[combinedRule.bundleIdentifier]?.action == .limit)
-            #expect(store.rules[combinedRule.bundleIdentifier]?.runOnEfficiencyCores == false)
+            #expect(store.rules[combinedRule.bundleIdentifier]?.lowersCPUPriority == false)
 
-            store.setEfficiencyCoreScheduling(
+            store.setLowerCPUPriority(
                 bundleIdentifier: combinedRule.bundleIdentifier,
                 displayName: combinedRule.displayName,
                 applicationURL: nil,
@@ -191,12 +194,37 @@ struct AppPersistenceTests {
             )
 
             #expect(store.rules[combinedRule.bundleIdentifier]?.action == .limit)
-            #expect(store.rules[combinedRule.bundleIdentifier]?.runOnEfficiencyCores == true)
+            #expect(store.rules[combinedRule.bundleIdentifier]?.lowersCPUPriority == true)
             #expect(
                 try persistence.loadRules()[combinedRule.bundleIdentifier]?
-                    .runOnEfficiencyCores == true
+                    .lowersCPUPriority == true
             )
         }
+    }
+
+    @Test("Legacy efficiency settings decode as lower CPU priority")
+    func legacyEfficiencySettingsMigrate() throws {
+        let data = Data(
+            """
+            {
+              "bundleIdentifier": "example.legacy",
+              "displayName": "Legacy",
+              "action": "limit",
+              "runOnEfficiencyCores": true,
+              "limitPercent": 25
+            }
+            """.utf8
+        )
+        let rule = try JSONDecoder().decode(AppRule.self, from: data)
+        #expect(rule.action == .limit)
+        #expect(rule.lowersCPUPriority)
+
+        let encoded = try JSONEncoder().encode(rule)
+        let object = try #require(
+            JSONSerialization.jsonObject(with: encoded) as? [String: Any]
+        )
+        #expect(object["lowersCPUPriority"] as? Bool == true)
+        #expect(object["runOnEfficiencyCores"] == nil)
     }
 
     @Test("Saved SoundSource rules are removed and cannot be recreated")
@@ -540,7 +568,7 @@ struct AppPersistenceTests {
                 bundleIdentifier: "example.app",
                 displayName: "Example",
                 applicationURL: nil,
-                status: .energyEfficient,
+                status: .lowerPriority,
                 at: startedAt.addingTimeInterval(10)
             )
 

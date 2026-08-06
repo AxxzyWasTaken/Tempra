@@ -215,7 +215,7 @@ final class AppStore: ObservableObject {
         var normalized = rule
         normalized.limitPercent = CPULimitRange.clamped(normalized.limitPercent)
         if normalized.action == .pause {
-            normalized.runOnEfficiencyCores = false
+            normalized.lowersCPUPriority = false
         }
         if normalized.applicationURL == nil {
             normalized.applicationURL = apps.first {
@@ -259,7 +259,7 @@ final class AppStore: ObservableObject {
         rule.applicationURL = applicationURL ?? rule.applicationURL
         rule.action = action
         if action == .pause {
-            rule.runOnEfficiencyCores = false
+            rule.lowersCPUPriority = false
         }
         rule.limitPercent = limitPercent
         rule.delaySeconds = delaySeconds
@@ -267,7 +267,7 @@ final class AppStore: ObservableObject {
         save(rule)
     }
 
-    func setEfficiencyCoreScheduling(
+    func setLowerCPUPriority(
         bundleIdentifier: String,
         displayName: String,
         applicationURL: URL?,
@@ -281,7 +281,7 @@ final class AppStore: ObservableObject {
         )
         rule.displayName = displayName
         rule.applicationURL = applicationURL ?? rule.applicationURL
-        rule.runOnEfficiencyCores = enabled
+        rule.lowersCPUPriority = enabled
         if enabled, rule.action == .pause {
             rule.action = .none
         }
@@ -354,8 +354,9 @@ final class AppStore: ObservableObject {
         guard item.canManageProcess else {
             setApplicationActionFailure(
                 for: item,
-                message: "Tempra keeps this SoundSource audio component running so audio "
-                    + "routing and effects continue to work."
+                message: item.isSoundSourceComponent
+                    ? "Tempra keeps this SoundSource audio component running so audio routing and effects continue to work."
+                    : "Tempra monitors this protected system process and does not control it."
             )
             return false
         }
@@ -1376,19 +1377,19 @@ final class AppStore: ObservableObject {
             detail = "Waiting for the rule delay."
         case .limited(let percent):
             kind = .limited
-            let cores = rules[bundleIdentifier]?.usesEfficiencyCoreScheduling == true
-                ? " and using power-saving core scheduling"
+            let priority = rules[bundleIdentifier]?.usesLowerCPUPriority == true
+                ? " with lower CPU priority"
                 : ""
-            detail = "Limited to \(Int(percent))% CPU\(cores)."
+            detail = "Limited to \(Int(percent))% CPU\(priority)."
         case .limitedWithProtectedProcesses:
             kind = .limited
             detail = "Limiting as much as possible while responsive processes remain active."
         case .paused:
             kind = .paused
             detail = "Paused while in the background."
-        case .energyEfficient:
+        case .lowerPriority:
             kind = .energyEfficient
-            detail = "Using power-saving core scheduling."
+            detail = "Using lower CPU priority."
         case .audioProtected:
             kind = .audioProtected
             detail = "Rule held while audio is active."

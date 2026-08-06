@@ -1,77 +1,65 @@
 import Darwin
-import TempraSafety
+@testable import TempraSafety
 import Testing
 
-@Suite("Private process QoS", .serialized)
-struct PrivateQoSControllerTests {
-    @Test("The energy-efficient role uses utility QoS without Darwin background networking")
-    func usesUtilityQoSRole() {
-        #expect(PrivateQoSController.energyEfficientState.darwinRole == 5)
+@Suite("POSIX process priority", .serialized)
+struct ProcessPriorityControllerTests {
+    @Test("Lower priority uses a supported nice value")
+    func usesSupportedNiceValue() {
+        #expect(ProcessPriorityController.lowerPriorityNiceValue == 10)
     }
 
-    @Test("The energy-efficient policy applies and restores the exact prior state")
-    func appliesAndRestoresPolicy() throws {
-        let controller = PrivateQoSController()
-        let processIdentifier = getpid()
-        let original = try controller.state(for: processIdentifier)
+    @Test("Lower priority never raises a process priority")
+    func doesNotRaisePriority() throws {
+        #expect(try ProcessPriorityController.loweredState(
+            from: ProcessPriorityPolicyState(niceValue: -10)
+        ).niceValue == 10)
+        #expect(try ProcessPriorityController.loweredState(
+            from: ProcessPriorityPolicyState(niceValue: 0)
+        ).niceValue == 10)
+        #expect(try ProcessPriorityController.loweredState(
+            from: ProcessPriorityPolicyState(niceValue: 15)
+        ).niceValue == 15)
+    }
 
-        try controller.applyEnergyEfficientPolicy(to: processIdentifier)
-        var applied: PrivateQoSPolicyState?
-        var observationError: (any Error)?
-        do {
-            applied = try controller.state(for: processIdentifier)
-        } catch {
-            observationError = error
-        }
-        try controller.restore(original, to: processIdentifier)
-        if let observationError {
-            throw observationError
-        }
-
-        #expect(applied == PrivateQoSController.energyEfficientState)
-        #expect(try controller.state(for: processIdentifier) == original)
+    @Test("The controller reads the current process nice value")
+    func readsCurrentPriority() throws {
+        let state = try ProcessPriorityController().state(for: getpid())
+        #expect(state.isValid)
     }
 
     @Test("Invalid process identifiers are rejected before priority access")
     func rejectsInvalidProcessIdentifier() {
-        let controller = PrivateQoSController()
+        let controller = ProcessPriorityController()
 
-        #expect(throws: PrivateQoSControllerError.invalidProcessIdentifier) {
+        #expect(throws: ProcessPriorityControllerError.invalidProcessIdentifier) {
             try controller.state(for: 1)
         }
     }
 
-    @Test("Only kernel-supported Darwin roles can be restored")
+    @Test("Only supported nice values can be restored")
     func rejectsInvalidPolicyState() {
-        let controller = PrivateQoSController()
-        let invalid = PrivateQoSPolicyState(
-            darwinRole: Int32.max
+        let controller = ProcessPriorityController()
+        let invalid = ProcessPriorityPolicyState(
+            niceValue: Int32.max
         )
 
         #expect(!invalid.isValid)
-        #expect(throws: PrivateQoSControllerError.invalidPolicyState) {
+        #expect(throws: ProcessPriorityControllerError.invalidPolicyState) {
             try controller.restore(invalid, to: getpid())
         }
     }
 
-    @Test("Restore does not overwrite a newer process role")
-    func preservesNewerProcessRole() throws {
-        let controller = PrivateQoSController()
-        let processIdentifier = getpid()
-        let original = try controller.state(for: processIdentifier)
-
-        try controller.applyEnergyEfficientPolicy(to: processIdentifier)
-        try controller.restore(
-            PrivateQoSPolicyState(darwinRole: 3),
-            to: processIdentifier
-        )
-        try controller.restore(original, to: processIdentifier)
-        let preserved = try controller.state(for: processIdentifier)
-
-        try controller.applyEnergyEfficientPolicy(to: processIdentifier)
-        try controller.restore(original, to: processIdentifier)
-
-        #expect(preserved.darwinRole == 3)
-        #expect(try controller.state(for: processIdentifier) == original)
+    @Test("Restore does not overwrite a newer priority value")
+    func preservesNewerPriority() throws {
+        let original = ProcessPriorityPolicyState(niceValue: 0)
+        #expect(try ProcessPriorityController.shouldRestore(
+            current: ProcessPriorityPolicyState(niceValue: 10),
+            original: original
+        ))
+        #expect(try !ProcessPriorityController.shouldRestore(
+            current: ProcessPriorityPolicyState(niceValue: 12),
+            original: original
+        ))
     }
 }

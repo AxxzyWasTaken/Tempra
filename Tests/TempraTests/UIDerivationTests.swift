@@ -173,10 +173,10 @@ struct UIDerivationTests {
                 status: .waiting
             ),
             item(
-                identifier: "efficient",
+                identifier: "lower-priority",
                 name: "Delta Efficient",
-                rule: rule("efficient"),
-                status: .energyEfficient
+                rule: rule("lower-priority"),
+                status: .lowerPriority
             ),
             item(
                 identifier: "limited-a",
@@ -202,7 +202,7 @@ struct UIDerivationTests {
             searchText: ""
         )
         #expect(lists.managedItems.map(\.bundleIdentifier) == [
-            "limited-a", "limited-b", "efficient", "waiting", "running", "closed",
+            "limited-a", "limited-b", "lower-priority", "waiting", "running", "closed",
         ])
     }
 
@@ -216,10 +216,10 @@ struct UIDerivationTests {
             status: .limited(50)
         ).savedCPUText == "12.3%")
         #expect(item(
-            identifier: "efficient",
+            identifier: "lower-priority",
             name: "Efficient",
-            rule: rule("efficient"),
-            status: .energyEfficient
+            rule: rule("lower-priority"),
+            status: .lowerPriority
         ).savedCPUText == "—")
         #expect(item(
             identifier: "configured",
@@ -567,8 +567,9 @@ struct UIDerivationTests {
         #expect(!standalone.canControlApplication)
         #expect(!protected.canControlApplication)
         #expect(!stopped.canControlApplication)
+        #expect(!windowServer.canManageProcess)
         #expect(!windowServer.canLimitCPU)
-        #expect(windowServer.canQuitProcess)
+        #expect(!windowServer.canQuitProcess)
         #expect(soundSource.isSoundSourceComponent)
         #expect(!soundSource.canManageProcess)
         #expect(!soundSource.canControlApplication)
@@ -601,7 +602,7 @@ struct UIDerivationTests {
 
             store.setIncludesEssentialSystemProcesses(true)
             requests = try await waitForInclusionRequests(
-                3,
+                endingWith: [true, true],
                 from: monitoringService
             )
 
@@ -778,6 +779,20 @@ struct UIDerivationTests {
         for _ in 0..<150 {
             let requests = await service.inclusionRequests()
             if requests.count >= expectedCount {
+                return requests
+            }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        throw InclusionRequestTimeout()
+    }
+
+    private func waitForInclusionRequests(
+        endingWith expectedValues: [Bool],
+        from service: UIDerivationMonitoringService
+    ) async throws -> [Bool] {
+        for _ in 0..<150 {
+            let requests = await service.inclusionRequests()
+            if Array(requests.suffix(expectedValues.count)) == expectedValues {
                 return requests
             }
             try await Task.sleep(for: .milliseconds(20))

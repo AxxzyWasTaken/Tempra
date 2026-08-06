@@ -142,6 +142,7 @@ struct WatchdogProtocolTests {
             from: JSONEncoder().encode(request)
         )
         #expect(decodedRequest == request)
+        #expect(decodedRequest.protocolVersion == PrivilegedProcessProtocol.version)
         #expect(decodedRequest.automaticResumeAfterMilliseconds == 100)
 
         let response = PrivilegedProcessResponse(
@@ -153,27 +154,59 @@ struct WatchdogProtocolTests {
             from: JSONEncoder().encode(response)
         )
         #expect(decodedResponse == response)
+        #expect(decodedResponse.protocolVersion == PrivilegedProcessProtocol.version)
         #expect(PrivilegedProcessProtocol.maximumProcessCount == 4_096)
     }
 
-    @Test("Watchdog state preserves the exact private QoS policy")
-    func privateQoSStateRoundTrip() throws {
-        let state = WatchdogPrivateQoSState(
+    @Test("Protocol version is required in both directions")
+    func protocolVersionIsRequired() {
+        let oldRequest = Data(
+            """
+            {
+              "action": "ping",
+              "processIdentifiers": [],
+              "processes": []
+            }
+            """.utf8
+        )
+        let oldResponse = Data(
+            """
+            {
+              "snapshots": [],
+              "applied": [],
+              "stale": [],
+              "failed": [],
+              "totalCPUTimeNanoseconds": 0
+            }
+            """.utf8
+        )
+
+        #expect(throws: DecodingError.self) {
+            try JSONDecoder().decode(PrivilegedProcessRequest.self, from: oldRequest)
+        }
+        #expect(throws: DecodingError.self) {
+            try JSONDecoder().decode(PrivilegedProcessResponse.self, from: oldResponse)
+        }
+    }
+
+    @Test("Watchdog state preserves the exact process priority")
+    func processPriorityStateRoundTrip() throws {
+        let state = WatchdogProcessPriorityState(
             process: WatchdogProcessIdentity(
                 pid: 42,
                 startTimeMicroseconds: 123_456
             ),
-            originalPolicy: PrivateQoSPolicyState(
-                darwinRole: 0
+            originalPriority: ProcessPriorityPolicyState(
+                niceValue: 0
             )
         )
 
         let decoded = try JSONDecoder().decode(
-            WatchdogPrivateQoSState.self,
+            WatchdogProcessPriorityState.self,
             from: JSONEncoder().encode(state)
         )
 
         #expect(decoded == state)
-        #expect(decoded.originalPolicy.isValid)
+        #expect(decoded.originalPriority.isValid)
     }
 }

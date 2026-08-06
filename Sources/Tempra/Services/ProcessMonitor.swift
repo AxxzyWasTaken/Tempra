@@ -1,6 +1,7 @@
 import AppKit
 import Darwin
 import Foundation
+import TempraSafety
 
 struct ProcessTableEntry: Equatable {
     let pid: pid_t
@@ -35,13 +36,8 @@ struct ProcessTableEntry: Equatable {
 }
 
 enum BackgroundProcessPolicy {
-    static let systemApplicationBundleIdentifiers: Set<String> = [
-        "com.apple.finder",
-        "com.apple.dock",
-        "com.apple.systemuiserver",
-        "com.apple.WindowManager",
-        "com.apple.loginwindow"
-    ]
+    static let systemApplicationBundleIdentifiers =
+        ProtectedSystemProcessPolicy.bundleIdentifiers
     static let identifierPrefix = "tempra.background:"
     static let userOwnedIdentifierPrefix = "tempra.user-background:"
 
@@ -53,7 +49,7 @@ enum BackgroundProcessPolicy {
         if includesBackgroundProcesses {
             return true
         }
-        if systemApplicationBundleIdentifiers.contains(bundleIdentifier) {
+        if ProtectedSystemProcessPolicy.isProtectedBundleIdentifier(bundleIdentifier) {
             return false
         }
         return activationPolicy != .prohibited
@@ -64,7 +60,7 @@ enum BackgroundProcessPolicy {
         userID: uid_t,
         currentUserID: uid_t
     ) -> Bool {
-        systemApplicationBundleIdentifiers.contains(bundleIdentifier)
+        ProtectedSystemProcessPolicy.isProtectedBundleIdentifier(bundleIdentifier)
             || userID != currentUserID
     }
 
@@ -75,7 +71,11 @@ enum BackgroundProcessPolicy {
     }
 
     static func identifier(command: String, pid: pid_t) -> String {
-        identifier(command: command, pid: pid, prefix: identifierPrefix)
+        if let canonicalIdentifier = ProtectedSystemProcessPolicy
+            .canonicalBundleIdentifier(forExecutablePath: command) {
+            return canonicalIdentifier
+        }
+        return identifier(command: command, pid: pid, prefix: identifierPrefix)
     }
 
     static func userOwnedIdentifier(command: String, pid: pid_t) -> String {
@@ -126,7 +126,7 @@ enum BackgroundProcessPolicy {
 
     static func isMonitorOnlyIdentifier(_ identifier: String) -> Bool {
         identifier.hasPrefix(identifierPrefix)
-            || systemApplicationBundleIdentifiers.contains(identifier)
+            || ProtectedSystemProcessPolicy.isProtectedBundleIdentifier(identifier)
     }
 }
 

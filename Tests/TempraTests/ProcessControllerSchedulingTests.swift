@@ -286,8 +286,8 @@ struct ProcessControllerSchedulingTests {
         await controller.shutdown()
     }
 
-    @Test("Power-saving priority excludes a network lifeline")
-    func backgroundPriorityExcludesNetworkProcess() async {
+    @Test("Lower priority excludes a network lifeline")
+    func lowerPriorityExcludesNetworkProcess() async {
         let manualClock = ManualProcessControlClock()
         let system = RecordingProcessSystem()
         let network = process(222)
@@ -297,7 +297,7 @@ struct ProcessControllerSchedulingTests {
             bundleIdentifier: identifier,
             displayName: identifier,
             action: .limit,
-            runOnEfficiencyCores: true,
+            lowersCPUPriority: true,
             limitPercent: 10
         )
         let controller = ProcessController(
@@ -331,8 +331,8 @@ struct ProcessControllerSchedulingTests {
             revision: 1
         )
 
-        #expect(system.didAttemptToSetBackgroundPriority(renderer))
-        #expect(!system.didAttemptToSetBackgroundPriority(network))
+        #expect(system.didAttemptToLowerPriority(renderer))
+        #expect(!system.didAttemptToLowerPriority(network))
         await controller.shutdown()
     }
 
@@ -1258,14 +1258,14 @@ struct ProcessControllerSchedulingTests {
         )
 
         #expect(snapshot.statuses[identifier] == .normal)
-        #expect(!system.didAttemptToSetBackgroundPriority(controlledProcess))
+        #expect(!system.didAttemptToLowerPriority(controlledProcess))
         #expect(!system.didAttemptToStop(controlledProcess))
         #expect(snapshot.scheduledTickInterval == 1)
         await controller.shutdown()
     }
 
-    @Test("CPU limiting and power-saving scheduling run together")
-    func combinedLimitUsesPowerSavingScheduling() async {
+    @Test("CPU limiting and lower priority run together")
+    func combinedLimitUsesLowerPriority() async {
         let manualClock = ManualProcessControlClock()
         let system = RecordingProcessSystem()
         let watchdog = RecordingProcessCrashWatchdog()
@@ -1280,7 +1280,7 @@ struct ProcessControllerSchedulingTests {
             bundleIdentifier: identifier,
             displayName: "Example",
             action: .limit,
-            runOnEfficiencyCores: true,
+            lowersCPUPriority: true,
             limitPercent: 10,
             delaySeconds: 0
         )
@@ -1296,17 +1296,22 @@ struct ProcessControllerSchedulingTests {
             revision: 1
         )
 
-        #expect(rule.runOnEfficiencyCores)
-        #expect(system.didAttemptToSetBackgroundPriority(controlledProcess))
+        #expect(rule.lowersCPUPriority)
+        #expect(system.didAttemptToLowerPriority(controlledProcess))
         #expect(!system.didAttemptToRestorePriority(controlledProcess))
         #expect(snapshot.statuses[identifier] == .limited(10))
 
         system.failResume(for: controlledProcess, attempts: 1)
+        system.setCPUTimeNanoseconds(10_000_000)
         let synchronizationCountBeforeStop = watchdog.synchronizationCallCount
+        let registrationsBeforeStop = manualClock.sleepRegistrationCount
         manualClock.advance(by: .milliseconds(10))
         #expect(await eventually { system.didAttemptToStop(controlledProcess) })
         #expect(await eventually {
             watchdog.synchronizationCallCount > synchronizationCountBeforeStop
+        })
+        #expect(await eventually {
+            manualClock.sleepRegistrationCount > registrationsBeforeStop
         })
 
         system.clearOperationHistory()
@@ -1333,8 +1338,8 @@ struct ProcessControllerSchedulingTests {
         #expect(system.didAttemptToRestorePriority(controlledProcess))
     }
 
-    @Test("WindowServer limit rules use efficiency scheduling without hard limiting")
-    func windowServerCannotBeCPULimited() async {
+    @Test("WindowServer remains monitor-only")
+    func windowServerRemainsMonitorOnly() async {
         let system = RecordingProcessSystem()
         let controlledProcess = process(31)
         let controller = ProcessController(system: system)
@@ -1361,19 +1366,20 @@ struct ProcessControllerSchedulingTests {
             revision: 1
         )
 
-        #expect(snapshot.statuses[windowServerIdentifier] == .energyEfficient)
-        #expect(system.didAttemptToSetBackgroundPriority(controlledProcess))
+        #expect(snapshot.statuses[windowServerIdentifier] == nil)
+        #expect(!system.didAttemptToLowerPriority(controlledProcess))
         #expect(!system.didAttemptToStop(controlledProcess))
+        #expect(!system.didAttemptToTerminate(controlledProcess))
         await controller.shutdown()
     }
 
-    @Test("Power-saving-core scheduling also respects launch grace")
-    func recentLaunchDefersEfficiencyScheduling() async {
+    @Test("Lower priority respects launch grace")
+    func recentLaunchDefersLowerPriority() async {
         let controller = ProcessController()
         let rule = AppRule(
             bundleIdentifier: identifier,
             displayName: "Example",
-            runOnEfficiencyCores: true
+            lowersCPUPriority: true
         )
         let snapshot = await controller.update(
             targets: [target(launchedAt: Date())],
@@ -1393,7 +1399,7 @@ struct ProcessControllerSchedulingTests {
         let rule = AppRule(
             bundleIdentifier: identifier,
             displayName: "Example",
-            runOnEfficiencyCores: true
+            lowersCPUPriority: true
         )
         let snapshot = await controller.update(
             targets: [target(
@@ -1515,7 +1521,7 @@ struct ProcessControllerSchedulingTests {
         let rule = AppRule(
             bundleIdentifier: identifier,
             displayName: "Example",
-            runOnEfficiencyCores: true
+            lowersCPUPriority: true
         )
         let snapshot = await controller.update(
             targets: [target(
@@ -1533,13 +1539,13 @@ struct ProcessControllerSchedulingTests {
         await controller.shutdown()
     }
 
-    @Test("A visible app is not moved to power-saving cores")
+    @Test("A visible app does not receive lower priority")
     func visibleAppDefersEfficiencyScheduling() async {
         let controller = ProcessController()
         let rule = AppRule(
             bundleIdentifier: identifier,
             displayName: "Example",
-            runOnEfficiencyCores: true
+            lowersCPUPriority: true
         )
         let snapshot = await controller.update(
             targets: [target(
@@ -2138,7 +2144,7 @@ struct ProcessControllerSchedulingTests {
         let rule = AppRule(
             bundleIdentifier: identifier,
             displayName: "Example",
-            runOnEfficiencyCores: true
+            lowersCPUPriority: true
         )
 
         _ = await controller.update(
@@ -2676,7 +2682,7 @@ struct ProcessControllerSchedulingTests {
 
         #expect(initial.statuses[identifier] == .normal)
         #expect(initial.activeCPULimitSessionIdentifiers.isEmpty)
-        #expect(!system.didAttemptToSetBackgroundPriority(controlledProcess))
+        #expect(!system.didAttemptToLowerPriority(controlledProcess))
         #expect(!system.didAttemptToStop(controlledProcess))
         #expect(await eventually { manualClock.pendingSleepCount == 2 })
 
@@ -2909,7 +2915,7 @@ private actor SuspendedStopProcessSystem: ProcessSystemControlling {
         return ProcessOperationResult(applied: processes)
     }
 
-    func setBackgroundPriority(
+    func lowerPriority(
         _ processes: Set<ProcessIdentity>
     ) -> ProcessOperationResult {
         ProcessOperationResult(applied: processes)
@@ -3046,7 +3052,7 @@ private final class RecordingProcessSystem: ProcessSystemControlling, @unchecked
     private enum RecordedOperation {
         case stop(Set<ProcessIdentity>)
         case resume(Set<ProcessIdentity>)
-        case setBackgroundPriority(Set<ProcessIdentity>)
+        case lowerPriority(Set<ProcessIdentity>)
         case restorePriority(Set<ProcessIdentity>)
         case terminate(Set<ProcessIdentity>)
     }
@@ -3056,7 +3062,7 @@ private final class RecordingProcessSystem: ProcessSystemControlling, @unchecked
     private var stopAttempts: [Set<ProcessIdentity>] = []
     private var stopAutomaticResumeIntervals: [ProcessIdentity: TimeInterval] = [:]
     private var resumeAttempts: [Set<ProcessIdentity>] = []
-    private var backgroundPriorityAttempts: [Set<ProcessIdentity>] = []
+    private var lowerPriorityAttempts: [Set<ProcessIdentity>] = []
     private var priorityRestoreAttempts: [Set<ProcessIdentity>] = []
     private var terminationAttempts: [Set<ProcessIdentity>] = []
     private var cpuTimeNanoseconds: UInt64 = 0
@@ -3089,8 +3095,8 @@ private final class RecordingProcessSystem: ProcessSystemControlling, @unchecked
         withLock { stopAutomaticResumeIntervals[process] }
     }
 
-    func didAttemptToSetBackgroundPriority(_ process: ProcessIdentity) -> Bool {
-        withLock { backgroundPriorityAttempts.contains { $0.contains(process) } }
+    func didAttemptToLowerPriority(_ process: ProcessIdentity) -> Bool {
+        withLock { lowerPriorityAttempts.contains { $0.contains(process) } }
     }
 
     func didAttemptToRestorePriority(_ process: ProcessIdentity) -> Bool {
@@ -3226,10 +3232,10 @@ private final class RecordingProcessSystem: ProcessSystemControlling, @unchecked
         }
     }
 
-    func setBackgroundPriority(_ processes: Set<ProcessIdentity>) -> ProcessOperationResult {
+    func lowerPriority(_ processes: Set<ProcessIdentity>) -> ProcessOperationResult {
         withLock {
-            operationHistory.append(.setBackgroundPriority(processes))
-            backgroundPriorityAttempts.append(processes)
+            operationHistory.append(.lowerPriority(processes))
+            lowerPriorityAttempts.append(processes)
             return ProcessOperationResult(applied: processes)
         }
     }
