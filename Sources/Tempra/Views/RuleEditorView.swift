@@ -37,9 +37,6 @@ struct RuleEditorView: View {
         VStack(spacing: 0) {
             titleBar
 
-            Divider()
-                .overlay(TempraPalette.separator)
-
             ScrollView(.vertical) {
                 VStack(alignment: .leading, spacing: 14) {
                     inspectorSection("When not in front") {

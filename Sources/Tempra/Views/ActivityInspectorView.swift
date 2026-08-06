@@ -11,9 +11,6 @@ struct ActivityInspectorView: View {
         VStack(spacing: 0) {
             titleBar
 
-            Divider()
-                .overlay(TempraPalette.separator)
-
             ScrollView(.vertical) {
                 VStack(alignment: .leading, spacing: 14) {
                     if let failureMessage = store.applicationActionFailureMessage(
@@ -252,10 +249,10 @@ struct ActivityInspectorView: View {
     }
 
     private func chartLegend(_ title: String, color: Color) -> some View {
-        HStack(spacing: 4) {
-            Capsule()
+        HStack(spacing: 5) {
+            RoundedRectangle(cornerRadius: 1, style: .continuous)
                 .fill(color)
-                .frame(width: 13, height: 2)
+                .frame(width: 12, height: 2)
             Text(title)
                 .font(TempraTypography.ruleTag)
                 .foregroundStyle(TempraPalette.secondaryText)

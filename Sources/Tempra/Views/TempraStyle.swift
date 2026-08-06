@@ -39,16 +39,16 @@ enum TempraPalette {
     }
 
     private static let panelTop = adaptive(
-        light: color(0.97, 0.98, 0.99, alpha: 0.72),
-        dark: color(0.12, 0.13, 0.15, alpha: 0.58)
+        light: color(0.98, 0.98, 0.99, alpha: 0.78),
+        dark: color(0.14, 0.15, 0.17, alpha: 0.72)
     )
     private static let panelMiddle = adaptive(
-        light: color(0.96, 0.97, 0.98, alpha: 0.58),
-        dark: color(0.10, 0.11, 0.13, alpha: 0.48)
+        light: color(0.97, 0.97, 0.98, alpha: 0.70),
+        dark: color(0.12, 0.13, 0.15, alpha: 0.66)
     )
     private static let panelBottom = adaptive(
-        light: color(0.95, 0.96, 0.98, alpha: 0.48),
-        dark: color(0.08, 0.09, 0.11, alpha: 0.40)
+        light: color(0.96, 0.96, 0.97, alpha: 0.64),
+        dark: color(0.11, 0.12, 0.14, alpha: 0.60)
     )
 
     static let panelTint = LinearGradient(
@@ -56,60 +56,69 @@ enum TempraPalette {
         startPoint: .top,
         endPoint: .bottom
     )
-    static let primaryText = Color(nsColor: .labelColor)
-    static let secondaryText = Color(nsColor: .secondaryLabelColor)
-    static let tertiaryText = Color(nsColor: .tertiaryLabelColor)
+    static let primaryText = adaptive(
+        light: color(0.08, 0.09, 0.11),
+        dark: color(0.96, 0.97, 0.98)
+    )
+    static let secondaryText = adaptive(
+        light: color(0.24, 0.26, 0.30),
+        dark: color(0.82, 0.84, 0.87)
+    )
+    static let tertiaryText = adaptive(
+        light: color(0.36, 0.38, 0.42),
+        dark: color(0.70, 0.72, 0.76)
+    )
     static let accent = adaptive(
-        light: color(0.00, 0.45, 0.92),
-        dark: color(0.24, 0.62, 1.00)
+        light: color(0.12, 0.42, 0.88),
+        dark: color(0.42, 0.68, 1.00)
     )
     static let chartFill = adaptive(
-        light: color(1.00, 1.00, 1.00, alpha: 0.48),
-        dark: color(1.00, 1.00, 1.00, alpha: 0.04)
+        light: color(0.10, 0.12, 0.16, alpha: 0.04),
+        dark: color(1.00, 1.00, 1.00, alpha: 0.05)
     )
     static let chartPlotFill = adaptive(
-        light: color(1.00, 1.00, 1.00, alpha: 0.18),
-        dark: color(0.00, 0.00, 0.00, alpha: 0.08)
+        light: color(0.10, 0.12, 0.16, alpha: 0.03),
+        dark: color(0.00, 0.00, 0.00, alpha: 0.10)
     )
     static let selectedRow = adaptive(
-        light: color(0.00, 0.45, 0.92, alpha: 0.12),
-        dark: color(1.00, 1.00, 1.00, alpha: 0.10)
+        light: color(0.12, 0.42, 0.88, alpha: 0.12),
+        dark: color(0.42, 0.68, 1.00, alpha: 0.16)
     )
     static let border = adaptive(
-        light: color(0.10, 0.12, 0.16, alpha: 0.10),
-        dark: color(1.00, 1.00, 1.00, alpha: 0.10)
+        light: color(0.12, 0.14, 0.18, alpha: 0.12),
+        dark: color(1.00, 1.00, 1.00, alpha: 0.12)
     )
     static let separator = adaptive(
-        light: color(0.12, 0.14, 0.18, alpha: 0.10),
+        light: color(0.12, 0.14, 0.18, alpha: 0.08),
         dark: color(1.00, 1.00, 1.00, alpha: 0.08)
     )
     static let controlFill = adaptive(
-        light: color(1.00, 1.00, 1.00, alpha: 0.78),
-        dark: color(1.00, 1.00, 1.00, alpha: 0.10)
+        light: color(0.10, 0.12, 0.16, alpha: 0.05),
+        dark: color(1.00, 1.00, 1.00, alpha: 0.08)
     )
     static let secondaryControlFill = adaptive(
-        light: color(0.10, 0.12, 0.16, alpha: 0.05),
-        dark: color(1.00, 1.00, 1.00, alpha: 0.06)
+        light: color(0.10, 0.12, 0.16, alpha: 0.04),
+        dark: color(1.00, 1.00, 1.00, alpha: 0.05)
     )
     static let searchFill = adaptive(
         light: color(0.10, 0.12, 0.16, alpha: 0.06),
         dark: color(1.00, 1.00, 1.00, alpha: 0.08)
     )
     static let fieldFill = adaptive(
-        light: color(1.00, 1.00, 1.00, alpha: 0.84),
-        dark: color(0.00, 0.00, 0.00, alpha: 0.28)
+        light: color(1.00, 1.00, 1.00, alpha: 0.88),
+        dark: color(0.00, 0.00, 0.00, alpha: 0.24)
     )
     static let subtleFill = adaptive(
-        light: color(0.10, 0.12, 0.16, alpha: 0.03),
+        light: color(0.10, 0.12, 0.16, alpha: 0.025),
         dark: color(1.00, 1.00, 1.00, alpha: 0.03)
     )
     static let chartBorder = adaptive(
-        light: color(0.12, 0.14, 0.18, alpha: 0.12),
+        light: color(0.12, 0.14, 0.18, alpha: 0.10),
         dark: color(1.00, 1.00, 1.00, alpha: 0.10)
     )
     static let chartGrid = adaptive(
-        light: color(0.12, 0.14, 0.18, alpha: 0.08),
-        dark: color(1.00, 1.00, 1.00, alpha: 0.08)
+        light: color(0.12, 0.14, 0.18, alpha: 0.07),
+        dark: color(1.00, 1.00, 1.00, alpha: 0.07)
     )
     static let sliderTrack = adaptive(
         light: color(0.10, 0.14, 0.22, alpha: 0.28),
@@ -132,44 +141,44 @@ enum TempraPalette {
         dark: color(0.04, 0.05, 0.08, alpha: 0.88)
     )
     static let performance = adaptive(
-        light: color(0.76, 0.25, 0.03),
-        dark: color(1.00, 0.51, 0.28)
+        light: color(0.72, 0.34, 0.10),
+        dark: color(0.98, 0.62, 0.38)
     )
     static let efficiency = adaptive(
-        light: color(0.00, 0.43, 0.67),
-        dark: color(0.25, 0.82, 0.96)
+        light: color(0.10, 0.48, 0.74),
+        dark: color(0.42, 0.78, 0.96)
     )
     static let saved = adaptive(
-        light: color(0.08, 0.49, 0.12),
-        dark: color(0.36, 0.83, 0.34)
+        light: color(0.14, 0.52, 0.30),
+        dark: color(0.48, 0.82, 0.54)
     )
     static let thermal = adaptive(
-        light: color(0.64, 0.16, 0.60),
-        dark: color(0.91, 0.39, 0.88)
+        light: color(0.56, 0.28, 0.66),
+        dark: color(0.84, 0.58, 0.92)
     )
     static let slowed = adaptive(
-        light: color(0.00, 0.45, 0.67),
-        dark: color(0.20, 0.72, 0.90)
+        light: color(0.12, 0.50, 0.74),
+        dark: color(0.42, 0.76, 0.92)
     )
     static let waiting = adaptive(
-        light: color(0.70, 0.39, 0.00),
-        dark: color(0.98, 0.68, 0.19)
+        light: color(0.66, 0.42, 0.10),
+        dark: color(0.96, 0.72, 0.34)
     )
     static let stopped = adaptive(
-        light: color(0.78, 0.08, 0.07),
-        dark: color(0.96, 0.20, 0.18)
+        light: color(0.74, 0.20, 0.18),
+        dark: color(0.94, 0.40, 0.36)
     )
     static let running = adaptive(
-        light: color(0.38, 0.40, 0.38),
-        dark: color(0.47, 0.48, 0.43)
+        light: color(0.42, 0.44, 0.48),
+        dark: color(0.62, 0.64, 0.68)
     )
     static let efficiencyArea = LinearGradient(
-        colors: [efficiency.opacity(0.62), efficiency.opacity(0.34)],
+        colors: [efficiency.opacity(0.48), efficiency.opacity(0.22)],
         startPoint: .top,
         endPoint: .bottom
     )
     static let performanceArea = LinearGradient(
-        colors: [performance.opacity(0.82), performance.opacity(0.48)],
+        colors: [performance.opacity(0.56), performance.opacity(0.24)],
         startPoint: .top,
         endPoint: .bottom
     )

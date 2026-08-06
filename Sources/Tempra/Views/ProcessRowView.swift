@@ -80,12 +80,6 @@ struct ProcessRowView: View {
                             .font(TempraTypography.ruleTag)
                             .foregroundStyle(ruleTagColor)
                             .lineLimit(1)
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 2)
-                            .background(
-                                ruleTagColor.opacity(0.12),
-                                in: Capsule()
-                            )
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -161,7 +155,7 @@ struct ProcessRowView: View {
             return TempraPalette.secondaryText
         }
         guard item.rule?.isEnabled == true, item.status != .disabled else {
-            return TempraPalette.tertiaryText
+            return TempraPalette.secondaryText
         }
         return item.status == .paused
             ? TempraPalette.stopped
@@ -199,12 +193,6 @@ struct ManagedProcessRowView: View {
                             .font(TempraTypography.ruleTag)
                             .foregroundStyle(TempraPalette.secondaryText)
                             .lineLimit(1)
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 2)
-                            .background(
-                                TempraPalette.secondaryControlFill,
-                                in: Capsule()
-                            )
                     }
                 }
 

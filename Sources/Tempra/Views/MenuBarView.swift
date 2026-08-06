@@ -353,28 +353,20 @@ struct MenuBarView: View {
                 .fixedSize(horizontal: false, vertical: true)
             }
 
-            Divider()
-                .overlay(TempraPalette.separator)
-
             VStack(spacing: 0) {
                 processSection(items: itemLists.processItems)
                     .frame(minHeight: 64, maxHeight: .infinity)
                     .layoutPriority(1)
 
                 if scope == .running {
-                    Divider()
-                        .overlay(TempraPalette.separator)
-                        .padding(.horizontal, 14)
-                        .padding(.vertical, 8)
                     managedSection(managedItems: itemLists.managedItems)
+                        .padding(.top, 10)
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
             .padding(.horizontal, 12)
             .frame(maxHeight: .infinity)
 
-            Divider()
-                .overlay(TempraPalette.separator)
             footer
                 .fixedSize(horizontal: false, vertical: true)
         }
@@ -657,26 +649,15 @@ struct MenuBarView: View {
             )
             .frame(maxWidth: .infinity)
             .frame(height: 30)
-            .padding(.horizontal, 12)
+            .padding(.horizontal, 10)
             .background(
-                isIncluded
-                    ? TempraPalette.secondaryControlFill
-                    : TempraPalette.controlFill,
-                in: Capsule(style: .continuous)
+                TempraPalette.secondaryControlFill,
+                in: RoundedRectangle(cornerRadius: 8, style: .continuous)
             )
-            .overlay {
-                Capsule(style: .continuous)
-                    .stroke(
-                        isIncluded
-                            ? TempraPalette.border.opacity(0.7)
-                            : TempraPalette.accent.opacity(0.28),
-                        lineWidth: 1
-                    )
-            }
-            .contentShape(Capsule(style: .continuous))
+            .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
         }
         .buttonStyle(.plain)
-        .padding(.horizontal, 10)
+        .padding(.horizontal, 8)
         .padding(.top, 8)
         .padding(.bottom, 4)
         .help(isIncluded
@@ -791,13 +772,7 @@ struct MenuBarView: View {
 
                     Text("\(managedItems.count)")
                         .font(TempraTypography.ruleTag)
-                        .foregroundStyle(TempraPalette.tertiaryText)
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 2)
-                        .background(
-                            TempraPalette.secondaryControlFill,
-                            in: Capsule()
-                        )
+                        .foregroundStyle(TempraPalette.secondaryText)
 
                     Spacer(minLength: 4)
 
