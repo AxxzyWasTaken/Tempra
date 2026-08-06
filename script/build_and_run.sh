@@ -80,6 +80,19 @@ if [[ -z "$SIGN_IDENTITY" || "$SIGN_IDENTITY" == "-" ]]; then
   exit 1
 fi
 
+SIGNING_ARGUMENTS=(--force --sign "$SIGN_IDENTITY" --options runtime)
+case "${CODE_SIGN_TIMESTAMP:-0}" in
+  0)
+    ;;
+  1)
+    SIGNING_ARGUMENTS+=(--timestamp)
+    ;;
+  *)
+    echo "CODE_SIGN_TIMESTAMP must be 0 or 1." >&2
+    exit 2
+    ;;
+esac
+
 rm -rf "$APP_BUNDLE"
 mkdir -p "$APP_MACOS" "$APP_RESOURCES" "$APP_HELPER_TOOLS" "$APP_LAUNCH_DAEMONS"
 cp "$BUILD_BINARY" "$APP_BINARY"
@@ -144,13 +157,13 @@ cat >"$PRIVILEGED_HELPER_PLIST" <<PLIST
 PLIST
 
 /usr/bin/plutil -lint "$INFO_PLIST" "$PRIVILEGED_HELPER_PLIST"
-/usr/bin/codesign --force --sign "$SIGN_IDENTITY" --options runtime \
+/usr/bin/codesign "${SIGNING_ARGUMENTS[@]}" \
   --identifier "$BUNDLE_ID.watchdog" "$WATCHDOG_BINARY"
-/usr/bin/codesign --force --sign "$SIGN_IDENTITY" --options runtime \
+/usr/bin/codesign "${SIGNING_ARGUMENTS[@]}" \
   --identifier "$PRIVILEGED_HELPER_LABEL" "$PRIVILEGED_HELPER_BINARY"
-/usr/bin/codesign --force --sign "$SIGN_IDENTITY" --options runtime \
+/usr/bin/codesign "${SIGNING_ARGUMENTS[@]}" \
   --identifier "$BUNDLE_ID" "$APP_BINARY"
-/usr/bin/codesign --force --sign "$SIGN_IDENTITY" --options runtime "$APP_BUNDLE"
+/usr/bin/codesign "${SIGNING_ARGUMENTS[@]}" "$APP_BUNDLE"
 
 open_app() {
   stop_running_app

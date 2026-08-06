@@ -139,6 +139,39 @@ Run the test suite with:
 swift test
 ```
 
+## Build a release DMG
+
+A release DMG requires a `Developer ID Application` identity and validated
+notarization credentials. An Apple Development identity is not sufficient for
+distribution.
+
+1. Install the `Developer ID Application` identity in the login Keychain.
+2. Store the notarization credentials in a Keychain profile:
+
+   ```sh
+   xcrun notarytool store-credentials Tempra-notary
+   ```
+
+3. Build, notarize, staple, and verify the DMG:
+
+   ```sh
+   CODE_SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" \
+   NOTARYTOOL_PROFILE="Tempra-notary" \
+   ./script/package_release_dmg.sh
+   ```
+
+4. If the matching GitHub release exists, add `--upload` to attach the DMG:
+
+   ```sh
+   CODE_SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" \
+   NOTARYTOOL_PROFILE="Tempra-notary" \
+   ./script/package_release_dmg.sh --upload
+   ```
+
+The script stops if Developer ID signing, notarization, stapling, Gatekeeper
+assessment, or GitHub authentication fails. It does not produce an unsigned or
+unnotarized release artifact.
+
 ## License
 
 Tempra is available under the [GNU General Public License v3.0](LICENSE).
