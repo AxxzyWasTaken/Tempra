@@ -196,6 +196,9 @@ final class ManagedProcessWatcher {
                         processIdentifiers: processIdentifiers,
                         onActivityChange: onActivityChange
                     )
+                    if !processIdentifiers.isEmpty {
+                        onActivityChange()
+                    }
                 case .stop(let revision):
                     await self.audioMonitor.stop(revision: revision)
                 }

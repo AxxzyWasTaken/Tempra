@@ -119,6 +119,31 @@ struct ManagedProcessWatcherTests {
         await watcher.stop()
     }
 
+    @Test("A new audio target set requests an immediate activity refresh")
+    func newAudioTargetsRefreshActivityImmediately() async {
+        let audioMonitor = RecordingAudioActivityMonitor()
+        let watcher = ManagedProcessWatcher(audioMonitor: audioMonitor)
+        var notifications: [ProcessChangeNotification] = []
+
+        watcher.watch(
+            processIdentities: [],
+            audioProcessIdentifiers: [10],
+            onChange: { notifications.append($0) }
+        )
+
+        #expect(await eventually { notifications == [.audioActivity] })
+
+        watcher.watch(
+            processIdentities: [],
+            audioProcessIdentifiers: [10],
+            onChange: { notifications.append($0) }
+        )
+        try? await Task.sleep(for: .milliseconds(50))
+        #expect(notifications == [.audioActivity])
+
+        await watcher.stop()
+    }
+
     @Test("Shutdown waits for an in-flight audio update before stopping")
     func shutdownOrdersAudioStopAfterInFlightUpdate() async {
         let audioMonitor = SuspendedAudioActivityMonitor()
