@@ -10,7 +10,6 @@ struct RuleEditorView: View {
     @State private var original: AppRule
     @State private var draft: AppRule
     @State private var isTitleHovered = false
-    @State private var isBackgroundHeaderHovered = false
     @State private var isRemovingRule = false
     @State private var allowsMultipleCPUCores: Bool
 
@@ -42,38 +41,35 @@ struct RuleEditorView: View {
                 .overlay(TempraPalette.separator)
 
             ScrollView(.vertical) {
-                VStack(alignment: .leading, spacing: 11) {
-                    backgroundControls
+                VStack(alignment: .leading, spacing: 14) {
+                    inspectorSection("When not in front") {
+                        backgroundControls
+                    }
 
-                    Divider()
-                        .overlay(TempraPalette.separator)
+                    inspectorSection("Conditions") {
+                        conditionControls
+                    }
 
-                    conditionControls
-
-                    Divider()
-                        .overlay(TempraPalette.separator)
-
-                    idleControls
+                    inspectorSection("When idle") {
+                        idleControls
+                    }
 
                     if !displayedRuleGuidance.isEmpty {
-                        Divider()
-                            .overlay(TempraPalette.separator)
-
-                        ruleGuidanceSection
+                        inspectorSection("Guidance") {
+                            ruleGuidanceSection
+                        }
                     }
 
                     if item.isStandaloneProcess
                         || item.requiresPrivilegedControl
                         || draft.runOnEfficiencyCores {
-                        Divider()
-                            .overlay(TempraPalette.separator)
-
-                        processControlNotice
+                        inspectorSection("Process control") {
+                            processControlNotice
+                        }
                     }
                 }
-                .padding(.leading, 17)
-                .padding(.trailing, 13)
-                .padding(.vertical, 10)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 14)
             }
             .scrollIndicators(.never)
         }
@@ -101,14 +97,26 @@ struct RuleEditorView: View {
     }
 
     private var titleBar: some View {
-        HStack(spacing: 8) {
-            Text(item.name)
-                .font(TempraTypography.title)
-                .lineLimit(1)
+        HStack(spacing: 10) {
+            Image(nsImage: item.icon)
+                .resizable()
+                .scaledToFit()
+                .frame(width: 24, height: 24)
+                .accessibilityHidden(true)
+
+            VStack(alignment: .leading, spacing: 1) {
+                Text(item.name)
+                    .font(TempraTypography.title)
+                    .lineLimit(1)
+                Text(draft.isEnabled ? "Rule enabled" : "Rule disabled")
+                    .font(TempraTypography.footer)
+                    .foregroundStyle(TempraPalette.secondaryText)
+                    .lineLimit(1)
+            }
 
             Spacer(minLength: 8)
 
-            HStack(spacing: 8) {
+            HStack(spacing: 6) {
                 Menu {
                     Toggle("Rule Enabled", isOn: $draft.isEnabled)
 
@@ -152,6 +160,7 @@ struct RuleEditorView: View {
                     }
                 } label: {
                     Image(systemName: "ellipsis.circle")
+                        .frame(width: 24, height: 24)
                 }
                 .menuStyle(.borderlessButton)
                 .fixedSize()
@@ -160,24 +169,26 @@ struct RuleEditorView: View {
                 Button(action: onClose) {
                     Image(systemName: "xmark")
                         .foregroundStyle(TempraPalette.secondaryText)
+                        .frame(width: 24, height: 24)
+                        .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 .help("Close")
             }
-            .opacity(isTitleHovered ? 1 : 0)
+            .opacity(isTitleHovered ? 1 : 0.72)
             .animation(reduceMotion ? nil : .easeOut(duration: 0.15), value: isTitleHovered)
         }
-        .padding(.leading, 18)
-        .padding(.trailing, 13)
-        .frame(height: 49)
+        .padding(.horizontal, 14)
+        .frame(height: 54)
         .onHover { isTitleHovered = $0 }
     }
 
     private var backgroundControls: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 10) {
             HStack {
-                Text("When not in front…")
-                    .font(TempraTypography.bodyEmphasized)
+                Text("Start after")
+                    .font(TempraTypography.body)
+                    .foregroundStyle(TempraPalette.secondaryText)
 
                 Spacer()
 
@@ -188,19 +199,17 @@ struct RuleEditorView: View {
                         }
                     }
                 } label: {
-                    Image(systemName: "clock")
-                        .foregroundStyle(TempraPalette.secondaryText)
+                    HStack(spacing: 4) {
+                        Image(systemName: "clock")
+                        Text(AppRule.delayTitle(draft.delaySeconds))
+                    }
+                    .font(TempraTypography.footer)
+                    .foregroundStyle(TempraPalette.primaryText)
                 }
                 .menuStyle(.borderlessButton)
                 .fixedSize()
                 .help("Start after \(AppRule.delayTitle(draft.delaySeconds).lowercased())")
-                .opacity(isBackgroundHeaderHovered ? 1 : 0)
-                .animation(
-                    reduceMotion ? nil : .easeOut(duration: 0.15),
-                    value: isBackgroundHeaderHovered
-                )
             }
-            .onHover { isBackgroundHeaderHovered = $0 }
 
             pauseToggle
             efficiencyToggle
@@ -258,7 +267,7 @@ struct RuleEditorView: View {
     }
 
     private var conditionControls: some View {
-        VStack(alignment: .leading, spacing: 9) {
+        VStack(alignment: .leading, spacing: 10) {
             Toggle(isOn: $draft.protectAudio) {
                 Text("Don't stop or slow when sound is playing")
                     .lineLimit(1)
@@ -281,9 +290,6 @@ struct RuleEditorView: View {
 
     private var idleControls: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("When idle…")
-                .font(TempraTypography.bodyEmphasized)
-
             idleControl(
                 title: "Force quit after:",
                 isEnabled: quitEnabled,
@@ -301,10 +307,7 @@ struct RuleEditorView: View {
     }
 
     private var ruleGuidanceSection: some View {
-        VStack(alignment: .leading, spacing: 7) {
-            Text("Rule Guidance")
-                .font(TempraTypography.bodyEmphasized)
-
+        VStack(alignment: .leading, spacing: 8) {
             ForEach(displayedRuleGuidance) { guidance in
                 HStack(alignment: .top, spacing: 7) {
                     Image(systemName: guidance.symbolName)
@@ -326,7 +329,7 @@ struct RuleEditorView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .background(
                     guidanceColor(guidance.severity).opacity(0.09),
-                    in: RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    in: RoundedRectangle(cornerRadius: 10, style: .continuous)
                 )
                 .accessibilityElement(children: .combine)
             }
@@ -532,6 +535,25 @@ struct RuleEditorView: View {
         Binding(
             get: { draft.quitAfterMinutes ?? 10 },
             set: { draft.quitAfterMinutes = min(max(1, $0), 60) }
+        )
+    }
+
+
+    private func inspectorSection<Content: View>(
+        _ title: String,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(title)
+                .font(TempraTypography.sectionHeading)
+                .foregroundStyle(TempraPalette.secondaryText)
+            content()
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            TempraPalette.secondaryControlFill,
+            in: RoundedRectangle(cornerRadius: 12, style: .continuous)
         )
     }
 

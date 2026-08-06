@@ -15,36 +15,35 @@ struct ActivityInspectorView: View {
                 .overlay(TempraPalette.separator)
 
             ScrollView(.vertical) {
-                VStack(alignment: .leading, spacing: 12) {
+                VStack(alignment: .leading, spacing: 14) {
                     if let failureMessage = store.applicationActionFailureMessage(
                         for: item.bundleIdentifier
                     ) {
                         failureNotice(failureMessage)
                     }
 
-                    usageSection
+                    inspectorSection("Live usage") {
+                        usageSection
+                    }
 
-                    Divider()
-                        .overlay(TempraPalette.separator)
+                    inspectorSection("CPU history") {
+                        historySection
+                    }
 
-                    historySection
+                    inspectorSection("Subprocesses") {
+                        processSection
+                    }
 
-                    Divider()
-                        .overlay(TempraPalette.separator)
-
-                    processSection
-
-                    Divider()
-                        .overlay(TempraPalette.separator)
-
-                    applicationSection
+                    inspectorSection("Application") {
+                        applicationSection
+                    }
 
                     if item.requiresPrivilegedControl {
                         privilegedControlNotice
                     }
                 }
-                .padding(.horizontal, 16)
-                .padding(.vertical, 12)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 14)
             }
             .scrollIndicators(.never)
         }
@@ -91,7 +90,7 @@ struct ActivityInspectorView: View {
             .accessibilityLabel("Close Activity Details")
         }
         .padding(.horizontal, 14)
-        .frame(height: 49)
+        .frame(height: 54)
     }
 
     private var applicationActionsMenu: some View {
@@ -154,9 +153,7 @@ struct ActivityInspectorView: View {
     }
 
     private var usageSection: some View {
-        VStack(alignment: .leading, spacing: 7) {
-            sectionHeading("Live Usage")
-
+        VStack(alignment: .leading, spacing: 8) {
             metricRow("Current CPU", value: item.cpuText)
             metricRow("1-minute average", value: item.averageCPUText)
             metricRow(
@@ -168,11 +165,9 @@ struct ActivityInspectorView: View {
     }
 
     private var historySection: some View {
-        VStack(alignment: .leading, spacing: 7) {
+        VStack(alignment: .leading, spacing: 8) {
             HStack {
-                sectionHeading("CPU History")
-
-                Spacer()
+                Spacer(minLength: 0)
 
                 Picker("History range", selection: $historyRange) {
                     ForEach(CPUHistoryRange.allCases) { range in
@@ -198,9 +193,7 @@ struct ActivityInspectorView: View {
     }
 
     private var processSection: some View {
-        VStack(alignment: .leading, spacing: 7) {
-            sectionHeading("Subprocesses")
-
+        VStack(alignment: .leading, spacing: 8) {
             if item.processSamples.isEmpty {
                 Text(item.isRunning
                      ? "Waiting for process details."
@@ -249,11 +242,11 @@ struct ActivityInspectorView: View {
                     .foregroundStyle(TempraPalette.secondaryText)
             }
         }
-        .padding(.vertical, 5)
-        .padding(.horizontal, 7)
+        .padding(.vertical, 8)
+        .padding(.horizontal, 9)
         .background(
-            TempraPalette.secondaryControlFill,
-            in: RoundedRectangle(cornerRadius: 6, style: .continuous)
+            TempraPalette.chartFill,
+            in: RoundedRectangle(cornerRadius: 10, style: .continuous)
         )
         .accessibilityElement(children: .combine)
     }
@@ -270,9 +263,7 @@ struct ActivityInspectorView: View {
     }
 
     private var applicationSection: some View {
-        VStack(alignment: .leading, spacing: 7) {
-            sectionHeading("Application")
-
+        VStack(alignment: .leading, spacing: 8) {
             metricRow("State", value: item.stateText)
             metricRow("Running for", value: item.runningTimeText)
             metricRow(
@@ -310,10 +301,10 @@ struct ActivityInspectorView: View {
                 .controlSize(.small)
             }
         }
-        .padding(9)
+        .padding(12)
         .background(
             TempraPalette.secondaryControlFill,
-            in: RoundedRectangle(cornerRadius: 7, style: .continuous)
+            in: RoundedRectangle(cornerRadius: 12, style: .continuous)
         )
         .accessibilityElement(children: .contain)
     }
@@ -341,19 +332,33 @@ struct ActivityInspectorView: View {
             .help("Dismiss Error")
             .accessibilityLabel("Dismiss Error")
         }
-        .padding(9)
+        .padding(12)
         .background(
             TempraPalette.stopped.opacity(0.10),
-            in: RoundedRectangle(cornerRadius: 7, style: .continuous)
+            in: RoundedRectangle(cornerRadius: 12, style: .continuous)
         )
         .accessibilityElement(children: .contain)
     }
 
-    private func sectionHeading(_ title: String) -> some View {
-        Text(title)
-            .font(TempraTypography.sectionHeading)
-            .foregroundStyle(TempraPalette.secondaryText)
+
+    private func inspectorSection<Content: View>(
+        _ title: String,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(title)
+                .font(TempraTypography.sectionHeading)
+                .foregroundStyle(TempraPalette.secondaryText)
+            content()
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            TempraPalette.secondaryControlFill,
+            in: RoundedRectangle(cornerRadius: 12, style: .continuous)
+        )
     }
+
 
     @ViewBuilder
     private func metricRow(_ label: String, value: String, help: String? = nil) -> some View {

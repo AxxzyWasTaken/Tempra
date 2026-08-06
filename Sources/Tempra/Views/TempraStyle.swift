@@ -2,22 +2,22 @@ import AppKit
 import SwiftUI
 
 enum TempraLayout {
-    static let mainPanelSize = CGSize(width: 352, height: 773)
+    static let mainPanelSize = CGSize(width: 360, height: 760)
     static let mainNotchHeight: CGFloat = 10
-    static let inspectorBodyWidth: CGFloat = 286
+    static let inspectorBodyWidth: CGFloat = 300
     static let inspectorNotchWidth: CGFloat = 10
     static let inspectorSize = CGSize(
         width: inspectorBodyWidth + inspectorNotchWidth,
-        height: 384
+        height: 420
     )
     static let settingsPanelSize = CGSize(width: 420, height: 400)
     static let highCPUAlertPanelSize = CGSize(width: 344, height: 252)
-    static let panelCornerRadius: CGFloat = 14
-    static let processRowHeight: CGFloat = 18
-    static let processRowHorizontalInset: CGFloat = 4
-    static let processColumnSpacing: CGFloat = 5
-    static let currentCPUColumnWidth: CGFloat = 43
-    static let averageCPUColumnWidth: CGFloat = 47
+    static let panelCornerRadius: CGFloat = 16
+    static let processRowHeight: CGFloat = 28
+    static let processRowHorizontalInset: CGFloat = 8
+    static let processColumnSpacing: CGFloat = 8
+    static let currentCPUColumnWidth: CGFloat = 46
+    static let averageCPUColumnWidth: CGFloat = 50
 }
 
 enum TempraPalette {
@@ -39,16 +39,16 @@ enum TempraPalette {
     }
 
     private static let panelTop = adaptive(
-        light: color(0.95, 0.94, 1.00, alpha: 0.94),
-        dark: color(0.13, 0.09, 0.42, alpha: 0.78)
+        light: color(0.97, 0.98, 0.99, alpha: 0.72),
+        dark: color(0.12, 0.13, 0.15, alpha: 0.58)
     )
     private static let panelMiddle = adaptive(
-        light: color(0.91, 0.94, 0.99, alpha: 0.92),
-        dark: color(0.10, 0.14, 0.43, alpha: 0.75)
+        light: color(0.96, 0.97, 0.98, alpha: 0.58),
+        dark: color(0.10, 0.11, 0.13, alpha: 0.48)
     )
     private static let panelBottom = adaptive(
-        light: color(0.88, 0.93, 0.98, alpha: 0.90),
-        dark: color(0.15, 0.24, 0.43, alpha: 0.68)
+        light: color(0.95, 0.96, 0.98, alpha: 0.48),
+        dark: color(0.08, 0.09, 0.11, alpha: 0.40)
     )
 
     static let panelTint = LinearGradient(
@@ -60,56 +60,56 @@ enum TempraPalette {
     static let secondaryText = Color(nsColor: .secondaryLabelColor)
     static let tertiaryText = Color(nsColor: .tertiaryLabelColor)
     static let accent = adaptive(
-        light: color(0.00, 0.39, 0.84),
-        dark: color(0.16, 0.56, 1.00)
+        light: color(0.00, 0.45, 0.92),
+        dark: color(0.24, 0.62, 1.00)
     )
     static let chartFill = adaptive(
-        light: color(1.00, 1.00, 1.00, alpha: 0.38),
-        dark: color(0.00, 0.00, 0.00, alpha: 0.11)
+        light: color(1.00, 1.00, 1.00, alpha: 0.48),
+        dark: color(1.00, 1.00, 1.00, alpha: 0.04)
     )
     static let chartPlotFill = adaptive(
-        light: color(1.00, 1.00, 1.00, alpha: 0.28),
-        dark: color(0.00, 0.00, 0.00, alpha: 0.045)
+        light: color(1.00, 1.00, 1.00, alpha: 0.18),
+        dark: color(0.00, 0.00, 0.00, alpha: 0.08)
     )
     static let selectedRow = adaptive(
-        light: color(0.00, 0.34, 0.78, alpha: 0.18),
-        dark: color(0.49, 0.50, 0.49, alpha: 0.92)
+        light: color(0.00, 0.45, 0.92, alpha: 0.12),
+        dark: color(1.00, 1.00, 1.00, alpha: 0.10)
     )
     static let border = adaptive(
-        light: color(0.14, 0.18, 0.28, alpha: 0.22),
-        dark: color(1.00, 1.00, 1.00, alpha: 0.24)
+        light: color(0.10, 0.12, 0.16, alpha: 0.10),
+        dark: color(1.00, 1.00, 1.00, alpha: 0.10)
     )
     static let separator = adaptive(
-        light: color(0.12, 0.16, 0.24, alpha: 0.18),
-        dark: color(1.00, 1.00, 1.00, alpha: 0.18)
+        light: color(0.12, 0.14, 0.18, alpha: 0.10),
+        dark: color(1.00, 1.00, 1.00, alpha: 0.08)
     )
     static let controlFill = adaptive(
-        light: color(1.00, 1.00, 1.00, alpha: 0.64),
-        dark: color(0.39, 0.35, 0.64, alpha: 0.72)
+        light: color(1.00, 1.00, 1.00, alpha: 0.78),
+        dark: color(1.00, 1.00, 1.00, alpha: 0.10)
     )
     static let secondaryControlFill = adaptive(
-        light: color(0.09, 0.13, 0.20, alpha: 0.07),
-        dark: color(1.00, 1.00, 1.00, alpha: 0.055)
+        light: color(0.10, 0.12, 0.16, alpha: 0.05),
+        dark: color(1.00, 1.00, 1.00, alpha: 0.06)
     )
     static let searchFill = adaptive(
-        light: color(1.00, 1.00, 1.00, alpha: 0.58),
-        dark: color(0.00, 0.00, 0.00, alpha: 0.38)
+        light: color(0.10, 0.12, 0.16, alpha: 0.06),
+        dark: color(1.00, 1.00, 1.00, alpha: 0.08)
     )
     static let fieldFill = adaptive(
-        light: color(1.00, 1.00, 1.00, alpha: 0.72),
-        dark: color(0.00, 0.00, 0.00, alpha: 0.42)
+        light: color(1.00, 1.00, 1.00, alpha: 0.84),
+        dark: color(0.00, 0.00, 0.00, alpha: 0.28)
     )
     static let subtleFill = adaptive(
-        light: color(0.09, 0.13, 0.20, alpha: 0.035),
-        dark: color(1.00, 1.00, 1.00, alpha: 0.012)
+        light: color(0.10, 0.12, 0.16, alpha: 0.03),
+        dark: color(1.00, 1.00, 1.00, alpha: 0.03)
     )
     static let chartBorder = adaptive(
-        light: color(0.12, 0.16, 0.24, alpha: 0.30),
-        dark: color(1.00, 1.00, 1.00, alpha: 0.23)
+        light: color(0.12, 0.14, 0.18, alpha: 0.12),
+        dark: color(1.00, 1.00, 1.00, alpha: 0.10)
     )
     static let chartGrid = adaptive(
-        light: color(0.12, 0.16, 0.24, alpha: 0.16),
-        dark: color(1.00, 1.00, 1.00, alpha: 0.15)
+        light: color(0.12, 0.14, 0.18, alpha: 0.08),
+        dark: color(1.00, 1.00, 1.00, alpha: 0.08)
     )
     static let sliderTrack = adaptive(
         light: color(0.10, 0.14, 0.22, alpha: 0.28),
@@ -176,17 +176,19 @@ enum TempraPalette {
 }
 
 enum TempraTypography {
-    static let title = Font.system(size: 17, weight: .medium)
-    static let body = Font.system(size: 11.25, weight: .regular)
-    static let bodyEmphasized = Font.system(size: 11.25, weight: .semibold)
-    static let metric = Font.system(size: 11.25, weight: .regular)
-    static let metricValue = Font.system(size: 11.25, weight: .medium).monospacedDigit()
-    static let process = Font.system(size: 11.5, weight: .regular)
-    static let processValue = Font.system(size: 12, weight: .regular).monospacedDigit()
-    static let ruleTag = Font.system(size: 9.5, weight: .regular)
-    static let sectionHeading = Font.system(size: 10.5, weight: .medium)
-    static let tableHeader = Font.system(size: 10.5, weight: .regular)
+    static let title = Font.system(size: 15, weight: .semibold)
+    static let body = Font.system(size: 12, weight: .regular)
+    static let bodyEmphasized = Font.system(size: 12, weight: .semibold)
+    static let metric = Font.system(size: 11, weight: .regular)
+    static let metricValue = Font.system(size: 12, weight: .medium).monospacedDigit()
+    static let process = Font.system(size: 12.5, weight: .regular)
+    static let processValue = Font.system(size: 12, weight: .medium).monospacedDigit()
+    static let ruleTag = Font.system(size: 10.5, weight: .medium)
+    static let sectionHeading = Font.system(size: 11, weight: .semibold)
+    static let tableHeader = Font.system(size: 11, weight: .medium)
     static let footer = Font.system(size: 11, weight: .regular)
+    static let heroValue = Font.system(size: 28, weight: .semibold).monospacedDigit()
+    static let heroLabel = Font.system(size: 11, weight: .medium)
 }
 
 struct MainPanelShape: Shape {
@@ -319,9 +321,9 @@ private struct TempraPanelSurface<PanelShape: Shape>: ViewModifier {
             }
             .clipShape(shape)
             .overlay {
-                shape.stroke(TempraPalette.border, lineWidth: 1)
+                shape.stroke(TempraPalette.border, lineWidth: 0.8)
             }
-            .shadow(color: .black.opacity(0.42), radius: 6, y: 2)
+            .shadow(color: .black.opacity(0.18), radius: 10, y: 4)
             .foregroundStyle(TempraPalette.primaryText)
     }
 }
@@ -368,7 +370,7 @@ struct TempraStatusDot: View {
         .frame(width: size, height: size)
         .overlay {
             Circle()
-                .stroke(TempraPalette.border.opacity(0.55), lineWidth: 0.5)
+                .stroke(TempraPalette.border.opacity(0.35), lineWidth: 0.5)
         }
     }
 }
@@ -506,9 +508,9 @@ struct TempraNumberField: View {
         .font(TempraTypography.bodyEmphasized.monospacedDigit())
         .padding(.horizontal, 6)
         .frame(width: width, height: 22)
-        .background(TempraPalette.fieldFill, in: RoundedRectangle(cornerRadius: 5))
+        .background(TempraPalette.fieldFill, in: RoundedRectangle(cornerRadius: 7, style: .continuous))
         .overlay {
-            RoundedRectangle(cornerRadius: 5)
+            RoundedRectangle(cornerRadius: 7, style: .continuous)
                 .stroke(
                     isFocused || accented
                         ? TempraPalette.accent

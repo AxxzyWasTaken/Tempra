@@ -202,7 +202,7 @@ struct CPUHistoryChartView: View {
                         series: .value("Series", "Efficiency Boundary-\(point.segment)")
                     )
                     .foregroundStyle(TempraPalette.efficiency.opacity(0.80))
-                    .lineStyle(StrokeStyle(lineWidth: 0.65, lineJoin: .round))
+                    .lineStyle(StrokeStyle(lineWidth: 0.55, lineJoin: .round))
                     .interpolationMethod(.linear)
                 }
 
@@ -215,7 +215,7 @@ struct CPUHistoryChartView: View {
                             series: .value("Series", "Saved-\(savedCPUSegment)")
                         )
                         .foregroundStyle(TempraPalette.saved)
-                        .lineStyle(StrokeStyle(lineWidth: 1.15, lineJoin: .round))
+                        .lineStyle(StrokeStyle(lineWidth: 1.0, lineJoin: .round))
                         .interpolationMethod(.linear)
                     }
                 }
@@ -235,7 +235,7 @@ struct CPUHistoryChartView: View {
                             )
                         )
                         .foregroundStyle(TempraPalette.thermal.opacity(0.94))
-                        .lineStyle(StrokeStyle(lineWidth: 1.15, lineJoin: .round))
+                        .lineStyle(StrokeStyle(lineWidth: 1.0, lineJoin: .round))
                         .interpolationMethod(.linear)
                     }
                 }
@@ -247,7 +247,7 @@ struct CPUHistoryChartView: View {
                         series: .value("Series", "Total-\(point.segment)")
                     )
                     .foregroundStyle(TempraPalette.primaryText.opacity(0.96))
-                    .lineStyle(StrokeStyle(lineWidth: 1.25, lineJoin: .round))
+                    .lineStyle(StrokeStyle(lineWidth: 1.1, lineJoin: .round))
                     .interpolationMethod(.linear)
                 }
 
@@ -261,7 +261,7 @@ struct CPUHistoryChartView: View {
             .chartPlotStyle { plotArea in
                 plotArea
                     .background(TempraPalette.chartPlotFill)
-                    .border(TempraPalette.chartBorder, width: 1)
+                    .border(TempraPalette.chartBorder, width: 0.6)
             }
                 .chartXAxis {
                     AxisMarks(values: CPUHistoryAxis.tickDates(
@@ -321,12 +321,12 @@ struct CPUHistoryChartView: View {
                         .foregroundStyle(TempraPalette.secondaryText)
                 }
             }
-            .padding(.horizontal, 8)
-            .padding(.top, 9)
-            .padding(.bottom, 7)
+            .padding(.horizontal, 10)
+            .padding(.top, 10)
+            .padding(.bottom, 8)
         }
-        .frame(height: 147)
-        .background(TempraPalette.chartFill, in: RoundedRectangle(cornerRadius: 9))
+        .frame(height: 138)
+        .background(TempraPalette.chartFill, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
     }
 
     private func xAxisLabelAnchor(index: Int, count: Int) -> UnitPoint {

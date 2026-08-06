@@ -253,8 +253,9 @@ struct MenuBarView: View {
     @State private var scope: MenuScope = .running
     @State private var searchText = ""
     @State private var rowFrames: [String: CGRect] = [:]
+    @State private var isManagedSectionExpanded = false
 
-    private let managedViewportRowCount = 5
+    private let managedViewportRowCount = 4
     private let coordinateSpaceName = "tempra.main.panel"
 
     var body: some View {
@@ -328,17 +329,13 @@ struct MenuBarView: View {
                     context: .onboarding,
                     onDismiss: presentation.dismissPrivilegedAccessOnboarding
                 )
-                .padding(10)
+                .padding(12)
                 .background(
                     TempraPalette.secondaryControlFill,
-                    in: RoundedRectangle(cornerRadius: 9)
+                    in: RoundedRectangle(cornerRadius: 12, style: .continuous)
                 )
-                .overlay {
-                    RoundedRectangle(cornerRadius: 9)
-                        .stroke(TempraPalette.border.opacity(0.7), lineWidth: 1)
-                }
-                .padding(.horizontal, 11)
-                .padding(.bottom, 7)
+                .padding(.horizontal, 14)
+                .padding(.bottom, 8)
             }
 
             summaryMetrics
@@ -351,8 +348,8 @@ struct MenuBarView: View {
                     performanceCoreCount: displayedCPU.performanceCoreCount,
                     efficiencyCoreCount: displayedCPU.efficiencyCoreCount
                 )
-                .padding(.horizontal, 11)
-                .padding(.bottom, 7)
+                .padding(.horizontal, 14)
+                .padding(.bottom, 10)
                 .fixedSize(horizontal: false, vertical: true)
             }
 
@@ -367,14 +364,14 @@ struct MenuBarView: View {
                 if scope == .running {
                     Divider()
                         .overlay(TempraPalette.separator)
-                        .padding(.vertical, 7)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 8)
                     managedSection(managedItems: itemLists.managedItems)
-                    .fixedSize(horizontal: false, vertical: true)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
-            .padding(.horizontal, 11)
+            .padding(.horizontal, 12)
             .frame(maxHeight: .infinity)
-            .background(TempraPalette.subtleFill)
 
             Divider()
                 .overlay(TempraPalette.separator)
@@ -427,8 +424,9 @@ struct MenuBarView: View {
             )
             .equatable()
         }
-        .padding(.horizontal, 11)
-        .frame(height: 39)
+        .padding(.horizontal, 14)
+        .padding(.top, 4)
+        .frame(height: 44)
     }
 
     private func panelNotice(
@@ -468,15 +466,12 @@ struct MenuBarView: View {
                 .accessibilityLabel("Dismiss")
             }
         }
-        .padding(.horizontal, 11)
-        .padding(.vertical, 7)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 9)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(color.opacity(0.10))
-        .overlay(alignment: .bottom) {
-            Rectangle()
-                .fill(TempraPalette.separator)
-                .frame(height: 1)
-        }
+        .background(color.opacity(0.10), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .padding(.horizontal, 12)
+        .padding(.bottom, 6)
     }
 
     @ViewBuilder
@@ -508,14 +503,14 @@ struct MenuBarView: View {
     }
 
     private var searchField: some View {
-        HStack(spacing: 6) {
+        HStack(spacing: 7) {
             Image(systemName: "magnifyingglass")
-                .font(.system(size: 11, weight: .regular))
+                .font(.system(size: 12, weight: .medium))
                 .foregroundStyle(TempraPalette.secondaryText)
 
-            TextField("Search", text: $searchText)
+            TextField("Search apps", text: $searchText)
                 .textFieldStyle(.plain)
-                .font(.system(size: 12))
+                .font(.system(size: 13))
 
             if !searchText.isEmpty {
                 Button {
@@ -524,80 +519,90 @@ struct MenuBarView: View {
                     Image(systemName: "xmark.circle.fill")
                 }
                 .buttonStyle(.plain)
-                .foregroundStyle(TempraPalette.secondaryText)
+                .foregroundStyle(TempraPalette.tertiaryText)
                 .help("Clear Search")
             }
         }
-        .padding(.horizontal, 8)
-        .frame(height: 27)
-        .background(TempraPalette.searchFill, in: RoundedRectangle(cornerRadius: 7))
-        .overlay {
-            RoundedRectangle(cornerRadius: 7)
-                .stroke(TempraPalette.border.opacity(0.72), lineWidth: 1)
-        }
+        .padding(.horizontal, 10)
+        .frame(height: 30)
+        .background(
+            TempraPalette.searchFill,
+            in: RoundedRectangle(cornerRadius: 9, style: .continuous)
+        )
     }
 
     private var summaryMetrics: some View {
-        VStack(spacing: 2) {
-            metricLine(
-                "TOTAL CPU USAGE",
-                value: cpuText(displayedCPU.totalPercent),
-                color: TempraPalette.primaryText,
-                isHeading: true
-            )
-            if displayedCPU.efficiencyCoreCount > 0 {
-                metricLine(
-                    "PERFORMANCE CORE USAGE",
+        VStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Total CPU")
+                    .font(TempraTypography.heroLabel)
+                    .foregroundStyle(TempraPalette.secondaryText)
+                Text(cpuText(displayedCPU.totalPercent))
+                    .font(TempraTypography.heroValue)
+                    .foregroundStyle(TempraPalette.primaryText)
+                    .accessibilityLabel("Total CPU usage \(cpuText(displayedCPU.totalPercent))")
+            }
+
+            LazyVGrid(
+                columns: [
+                    GridItem(.flexible(), spacing: 8),
+                    GridItem(.flexible(), spacing: 8)
+                ],
+                spacing: 8
+            ) {
+                metricChip(
+                    "Performance",
                     value: cpuText(displayedCPU.performancePercent),
                     color: TempraPalette.performance
                 )
-                metricLine(
-                    "EFFICIENCY CORE USAGE",
-                    value: cpuText(displayedCPU.efficiencyPercent),
-                    color: TempraPalette.efficiency
+                if displayedCPU.efficiencyCoreCount > 0 {
+                    metricChip(
+                        "Efficiency",
+                        value: cpuText(displayedCPU.efficiencyPercent),
+                        color: TempraPalette.efficiency
+                    )
+                }
+                metricChip(
+                    "Saved",
+                    value: cpuText(displayedSavedCPU),
+                    color: TempraPalette.saved
                 )
-            } else {
-                metricLine(
-                    "PERFORMANCE CORE USAGE",
-                    value: cpuText(displayedCPU.performancePercent),
-                    color: TempraPalette.performance
+                metricChip(
+                    "Temperature",
+                    value: temperatureText(displayedCPU.cpuTemperatureCelsius),
+                    color: TempraPalette.thermal
                 )
             }
-            metricLine(
-                "CPU USAGE SAVED",
-                value: cpuText(displayedSavedCPU),
-                color: TempraPalette.saved
-            )
-            metricLine(
-                "CPU TEMPERATURE",
-                value: temperatureText(displayedCPU.cpuTemperatureCelsius),
-                color: TempraPalette.thermal
-            )
         }
-        .padding(.horizontal, 11)
-        .padding(.top, 2)
-        .padding(.bottom, 7)
+        .padding(.horizontal, 14)
+        .padding(.top, 4)
+        .padding(.bottom, 10)
     }
 
-    private func metricLine(
+    private func metricChip(
         _ title: String,
         value: String,
-        color: Color,
-        isHeading: Bool = false
+        color: Color
     ) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: 8) {
+        VStack(alignment: .leading, spacing: 3) {
             Text(title)
-                .font(isHeading ? TempraTypography.sectionHeading : TempraTypography.metric)
+                .font(TempraTypography.metric)
+                .foregroundStyle(TempraPalette.secondaryText)
                 .lineLimit(1)
-
-            Spacer(minLength: 4)
-
             Text(value)
                 .font(TempraTypography.metricValue)
+                .foregroundStyle(color)
                 .lineLimit(1)
         }
-        .foregroundStyle(color)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .background(
+            TempraPalette.secondaryControlFill,
+            in: RoundedRectangle(cornerRadius: 10, style: .continuous)
+        )
         .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(title) \(value)")
     }
 
     private func processSection(items: [AppDisplayItem]) -> some View {
@@ -633,24 +638,51 @@ struct MenuBarView: View {
                 !isIncluded
             )
         } label: {
-            Text("Include background and system processes")
-                .font(TempraTypography.footer)
-                .foregroundStyle(isIncluded ? TempraPalette.primaryText : Color.white)
-                .frame(maxWidth: .infinity)
-                .frame(height: 21)
-                .background(
-                    isIncluded ? TempraPalette.secondaryControlFill : TempraPalette.accent,
-                    in: Capsule()
-                )
-                .contentShape(Capsule())
+            HStack(spacing: 6) {
+                Image(systemName: isIncluded
+                      ? "checkmark.circle.fill"
+                      : "line.3.horizontal.decrease.circle")
+                    .font(.system(size: 12, weight: .semibold))
+                Text(isIncluded
+                      ? "Showing background and system processes"
+                      : "Include background and system processes")
+                    .font(TempraTypography.footer)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.9)
+            }
+            .foregroundStyle(
+                isIncluded
+                    ? TempraPalette.primaryText
+                    : TempraPalette.accent
+            )
+            .frame(maxWidth: .infinity)
+            .frame(height: 30)
+            .padding(.horizontal, 12)
+            .background(
+                isIncluded
+                    ? TempraPalette.secondaryControlFill
+                    : TempraPalette.controlFill,
+                in: Capsule(style: .continuous)
+            )
+            .overlay {
+                Capsule(style: .continuous)
+                    .stroke(
+                        isIncluded
+                            ? TempraPalette.border.opacity(0.7)
+                            : TempraPalette.accent.opacity(0.28),
+                        lineWidth: 1
+                    )
+            }
+            .contentShape(Capsule(style: .continuous))
         }
         .buttonStyle(.plain)
-        .padding(.horizontal, 28)
-        .padding(.top, 3)
-        .animation(.easeInOut(duration: 0.15), value: isIncluded)
+        .padding(.horizontal, 10)
+        .padding(.top, 8)
+        .padding(.bottom, 4)
         .help(isIncluded
               ? "Hide background processes and protected macOS services"
               : "Show user-owned background processes and protected macOS services")
+        .accessibilityLabel("Include background and system processes")
         .accessibilityValue(isIncluded ? "On" : "Off")
     }
 
@@ -685,7 +717,7 @@ struct MenuBarView: View {
                     }
                 }
             } label: {
-                Text(processHeading.uppercased())
+                Text(processHeading)
                     .font(TempraTypography.sectionHeading)
                     .lineLimit(1)
             }
@@ -719,7 +751,8 @@ struct MenuBarView: View {
         }
         .padding(.horizontal, TempraLayout.processRowHorizontalInset)
         .foregroundStyle(TempraPalette.secondaryText)
-        .frame(height: 20)
+        .frame(height: 26)
+        .padding(.top, 2)
     }
 
     private func sortColumn(
@@ -739,43 +772,78 @@ struct MenuBarView: View {
 
     private func managedSection(managedItems: [AppDisplayItem]) -> some View {
         VStack(spacing: 0) {
-            HStack(spacing: TempraLayout.processColumnSpacing) {
-                Text(managedSectionTitle)
-                    .font(TempraTypography.sectionHeading)
-                Spacer(minLength: 4)
-                Text("EST. CPU")
-                    .font(TempraTypography.tableHeader)
-                    .frame(width: TempraLayout.averageCPUColumnWidth, alignment: .trailing)
-                    .help(
-                        "Current estimated CPU use prevented while the rule is active. "
-                            + "This value is not a cumulative total."
-                    )
-            }
-            .padding(.horizontal, TempraLayout.processRowHorizontalInset)
-            .foregroundStyle(TempraPalette.secondaryText)
-            .frame(height: 20)
+            Button {
+                withAnimation(.easeOut(duration: 0.18)) {
+                    isManagedSectionExpanded.toggle()
+                }
+            } label: {
+                HStack(spacing: TempraLayout.processColumnSpacing) {
+                    Image(systemName: isManagedSectionExpanded
+                          ? "chevron.down"
+                          : "chevron.right")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(TempraPalette.tertiaryText)
+                        .frame(width: 12)
 
-            if managedItems.isEmpty {
-                Text("Select a process to add a background rule.")
-                    .font(.system(size: 10))
-                    .foregroundStyle(TempraPalette.tertiaryText)
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 10)
-            } else {
-                ScrollView(.vertical) {
-                    LazyVStack(spacing: 0) {
-                        ForEach(managedItems) { item in
-                            managedRow(item)
-                        }
+                    Text(managedSectionTitle)
+                        .font(TempraTypography.sectionHeading)
+                        .foregroundStyle(TempraPalette.secondaryText)
+
+                    Text("\(managedItems.count)")
+                        .font(TempraTypography.ruleTag)
+                        .foregroundStyle(TempraPalette.tertiaryText)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(
+                            TempraPalette.secondaryControlFill,
+                            in: Capsule()
+                        )
+
+                    Spacer(minLength: 4)
+
+                    if isManagedSectionExpanded {
+                        Text("Est. CPU")
+                            .font(TempraTypography.tableHeader)
+                            .foregroundStyle(TempraPalette.secondaryText)
+                            .frame(width: TempraLayout.averageCPUColumnWidth, alignment: .trailing)
+                            .help(
+                                "Current estimated CPU use prevented while the rule is active. "
+                                    + "This value is not a cumulative total."
+                            )
                     }
                 }
-                .scrollIndicators(.visible)
-                .frame(
-                    height: CGFloat(min(managedItems.count, managedViewportRowCount))
-                        * TempraLayout.processRowHeight + 12
-                )
+                .padding(.horizontal, TempraLayout.processRowHorizontalInset)
+                .frame(height: 28)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(managedSectionTitle)
+            .accessibilityValue(isManagedSectionExpanded ? "Expanded" : "Collapsed")
+
+            if isManagedSectionExpanded {
+                if managedItems.isEmpty {
+                    Text("Select a process to add a background rule.")
+                        .font(TempraTypography.footer)
+                        .foregroundStyle(TempraPalette.tertiaryText)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 12)
+                } else {
+                    ScrollView(.vertical) {
+                        LazyVStack(spacing: 0) {
+                            ForEach(managedItems) { item in
+                                managedRow(item)
+                            }
+                        }
+                    }
+                    .scrollIndicators(.visible)
+                    .frame(
+                        height: CGFloat(min(managedItems.count, managedViewportRowCount))
+                            * TempraLayout.processRowHeight + 8
+                    )
+                }
             }
         }
+        .padding(.bottom, 4)
     }
 
     private func managedRow(_ item: AppDisplayItem) -> some View {
@@ -800,19 +868,20 @@ struct MenuBarView: View {
     }
 
     private var emptyState: some View {
-        VStack(spacing: 4) {
+        VStack(spacing: 6) {
             Image(systemName: emptySymbol)
-                .font(.system(size: 17))
-                .foregroundStyle(.secondary)
+                .font(.system(size: 20, weight: .regular))
+                .foregroundStyle(TempraPalette.tertiaryText)
             Text(emptyTitle)
-                .font(.system(size: 12, weight: .medium))
+                .font(.system(size: 13, weight: .semibold))
             Text(emptyDescription)
-                .font(.system(size: 10))
-                .foregroundStyle(.secondary)
+                .font(.system(size: 11))
+                .foregroundStyle(TempraPalette.secondaryText)
                 .multilineTextAlignment(.center)
         }
         .frame(maxWidth: .infinity)
-        .padding(.vertical, 15)
+        .padding(.vertical, 28)
+        .padding(.horizontal, 18)
     }
 
     @ViewBuilder
@@ -985,22 +1054,15 @@ struct MenuBarView: View {
     }
 
     private var footer: some View {
-        VStack(spacing: 4) {
-            HStack(spacing: 14) {
+        VStack(spacing: 8) {
+            HStack(spacing: 12) {
                 legendItem("Running", color: TempraPalette.running)
-                HStack(spacing: 3) {
-                    HStack(spacing: 2) {
-                        TempraStatusDot(color: TempraPalette.slowed, fill: .full, size: 7)
-                        TempraStatusDot(color: TempraPalette.waiting, fill: .full, size: 7)
-                    }
-                    Text("Slowed")
-                        .foregroundStyle(TempraPalette.secondaryText)
-                }
+                legendItem("Slowed", color: TempraPalette.slowed)
                 legendItem("Stopped", color: TempraPalette.stopped)
             }
 
             HStack(spacing: 4) {
-                Text("Profile:")
+                Text("Profile")
                     .foregroundStyle(TempraPalette.secondaryText)
 
                 Menu {
@@ -1029,7 +1091,7 @@ struct MenuBarView: View {
                     }
                 } label: {
                     Text(profileLabel)
-                        .foregroundStyle(TempraPalette.secondaryText)
+                        .foregroundStyle(TempraPalette.primaryText)
                 }
                 .menuStyle(.borderlessButton)
                 .menuIndicator(.visible)
@@ -1038,7 +1100,9 @@ struct MenuBarView: View {
             }
         }
         .font(TempraTypography.footer)
-        .frame(height: 48)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .frame(minHeight: 56)
     }
 
     private func legendItem(_ title: String, color: Color) -> some View {
@@ -1102,13 +1166,13 @@ struct MenuBarView: View {
 
     private var processHeading: String {
         switch scope {
-        case .rules: return "Saved Rules"
-        case .alerts: return "Needs Attention"
+        case .rules: return "Saved rules"
+        case .alerts: return "Needs attention"
         case .running:
             return switch presentation.processSort {
-            case .averageDescending, .currentDescending: "Highest CPU Processes"
-            case .averageAscending, .currentAscending: "Lowest CPU Processes"
-            case .name: "Processes by Name"
+            case .averageDescending, .currentDescending: "Highest CPU"
+            case .averageAscending, .currentAscending: "Lowest CPU"
+            case .name: "Processes"
             }
         }
     }
@@ -1216,9 +1280,9 @@ struct MenuBarView: View {
     }
 
     private var managedSectionTitle: String {
-        if !displayedManagementEnabled { return "MANAGEMENT OFF" }
-        if activeManagementPauseUntil != nil { return "MANAGEMENT PAUSED" }
-        return "TAMED PROCESSES"
+        if !displayedManagementEnabled { return "Management off" }
+        if activeManagementPauseUntil != nil { return "Management paused" }
+        return "Managed apps"
     }
 
     private var profileLabel: String {

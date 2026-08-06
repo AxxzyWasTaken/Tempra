@@ -67,9 +67,9 @@ struct ProcessRowView: View {
                 Image(nsImage: item.icon)
                     .resizable()
                     .scaledToFit()
-                    .frame(width: 16, height: 16)
+                    .frame(width: 18, height: 18)
 
-                HStack(spacing: 3) {
+                HStack(spacing: 6) {
                     Text(item.name)
                         .font(TempraTypography.process)
                         .lineLimit(1)
@@ -80,6 +80,12 @@ struct ProcessRowView: View {
                             .font(TempraTypography.ruleTag)
                             .foregroundStyle(ruleTagColor)
                             .lineLimit(1)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(
+                                ruleTagColor.opacity(0.12),
+                                in: Capsule()
+                            )
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -92,7 +98,10 @@ struct ProcessRowView: View {
             .padding(.horizontal, TempraLayout.processRowHorizontalInset)
             .frame(height: TempraLayout.processRowHeight)
             .contentShape(Rectangle())
-            .background(isSelected ? TempraPalette.selectedRow : Color.clear)
+            .background(
+                isSelected ? TempraPalette.selectedRow : Color.clear,
+                in: RoundedRectangle(cornerRadius: 8, style: .continuous)
+            )
         }
         .buttonStyle(.plain)
         .opacity(item.isRunning ? 1 : 0.58)
@@ -103,7 +112,7 @@ struct ProcessRowView: View {
     private var statusIndicator: some View {
         if item.isPlayingAudio {
             Image(systemName: "speaker.wave.2.fill")
-                .font(.system(size: 9))
+                .font(.system(size: 10))
                 .foregroundStyle(TempraPalette.tertiaryText)
                 .help("Playing audio")
         } else {
@@ -120,20 +129,20 @@ struct ProcessRowView: View {
 
     private var ruleTag: String? {
         if item.isSoundSourceComponent {
-            return "· audio"
+            return "audio"
         }
         if isSystemProcess {
-            return "· system"
+            return "system"
         }
         if item.isStandaloneProcess {
-            return "· process"
+            return "process"
         }
-        guard let rule = item.rule else { return item.isService ? "· service" : nil }
-        guard rule.isEnabled, item.status != .disabled else { return "· off" }
+        guard let rule = item.rule else { return item.isService ? "service" : nil }
+        guard rule.isEnabled, item.status != .disabled else { return "off" }
         return switch rule.action {
-        case .none: rule.runOnEfficiencyCores ? "· efficient" : nil
+        case .none: rule.runOnEfficiencyCores ? "efficient" : nil
         case .limit: "< \(Int(rule.limitPercent))%"
-        case .pause: "· paused"
+        case .pause: "paused"
         }
     }
 
@@ -178,9 +187,9 @@ struct ManagedProcessRowView: View {
                 Image(nsImage: item.icon)
                     .resizable()
                     .scaledToFit()
-                    .frame(width: 16, height: 16)
+                    .frame(width: 18, height: 18)
 
-                HStack(spacing: 3) {
+                HStack(spacing: 6) {
                     Text(item.name)
                         .font(TempraTypography.process)
                         .lineLimit(1)
@@ -190,6 +199,12 @@ struct ManagedProcessRowView: View {
                             .font(TempraTypography.ruleTag)
                             .foregroundStyle(TempraPalette.secondaryText)
                             .lineLimit(1)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(
+                                TempraPalette.secondaryControlFill,
+                                in: Capsule()
+                            )
                     }
                 }
 
@@ -204,7 +219,10 @@ struct ManagedProcessRowView: View {
             .padding(.horizontal, TempraLayout.processRowHorizontalInset)
             .frame(height: TempraLayout.processRowHeight)
             .contentShape(Rectangle())
-            .background(isSelected ? TempraPalette.selectedRow : Color.clear)
+            .background(
+                isSelected ? TempraPalette.selectedRow : Color.clear,
+                in: RoundedRectangle(cornerRadius: 8, style: .continuous)
+            )
         }
         .buttonStyle(.plain)
         .opacity(item.isRunning ? 1 : 0.58)
@@ -217,11 +235,11 @@ struct ManagedProcessRowView: View {
 
     private var ruleTag: String? {
         guard let rule = item.rule else { return nil }
-        guard rule.isEnabled, item.status != .disabled else { return "· off" }
+        guard rule.isEnabled, item.status != .disabled else { return "off" }
         return switch rule.action {
-        case .none: rule.runOnEfficiencyCores ? "· efficient" : nil
+        case .none: rule.runOnEfficiencyCores ? "efficient" : nil
         case .limit: "< \(Int(rule.limitPercent))%"
-        case .pause: "· paused"
+        case .pause: "paused"
         }
     }
 

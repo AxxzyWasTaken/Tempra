@@ -129,7 +129,7 @@ struct AppCPUHistoryChartView: View {
             .chartPlotStyle { plotArea in
                 plotArea
                     .background(TempraPalette.chartPlotFill)
-                    .border(TempraPalette.chartBorder, width: 0.7)
+                    .border(TempraPalette.chartBorder, width: 0.5)
             }
             .chartXAxis {
                 AxisMarks(values: .automatic(desiredCount: 2)) { value in
@@ -167,10 +167,10 @@ struct AppCPUHistoryChartView: View {
         .padding(.horizontal, 6)
         .padding(.top, 7)
         .padding(.bottom, 4)
-        .frame(height: 108)
+        .frame(height: 112)
         .background(
             TempraPalette.chartFill,
-            in: RoundedRectangle(cornerRadius: 7, style: .continuous)
+            in: RoundedRectangle(cornerRadius: 10, style: .continuous)
         )
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Application CPU history for \(range.menuTitle.lowercased())")
