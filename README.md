@@ -169,8 +169,18 @@ distribution.
    ```
 
 The script stops if Developer ID signing, notarization, stapling, Gatekeeper
-assessment, or GitHub authentication fails. It does not produce an unsigned or
-unnotarized release artifact.
+assessment, or GitHub authentication fails.
+
+If an Apple Developer Program membership is not available, you can create an
+explicitly labeled, unnotarized DMG with an Apple Development identity:
+
+```sh
+./script/package_release_dmg.sh --unnotarized --upload
+```
+
+The file name includes `unnotarized`. macOS can warn users or block the app
+because Apple did not notarize it. The script does not use this mode unless you
+specify `--unnotarized`.
 
 ## License
 
