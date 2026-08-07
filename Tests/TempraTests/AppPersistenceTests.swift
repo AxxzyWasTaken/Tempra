@@ -563,6 +563,7 @@ struct AppPersistenceTests {
             let initialData = try #require(
                 defaults.data(forKey: ManagementLedger.storageKey)
             )
+            #expect(ManagementLedgerStorageCodec.isEncoded(initialData))
 
             try ledger.transition(
                 bundleIdentifier: "example.app",
@@ -588,6 +589,55 @@ struct AppPersistenceTests {
             #expect(defaults.data(forKey: ManagementLedger.storageKey) == initialData)
             try ledger.heartbeat(at: startedAt.addingTimeInterval(21))
             #expect(defaults.data(forKey: ManagementLedger.storageKey) != initialData)
+        }
+    }
+
+    @Test("Legacy management history is compressed on launch")
+    func legacyManagementHistoryIsCompressed() throws {
+        try withDefaults { defaults in
+            let startedAt = Date(timeIntervalSince1970: 100)
+            let originalLedger = try ManagementLedger(defaults: defaults)
+            try originalLedger.transition(
+                bundleIdentifier: "example.app",
+                displayName: "Example",
+                applicationURL: nil,
+                status: .limited(10),
+                at: startedAt
+            )
+            try originalLedger.heartbeat(at: startedAt.addingTimeInterval(1))
+            let encoded = try #require(
+                defaults.data(forKey: ManagementLedger.storageKey)
+            )
+            let legacyData = try ManagementLedgerStorageCodec.decode(encoded)
+            defaults.set(legacyData, forKey: ManagementLedger.storageKey)
+
+            let migratedLedger = try ManagementLedger(
+                defaults: defaults,
+                now: startedAt.addingTimeInterval(2)
+            )
+            try migratedLedger.persistLoadedState()
+            let migratedData = try #require(
+                defaults.data(forKey: ManagementLedger.storageKey)
+            )
+
+            #expect(!ManagementLedgerStorageCodec.isEncoded(legacyData))
+            #expect(ManagementLedgerStorageCodec.isEncoded(migratedData))
+            #expect(migratedData.count < legacyData.count)
+            #expect(migratedLedger.interventionCount(
+                since: .distantPast,
+                now: startedAt.addingTimeInterval(2)
+            ) == 1)
+        }
+    }
+
+    @Test("Management history rejects an oversized decoded value")
+    func oversizedManagementHistoryIsRejected() {
+        let oversized = Data(
+            count: ManagementLedgerStorageCodec.maximumDecodedBytes + 1
+        )
+
+        #expect(throws: AppPersistenceError.self) {
+            _ = try ManagementLedgerStorageCodec.encode(oversized)
         }
     }
 

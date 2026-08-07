@@ -1373,6 +1373,46 @@ struct ProcessControllerSchedulingTests {
         await controller.shutdown()
     }
 
+    @Test("A lower-priority failure keeps the exact helper error")
+    func lowerPriorityFailureKeepsHelperError() async {
+        let system = RecordingProcessSystem()
+        let controlledProcess = process(208)
+        let failureDetail = "The running helper does not match this app build."
+        system.failLowerPriority(with: failureDetail)
+        let controller = ProcessController(
+            system: system,
+            frontmostProvider: { nil }
+        )
+        var activityDetails: [String] = []
+        await controller.setEventHandler { event in
+            guard case .activity(_, _, .error, let detail) = event else { return }
+            activityDetails.append(detail)
+        }
+        let rule = AppRule(
+            bundleIdentifier: identifier,
+            displayName: "Example",
+            action: .limit,
+            lowersCPUPriority: true,
+            limitPercent: 10,
+            delaySeconds: 0
+        )
+
+        let snapshot = await controller.update(
+            targets: [target(
+                processIdentities: [controlledProcess],
+                launchedAt: oldLaunchDate,
+                cpuPercent: 100
+            )],
+            rules: [identifier: rule],
+            isEnabled: true,
+            revision: 1
+        )
+
+        #expect(snapshot.statuses[identifier] == .unavailable)
+        #expect(activityDetails == [failureDetail])
+        await controller.shutdown()
+    }
+
     @Test("Lower priority respects launch grace")
     func recentLaunchDefersLowerPriority() async {
         let controller = ProcessController()
@@ -3063,6 +3103,7 @@ private final class RecordingProcessSystem: ProcessSystemControlling, @unchecked
     private var stopAutomaticResumeIntervals: [ProcessIdentity: TimeInterval] = [:]
     private var resumeAttempts: [Set<ProcessIdentity>] = []
     private var lowerPriorityAttempts: [Set<ProcessIdentity>] = []
+    private var lowerPriorityFailureDescription: String?
     private var priorityRestoreAttempts: [Set<ProcessIdentity>] = []
     private var terminationAttempts: [Set<ProcessIdentity>] = []
     private var cpuTimeNanoseconds: UInt64 = 0
@@ -3147,6 +3188,12 @@ private final class RecordingProcessSystem: ProcessSystemControlling, @unchecked
     func failPriorityRestore(for process: ProcessIdentity, attempts: Int) {
         withLock {
             priorityRestoreFailuresRemaining[process] = max(0, attempts)
+        }
+    }
+
+    func failLowerPriority(with description: String) {
+        withLock {
+            lowerPriorityFailureDescription = description
         }
     }
 
@@ -3236,6 +3283,12 @@ private final class RecordingProcessSystem: ProcessSystemControlling, @unchecked
         withLock {
             operationHistory.append(.lowerPriority(processes))
             lowerPriorityAttempts.append(processes)
+            if let lowerPriorityFailureDescription {
+                return ProcessOperationResult(
+                    failed: processes,
+                    failureDescription: lowerPriorityFailureDescription
+                )
+            }
             return ProcessOperationResult(applied: processes)
         }
     }

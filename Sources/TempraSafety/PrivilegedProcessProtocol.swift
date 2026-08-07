@@ -129,6 +129,8 @@ public struct PrivilegedProcessResponse: Codable, Equatable, Sendable {
 
 public enum CodeSigningRequirementError: LocalizedError, Sendable {
     case signingInformationUnavailable
+    case staticCodeUnavailable
+    case codeIdentifierUnavailable
     case teamIdentifierUnavailable
     case invalidIdentifier
 
@@ -136,6 +138,10 @@ public enum CodeSigningRequirementError: LocalizedError, Sendable {
         switch self {
         case .signingInformationUnavailable:
             "The code-signing information is unavailable."
+        case .staticCodeUnavailable:
+            "The bundled helper code signature is unavailable."
+        case .codeIdentifierUnavailable:
+            "The bundled helper code identifier is unavailable."
         case .teamIdentifierUnavailable:
             "The app does not have a code-signing team identifier."
         case .invalidIdentifier:
@@ -145,6 +151,31 @@ public enum CodeSigningRequirementError: LocalizedError, Sendable {
 }
 
 public enum TempraCodeSigningRequirement {
+    public static func staticCodeIdentifier(at executableURL: URL) throws -> Data {
+        var staticCode: SecStaticCode?
+        guard SecStaticCodeCreateWithPath(
+            executableURL as CFURL,
+            [],
+            &staticCode
+        ) == errSecSuccess,
+              let staticCode else {
+            throw CodeSigningRequirementError.staticCodeUnavailable
+        }
+
+        var rawInformation: CFDictionary?
+        guard SecCodeCopySigningInformation(
+            staticCode,
+            SecCSFlags(rawValue: kSecCSSigningInformation),
+            &rawInformation
+        ) == errSecSuccess,
+              let information = rawInformation as? [CFString: Any],
+              let identifier = information[kSecCodeInfoUnique] as? Data,
+              !identifier.isEmpty else {
+            throw CodeSigningRequirementError.codeIdentifierUnavailable
+        }
+        return identifier
+    }
+
     public static func peerRequirement(identifier: String) throws -> String {
         let allowedIdentifierCharacters = CharacterSet(
             charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-"

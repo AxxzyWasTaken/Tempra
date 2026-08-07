@@ -2,6 +2,7 @@ import AppKit
 import Combine
 import Foundation
 import ServiceManagement
+import TempraSafety
 import Testing
 @testable import Tempra
 
@@ -87,6 +88,126 @@ struct UIDerivationTests {
         #expect(status.actionTitle == "Retry Connection")
         #expect(status.message?.hasPrefix("Administrator access is enabled") == true)
         #expect(PrivilegedControlStatus.unavailable("Missing").actionTitle == nil)
+    }
+
+    @Test("A changed privileged helper is replaced before the next request")
+    func changedPrivilegedHelperIsReplaced() async throws {
+        let oldIdentity = PrivilegedHelperRegistrationIdentity(
+            executableCodeIdentifier: Data([0x01]),
+            servicePropertyList: Data("old".utf8)
+        )
+        let currentIdentity = PrivilegedHelperRegistrationIdentity(
+            executableCodeIdentifier: Data([0x02]),
+            servicePropertyList: Data("current".utf8)
+        )
+        var currentStatus = SMAppService.Status.enabled
+        var registeredIdentityData: Data? = try JSONEncoder().encode(oldIdentity)
+        var lifecycleActions: [String] = []
+        var identityReadCount = 0
+        let lifecycle = PrivilegedHelperLifecycle(
+            serviceStatus: { currentStatus },
+            registerService: {
+                lifecycleActions.append("register")
+                currentStatus = .enabled
+            },
+            unregisterService: {
+                lifecycleActions.append("unregister")
+                currentStatus = .notRegistered
+            },
+            currentRegistrationIdentity: {
+                identityReadCount += 1
+                return currentIdentity
+            },
+            loadRegisteredIdentityData: { registeredIdentityData },
+            saveRegisteredIdentityData: { registeredIdentityData = $0 }
+        )
+
+        let firstPreparation = try await lifecycle.prepareForRequest()
+        #expect(firstPreparation == PrivilegedHelperPreparation(didRefresh: true))
+        #expect(lifecycleActions == ["unregister", "register"])
+        #expect(try JSONDecoder().decode(
+            PrivilegedHelperRegistrationIdentity.self,
+            from: #require(registeredIdentityData)
+        ) == currentIdentity)
+
+        let secondPreparation = try await lifecycle.prepareForRequest()
+        #expect(secondPreparation.didRefresh == false)
+        #expect(lifecycleActions == ["unregister", "register"])
+        #expect(identityReadCount == 1)
+    }
+
+    @Test("A missing helper registration is restored before the next request")
+    func missingPrivilegedHelperRegistrationIsRestored() async throws {
+        let currentIdentity = PrivilegedHelperRegistrationIdentity(
+            executableCodeIdentifier: Data([0x03]),
+            servicePropertyList: Data("current".utf8)
+        )
+        var currentStatus = SMAppService.Status.notRegistered
+        var registeredIdentityData: Data?
+        var lifecycleActions: [String] = []
+        let lifecycle = PrivilegedHelperLifecycle(
+            serviceStatus: { currentStatus },
+            registerService: {
+                lifecycleActions.append("register")
+                currentStatus = .enabled
+            },
+            unregisterService: {
+                lifecycleActions.append("unregister")
+            },
+            currentRegistrationIdentity: { currentIdentity },
+            loadRegisteredIdentityData: { registeredIdentityData },
+            saveRegisteredIdentityData: { registeredIdentityData = $0 }
+        )
+
+        let preparation = try await lifecycle.prepareForRequest()
+
+        #expect(preparation.didRefresh)
+        #expect(lifecycleActions == ["register"])
+        #expect(try JSONDecoder().decode(
+            PrivilegedHelperRegistrationIdentity.self,
+            from: #require(registeredIdentityData)
+        ) == currentIdentity)
+    }
+
+    @Test("Helper registration state uses a bounded file")
+    func privilegedHelperRegistrationStore() throws {
+        let directoryURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let store = PrivilegedHelperRegistrationStore(
+            fileURL: directoryURL.appendingPathComponent("registration.json")
+        )
+        let identityData = Data("current-helper".utf8)
+
+        #expect(try store.load() == nil)
+        try store.save(identityData)
+        #expect(try store.load() == identityData)
+
+        #expect(throws: PrivilegedHelperRegistrationStoreError.self) {
+            try store.save(Data(
+                count: PrivilegedProcessProtocol.maximumFrameBytes + 1
+            ))
+        }
+
+        try FileManager.default.removeItem(at: directoryURL)
+    }
+
+    @Test("Automatic helper preparation does not open System Settings")
+    func automaticPrivilegedHelperPreparationDoesNotOpenSettings() async {
+        var currentStatus = SMAppService.Status.enabled
+        var settingsOpenCount = 0
+        let manager = PrivilegedHelperManager(
+            serviceStatus: { currentStatus },
+            bundledServiceIsPresent: { true },
+            registerService: {},
+            openApprovalSettings: { settingsOpenCount += 1 },
+            pingService: {
+                currentStatus = .requiresApproval
+                throw PrivilegedProcessClientError.serviceRequiresApproval
+            }
+        )
+
+        #expect(await manager.prepareRegisteredService() == .requiresApproval)
+        #expect(settingsOpenCount == 0)
     }
 
     @Test("Process scopes preserve search and every sort order")

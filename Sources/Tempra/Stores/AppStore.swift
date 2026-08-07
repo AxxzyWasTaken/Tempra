@@ -208,6 +208,11 @@ final class AppStore: ObservableObject {
             )
             configureMonitoringDemand(refreshImmediately: false)
             refresh()
+            if privilegedControlStatus.isEnabled {
+                Task { [weak self] in
+                    await self?.prepareRegisteredPrivilegedService()
+                }
+            }
         }
     }
 
@@ -442,6 +447,13 @@ final class AppStore: ObservableObject {
             refresh()
         }
         return status
+    }
+
+    private func prepareRegisteredPrivilegedService() async {
+        let status = await privilegedHelperManager.prepareRegisteredService()
+        guard !hasBegunShutdown else { return }
+        privilegedControlStatus = status
+        refresh()
     }
 
     var shouldPresentPrivilegedAccessOnboarding: Bool {

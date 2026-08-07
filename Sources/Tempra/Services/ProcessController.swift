@@ -1275,7 +1275,8 @@ actor ProcessController {
                 loweredByTempra[identifier] = existing.union(restoreResult.failed)
                 await markUnavailable(
                     identifier,
-                    detail: "Tempra could not restore network or critical-activity processes to normal priority."
+                    detail: restoreResult.failureDescription
+                        ?? "Tempra could not restore network or critical-activity processes to normal priority."
                 )
                 return false
             }
@@ -1293,7 +1294,8 @@ actor ProcessController {
             loweredByTempra[identifier] = rollback.failed
             await markUnavailable(
                 identifier,
-                detail: "Tempra could not lower the priority of every process."
+                detail: result.failureDescription
+                    ?? "Tempra could not lower the priority of every process."
             )
             return false
         }

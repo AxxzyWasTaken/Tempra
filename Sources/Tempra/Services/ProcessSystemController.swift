@@ -6,6 +6,7 @@ struct ProcessOperationResult: Equatable, Sendable {
     var applied: Set<ProcessIdentity> = []
     var stale: Set<ProcessIdentity> = []
     var failed: Set<ProcessIdentity> = []
+    var failureDescription: String?
 
     var succeeded: Bool {
         !applied.isEmpty && failed.isEmpty
@@ -252,6 +253,7 @@ struct RoutedProcessSystemController: ProcessSystemControlling {
             result.failed.formUnion(privilegedResult.failed)
         } catch {
             result.failed.formUnion(privilegedProcesses)
+            result.failureDescription = error.localizedDescription
         }
         return result
     }
@@ -264,7 +266,10 @@ struct RoutedProcessSystemController: ProcessSystemControlling {
         do {
             return try await privileged.perform(action, processes: processes)
         } catch {
-            return ProcessOperationResult(failed: processes)
+            return ProcessOperationResult(
+                failed: processes,
+                failureDescription: error.localizedDescription
+            )
         }
     }
 

@@ -44,8 +44,10 @@ enum PrivilegedControlStatus: Equatable, Sendable {
 
 enum PrivilegedProcessClientError: LocalizedError, Sendable {
     case serviceNotEnabled
+    case serviceRequiresApproval
     case invalidCodeSignature(String)
     case connectionFailed(String)
+    case helperUpdateFailed(String)
     case timedOut
     case invalidResponse
     case remoteFailure(String)
@@ -54,10 +56,14 @@ enum PrivilegedProcessClientError: LocalizedError, Sendable {
         switch self {
         case .serviceNotEnabled:
             "Administrator access is not enabled."
+        case .serviceRequiresApproval:
+            "Approve Tempra in System Settings › General › Login Items."
         case .invalidCodeSignature(let detail):
             "Tempra could not verify its privileged helper: \(detail)"
         case .connectionFailed(let detail):
             "Tempra could not connect to its privileged helper: \(detail)"
+        case .helperUpdateFailed(let detail):
+            "Tempra could not update its privileged helper: \(detail)"
         case .timedOut:
             "The privileged helper did not respond in time."
         case .invalidResponse:
@@ -100,14 +106,361 @@ private final class XPCReplyGate: @unchecked Sendable {
     }
 }
 
+struct PrivilegedHelperRegistrationIdentity: Codable, Equatable, Sendable {
+    let executableCodeIdentifier: Data
+    let servicePropertyList: Data
+}
+
+struct PrivilegedHelperPreparation: Equatable, Sendable {
+    let didRefresh: Bool
+}
+
+enum PrivilegedHelperRegistrationStoreError: LocalizedError, Sendable {
+    case identityDataTooLarge
+
+    var errorDescription: String? {
+        switch self {
+        case .identityDataTooLarge:
+            "The privileged-helper registration state is too large."
+        }
+    }
+}
+
+struct PrivilegedHelperRegistrationStore: Sendable {
+    let fileURL: URL
+
+    static func live() throws -> Self {
+        let applicationSupportURL = try FileManager.default.url(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask,
+            appropriateFor: nil,
+            create: false
+        )
+        return Self(fileURL: applicationSupportURL
+            .appendingPathComponent(
+                PrivilegedProcessProtocol.applicationIdentifier,
+                isDirectory: true
+            )
+            .appendingPathComponent("privileged-helper-registration.json"))
+    }
+
+    func load() throws -> Data? {
+        let handle: FileHandle
+        do {
+            handle = try FileHandle(forReadingFrom: fileURL)
+        } catch let error as CocoaError where
+            error.code == .fileNoSuchFile || error.code == .fileReadNoSuchFile {
+            return nil
+        }
+
+        let data: Data
+        do {
+            data = try handle.read(
+                upToCount: PrivilegedProcessProtocol.maximumFrameBytes + 1
+            ) ?? Data()
+        } catch {
+            let readError = error
+            do {
+                try handle.close()
+            } catch {
+                throw error
+            }
+            throw readError
+        }
+        try handle.close()
+
+        guard data.count <= PrivilegedProcessProtocol.maximumFrameBytes else {
+            throw PrivilegedHelperRegistrationStoreError.identityDataTooLarge
+        }
+        return data
+    }
+
+    func save(_ data: Data) throws {
+        let fileManager = FileManager.default
+        guard data.count <= PrivilegedProcessProtocol.maximumFrameBytes else {
+            throw PrivilegedHelperRegistrationStoreError.identityDataTooLarge
+        }
+        try fileManager.createDirectory(
+            at: fileURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try data.write(to: fileURL, options: .atomic)
+    }
+}
+
+enum PrivilegedHelperLifecycleError: LocalizedError, Sendable {
+    case serviceNotEnabled
+    case requiresApproval
+    case unregistrationFailed(String)
+    case registrationFailed(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .serviceNotEnabled:
+            "Administrator access is not enabled."
+        case .requiresApproval:
+            "Approve Tempra in System Settings › General › Login Items."
+        case .unregistrationFailed(let detail):
+            "macOS could not unregister the old helper: \(detail)"
+        case .registrationFailed(let detail):
+            "macOS could not register the current helper: \(detail)"
+        }
+    }
+}
+
+private enum PrivilegedHelperBundle {
+    private static let helperExecutableName = "TempraPrivilegedHelper"
+
+    static var servicePropertyListURL: URL {
+        contentsURL
+            .appendingPathComponent("Library/LaunchDaemons", isDirectory: true)
+            .appendingPathComponent(PrivilegedProcessProtocol.daemonPlistName)
+    }
+
+    static var helperExecutableURL: URL {
+        contentsURL
+            .appendingPathComponent("Library/HelperTools", isDirectory: true)
+            .appendingPathComponent(helperExecutableName)
+    }
+
+    static func containsBundledService() -> Bool {
+        FileManager.default.fileExists(atPath: servicePropertyListURL.path)
+            && FileManager.default.isExecutableFile(atPath: helperExecutableURL.path)
+    }
+
+    static func registrationIdentity() throws -> PrivilegedHelperRegistrationIdentity {
+        PrivilegedHelperRegistrationIdentity(
+            executableCodeIdentifier: try TempraCodeSigningRequirement
+                .staticCodeIdentifier(at: helperExecutableURL),
+            servicePropertyList: try Data(
+                contentsOf: servicePropertyListURL,
+                options: .mappedIfSafe
+            )
+        )
+    }
+
+    private static var contentsURL: URL {
+        Bundle.main.bundleURL.appendingPathComponent("Contents", isDirectory: true)
+    }
+}
+
+@MainActor
+final class PrivilegedHelperLifecycle {
+    static let shared = PrivilegedHelperLifecycle()
+
+    private let serviceStatus: () -> SMAppService.Status
+    private let registerService: () throws -> Void
+    private let unregisterService: () async throws -> Void
+    private let currentRegistrationIdentity:
+        () async throws -> PrivilegedHelperRegistrationIdentity
+    private let loadRegisteredIdentityData: () async throws -> Data?
+    private let saveRegisteredIdentityData: (Data) async throws -> Void
+    private var cachedCurrentIdentity: PrivilegedHelperRegistrationIdentity?
+    private var cachedRegisteredIdentity: PrivilegedHelperRegistrationIdentity?
+    private var hasLoadedRegisteredIdentity = false
+    private var pendingPreparation:
+        (id: UUID, task: Task<PrivilegedHelperPreparation, any Error>)?
+
+    init() {
+        let service = SMAppService.daemon(
+            plistName: PrivilegedProcessProtocol.daemonPlistName
+        )
+        serviceStatus = { service.status }
+        registerService = { try service.register() }
+        unregisterService = { try await service.unregister() }
+        currentRegistrationIdentity = {
+            try await Task.detached(priority: .utility) {
+                try PrivilegedHelperBundle.registrationIdentity()
+            }.value
+        }
+        loadRegisteredIdentityData = {
+            try await Task.detached(priority: .utility) {
+                try PrivilegedHelperRegistrationStore.live().load()
+            }.value
+        }
+        saveRegisteredIdentityData = { identityData in
+            try await Task.detached(priority: .utility) {
+                try PrivilegedHelperRegistrationStore.live().save(identityData)
+            }.value
+        }
+    }
+
+    init(
+        serviceStatus: @escaping () -> SMAppService.Status,
+        registerService: @escaping () throws -> Void,
+        unregisterService: @escaping () async throws -> Void,
+        currentRegistrationIdentity:
+            @escaping () async throws -> PrivilegedHelperRegistrationIdentity,
+        loadRegisteredIdentityData: @escaping () async throws -> Data?,
+        saveRegisteredIdentityData: @escaping (Data) async throws -> Void
+    ) {
+        self.serviceStatus = serviceStatus
+        self.registerService = registerService
+        self.unregisterService = unregisterService
+        self.currentRegistrationIdentity = currentRegistrationIdentity
+        self.loadRegisteredIdentityData = loadRegisteredIdentityData
+        self.saveRegisteredIdentityData = saveRegisteredIdentityData
+    }
+
+    func registerCurrentService() async throws {
+        let identity = try await resolvedCurrentIdentity()
+        do {
+            try registerService()
+        } catch {
+            if serviceStatus() == .requiresApproval {
+                try await saveRegisteredIdentity(identity)
+            }
+            throw error
+        }
+        try await saveRegisteredIdentity(identity)
+    }
+
+    func prepareForRequest() async throws -> PrivilegedHelperPreparation {
+        if let pendingPreparation {
+            return try await pendingPreparation.task.value
+        }
+
+        let preparationID = UUID()
+        let task = Task { @MainActor [self] in
+            try await performPreparation()
+        }
+        pendingPreparation = (preparationID, task)
+        do {
+            let result = try await task.value
+            clearPendingPreparation(preparationID)
+            return result
+        } catch {
+            clearPendingPreparation(preparationID)
+            throw error
+        }
+    }
+
+    private func performPreparation() async throws -> PrivilegedHelperPreparation {
+        let initialStatus = serviceStatus()
+        switch initialStatus {
+        case .enabled, .notRegistered, .notFound:
+            break
+        case .requiresApproval:
+            throw PrivilegedHelperLifecycleError.requiresApproval
+        @unknown default:
+            throw PrivilegedHelperLifecycleError.serviceNotEnabled
+        }
+
+        let currentIdentity = try await resolvedCurrentIdentity()
+        if initialStatus == .notRegistered || initialStatus == .notFound {
+            try await registerForRequest(currentIdentity)
+            return try validatedPreparation(didRefresh: true)
+        }
+
+        if try await loadRegisteredIdentity() == currentIdentity {
+            return PrivilegedHelperPreparation(didRefresh: false)
+        }
+
+        do {
+            try await unregisterService()
+        } catch {
+            throw PrivilegedHelperLifecycleError.unregistrationFailed(
+                error.localizedDescription
+            )
+        }
+
+        do {
+            try registerService()
+        } catch {
+            if serviceStatus() == .requiresApproval {
+                try await saveRegisteredIdentity(currentIdentity)
+                throw PrivilegedHelperLifecycleError.requiresApproval
+            }
+            throw PrivilegedHelperLifecycleError.registrationFailed(
+                error.localizedDescription
+            )
+        }
+        try await saveRegisteredIdentity(currentIdentity)
+
+        return try validatedPreparation(didRefresh: true)
+    }
+
+    private func validatedPreparation(
+        didRefresh: Bool
+    ) throws -> PrivilegedHelperPreparation {
+        switch serviceStatus() {
+        case .enabled:
+            return PrivilegedHelperPreparation(didRefresh: didRefresh)
+        case .requiresApproval:
+            throw PrivilegedHelperLifecycleError.requiresApproval
+        case .notRegistered, .notFound:
+            throw PrivilegedHelperLifecycleError.serviceNotEnabled
+        @unknown default:
+            throw PrivilegedHelperLifecycleError.serviceNotEnabled
+        }
+    }
+
+    private func registerForRequest(
+        _ identity: PrivilegedHelperRegistrationIdentity
+    ) async throws {
+        do {
+            try registerService()
+        } catch {
+            if serviceStatus() == .requiresApproval {
+                try await saveRegisteredIdentity(identity)
+                throw PrivilegedHelperLifecycleError.requiresApproval
+            }
+            throw PrivilegedHelperLifecycleError.registrationFailed(
+                error.localizedDescription
+            )
+        }
+        try await saveRegisteredIdentity(identity)
+    }
+
+    private func loadRegisteredIdentity() async throws
+        -> PrivilegedHelperRegistrationIdentity? {
+        if hasLoadedRegisteredIdentity { return cachedRegisteredIdentity }
+        let data = try await loadRegisteredIdentityData()
+        hasLoadedRegisteredIdentity = true
+        guard let data else { return nil }
+        cachedRegisteredIdentity = try? JSONDecoder().decode(
+            PrivilegedHelperRegistrationIdentity.self,
+            from: data
+        )
+        return cachedRegisteredIdentity
+    }
+
+    private func resolvedCurrentIdentity() async throws
+        -> PrivilegedHelperRegistrationIdentity {
+        if let cachedCurrentIdentity { return cachedCurrentIdentity }
+        let identity = try await currentRegistrationIdentity()
+        cachedCurrentIdentity = identity
+        return identity
+    }
+
+    private func saveRegisteredIdentity(
+        _ identity: PrivilegedHelperRegistrationIdentity
+    ) async throws {
+        let data = try JSONEncoder().encode(identity)
+        try await saveRegisteredIdentityData(data)
+        cachedRegisteredIdentity = identity
+        hasLoadedRegisteredIdentity = true
+    }
+
+    private func clearPendingPreparation(_ preparationID: UUID) {
+        guard pendingPreparation?.id == preparationID else { return }
+        pendingPreparation = nil
+    }
+}
+
 actor PrivilegedProcessClient {
     static let shared = PrivilegedProcessClient()
 
     private var connection: NSXPCConnection?
     private let requestTimeout: Duration
+    private var lifecycle: PrivilegedHelperLifecycle?
 
-    init(requestTimeout: Duration = .seconds(4)) {
+    init(
+        requestTimeout: Duration = .seconds(4),
+        lifecycle: PrivilegedHelperLifecycle? = nil
+    ) {
         self.requestTimeout = requestTimeout
+        self.lifecycle = lifecycle
     }
 
     func ping() async throws {
@@ -267,10 +620,29 @@ actor PrivilegedProcessClient {
     private func send(
         _ request: PrivilegedProcessRequest
     ) async throws -> PrivilegedProcessResponse {
-        guard SMAppService.daemon(
-            plistName: PrivilegedProcessProtocol.daemonPlistName
-        ).status == .enabled else {
-            throw PrivilegedProcessClientError.serviceNotEnabled
+        let lifecycle = await registrationLifecycle()
+        do {
+            let preparation = try await lifecycle.prepareForRequest()
+            if preparation.didRefresh {
+                invalidate()
+            }
+        } catch let error as PrivilegedHelperLifecycleError {
+            invalidate()
+            switch error {
+            case .serviceNotEnabled:
+                throw PrivilegedProcessClientError.serviceNotEnabled
+            case .requiresApproval:
+                throw PrivilegedProcessClientError.serviceRequiresApproval
+            case .unregistrationFailed, .registrationFailed:
+                throw PrivilegedProcessClientError.helperUpdateFailed(
+                    error.localizedDescription
+                )
+            }
+        } catch {
+            invalidate()
+            throw PrivilegedProcessClientError.helperUpdateFailed(
+                error.localizedDescription
+            )
         }
 
         let encoded = try JSONEncoder().encode(request)
@@ -337,6 +709,13 @@ actor PrivilegedProcessClient {
         return response
     }
 
+    private func registrationLifecycle() async -> PrivilegedHelperLifecycle {
+        if let lifecycle { return lifecycle }
+        let sharedLifecycle = await PrivilegedHelperLifecycle.shared
+        lifecycle = sharedLifecycle
+        return sharedLifecycle
+    }
+
     private func activeConnection() throws -> NSXPCConnection {
         if let connection { return connection }
 
@@ -371,11 +750,9 @@ actor PrivilegedProcessClient {
 
 @MainActor
 final class PrivilegedHelperManager {
-    private static let helperExecutableName = "TempraPrivilegedHelper"
-
     private let serviceStatus: () -> SMAppService.Status
     private let bundledServiceIsPresent: () -> Bool
-    private let registerService: () throws -> Void
+    private let registerService: () async throws -> Void
     private let openApprovalSettingsAction: () -> Void
     private let pingService: () async throws -> Void
 
@@ -383,9 +760,10 @@ final class PrivilegedHelperManager {
         let service = SMAppService.daemon(
             plistName: PrivilegedProcessProtocol.daemonPlistName
         )
+        let lifecycle = PrivilegedHelperLifecycle.shared
         serviceStatus = { service.status }
-        bundledServiceIsPresent = { Self.containsBundledService() }
-        registerService = { try service.register() }
+        bundledServiceIsPresent = { PrivilegedHelperBundle.containsBundledService() }
+        registerService = { try await lifecycle.registerCurrentService() }
         openApprovalSettingsAction = {
             SMAppService.openSystemSettingsLoginItems()
         }
@@ -395,7 +773,7 @@ final class PrivilegedHelperManager {
     init(
         serviceStatus: @escaping () -> SMAppService.Status,
         bundledServiceIsPresent: @escaping () -> Bool,
-        registerService: @escaping () throws -> Void,
+        registerService: @escaping () async throws -> Void,
         openApprovalSettings: @escaping () -> Void,
         pingService: @escaping () async throws -> Void
     ) {
@@ -449,7 +827,7 @@ final class PrivilegedHelperManager {
         }
         if currentServiceStatus == .notRegistered || currentServiceStatus == .notFound {
             do {
-                try registerService()
+                try await registerService()
             } catch {
                 if Self.isLaunchDeniedByUser(error) {
                     openApprovalSettingsAction()
@@ -468,31 +846,49 @@ final class PrivilegedHelperManager {
         }
         guard serviceStatus() == .enabled else { return status }
 
-        do {
-            try await pingService()
-            return .enabled
-        } catch {
-            return .helperUnavailable(error.localizedDescription)
+        return await verifyConnection(opensSettingsForApproval: true)
+    }
+
+    func prepareRegisteredService() async -> PrivilegedControlStatus {
+        let currentServiceStatus = serviceStatus()
+        guard bundledServiceIsPresent() else {
+            return Self.controlStatus(
+                serviceStatus: currentServiceStatus,
+                bundledServiceIsPresent: false
+            )
         }
+        guard currentServiceStatus == .enabled else { return status }
+        return await verifyConnection(opensSettingsForApproval: false)
     }
 
     func openApprovalSettings() {
         openApprovalSettingsAction()
     }
 
-    private static func containsBundledService() -> Bool {
-        let contentsURL = Bundle.main.bundleURL.appendingPathComponent(
-            "Contents",
-            isDirectory: true
-        )
-        let plistURL = contentsURL
-            .appendingPathComponent("Library/LaunchDaemons", isDirectory: true)
-            .appendingPathComponent(PrivilegedProcessProtocol.daemonPlistName)
-        let helperURL = contentsURL
-            .appendingPathComponent("Library/HelperTools", isDirectory: true)
-            .appendingPathComponent(helperExecutableName)
-        return FileManager.default.fileExists(atPath: plistURL.path)
-            && FileManager.default.isExecutableFile(atPath: helperURL.path)
+    private func verifyConnection(
+        opensSettingsForApproval: Bool
+    ) async -> PrivilegedControlStatus {
+        do {
+            try await pingService()
+            return .enabled
+        } catch {
+            if serviceStatus() == .requiresApproval
+                || Self.isApprovalRequired(error) {
+                if opensSettingsForApproval {
+                    openApprovalSettingsAction()
+                }
+                return .requiresApproval
+            }
+            return .helperUnavailable(error.localizedDescription)
+        }
+    }
+
+    private static func isApprovalRequired(_ error: any Error) -> Bool {
+        guard let clientError = error as? PrivilegedProcessClientError else {
+            return false
+        }
+        if case .serviceRequiresApproval = clientError { return true }
+        return false
     }
 
     private static func isLaunchDeniedByUser(_ error: any Error) -> Bool {

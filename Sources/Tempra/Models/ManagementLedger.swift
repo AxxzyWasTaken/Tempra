@@ -1,3 +1,4 @@
+import Compression
 import Foundation
 
 enum ManagementMetricCategory: String, Codable, Equatable, Sendable {
@@ -44,6 +45,92 @@ private struct ManagementLedgerState: Codable {
     var active: [ActiveManagementInterval] = []
 }
 
+enum ManagementLedgerStorageCodec {
+    static let maximumDecodedBytes = 16 * 1_024 * 1_024
+    static let maximumStoredBytes = 2 * 1_024 * 1_024
+    private static let header = Data("TEMPRA-LEDGER-LZFSE-1\n".utf8)
+
+    static func encode(_ data: Data) throws -> Data {
+        guard data.count <= maximumDecodedBytes else {
+            throw AppPersistenceError.storedDataTooLarge(
+                name: "management history"
+            )
+        }
+        let compressed = try transform(
+            data,
+            operation: .compress,
+            maximumOutputBytes: maximumStoredBytes - header.count
+        )
+        var stored = header
+        stored.append(compressed)
+        return stored
+    }
+
+    static func decode(_ data: Data) throws -> Data {
+        guard isEncoded(data) else {
+            guard data.count <= maximumDecodedBytes else {
+                throw AppPersistenceError.storedDataTooLarge(
+                    name: "management history"
+                )
+            }
+            return data
+        }
+        guard data.count <= maximumStoredBytes else {
+            throw AppPersistenceError.storedDataTooLarge(
+                name: "management history"
+            )
+        }
+        return try transform(
+            data.dropFirst(header.count),
+            operation: .decompress,
+            maximumOutputBytes: maximumDecodedBytes
+        )
+    }
+
+    static func isEncoded(_ data: Data) -> Bool {
+        data.starts(with: header)
+    }
+
+    private static func transform<DataInput: DataProtocol>(
+        _ data: DataInput,
+        operation: FilterOperation,
+        maximumOutputBytes: Int
+    ) throws -> Data {
+        var output = Data()
+        do {
+            let filter = try OutputFilter(
+                operation,
+                using: .lzfse
+            ) { chunk in
+                guard let chunk else { return }
+                guard output.count <= maximumOutputBytes,
+                      chunk.count <= maximumOutputBytes - output.count else {
+                    throw AppPersistenceError.storedDataTooLarge(
+                        name: "management history"
+                    )
+                }
+                output.append(chunk)
+            }
+            try filter.write(data)
+            try filter.finalize()
+            return output
+        } catch let error as AppPersistenceError {
+            throw error
+        } catch {
+            if operation == .compress {
+                throw AppPersistenceError.encodingFailed(
+                    name: "management history",
+                    detail: error.localizedDescription
+                )
+            }
+            throw AppPersistenceError.decodingFailed(
+                name: "management history",
+                detail: error.localizedDescription
+            )
+        }
+    }
+}
+
 @MainActor
 final class ManagementLedger {
     nonisolated static let storageKey = "temper.managementLedger.v1"
@@ -56,7 +143,6 @@ final class ManagementLedger {
     private var state: ManagementLedgerState
     private var heartbeatTask: Task<Void, Never>?
     private var hasUnpersistedChanges = false
-    private static let maximumStoredBytes = 16 * 1_024 * 1_024
 
     init(
         defaults: UserDefaults = .standard,
@@ -75,12 +161,14 @@ final class ManagementLedger {
             guard let data = storedValue as? Data else {
                 throw AppPersistenceError.invalidStoredType(name: "management history")
             }
-            guard data.count <= Self.maximumStoredBytes else {
-                throw AppPersistenceError.storedDataTooLarge(name: "management history")
-            }
             let stored: ManagementLedgerState
             do {
-                stored = try JSONDecoder().decode(ManagementLedgerState.self, from: data)
+                stored = try JSONDecoder().decode(
+                    ManagementLedgerState.self,
+                    from: ManagementLedgerStorageCodec.decode(data)
+                )
+            } catch let error as AppPersistenceError {
+                throw error
             } catch {
                 throw AppPersistenceError.decodingFailed(
                     name: "management history",
@@ -341,11 +429,9 @@ final class ManagementLedger {
                 detail: error.localizedDescription
             )
         }
-        guard data.count <= Self.maximumStoredBytes else {
-            throw AppPersistenceError.storedDataTooLarge(name: "management history")
-        }
-        defaults.set(data, forKey: storageKey)
-        guard defaults.data(forKey: storageKey) == data else {
+        let storedData = try ManagementLedgerStorageCodec.encode(data)
+        defaults.set(storedData, forKey: storageKey)
+        guard defaults.data(forKey: storageKey) == storedData else {
             throw AppPersistenceError.writeFailed(name: "management history")
         }
         hasUnpersistedChanges = false
