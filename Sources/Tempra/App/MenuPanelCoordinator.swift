@@ -38,6 +38,8 @@ struct MenuDismissalGate {
 }
 
 struct StatusItemState: Equatable {
+    static let cpuUpdateIntervalSeconds = 30
+
     let symbolName: String
     let title: String
     let toolTip: String
@@ -62,10 +64,36 @@ struct StatusItemState: Equatable {
             toolTip = "Tempra · Paused until "
                 + managementPauseUntil.formatted(date: .omitted, time: .shortened)
         } else if preferences.showsCPUUsageInMenuBar {
-            toolTip = "Tempra · \(roundedCPU)% total CPU"
+            toolTip = "Tempra · CPU updates every 30 seconds"
         } else {
             toolTip = "Tempra · Monitoring on demand"
         }
+    }
+}
+
+struct StatusItemRenderChanges: Equatable {
+    let updatesImage: Bool
+    let updatesTitle: Bool
+    let updatesToolTip: Bool
+    let updatesLength: Bool
+
+    init(previous: StatusItemState?, next: StatusItemState) {
+        guard let previous else {
+            updatesImage = true
+            updatesTitle = true
+            updatesToolTip = true
+            updatesLength = true
+            return
+        }
+
+        updatesImage = previous.symbolName != next.symbolName
+        updatesTitle = previous.title != next.title
+        updatesToolTip = previous.toolTip != next.toolTip
+        updatesLength = updatesImage || previous.title.isEmpty != next.title.isEmpty
+    }
+
+    var hasUpdates: Bool {
+        updatesImage || updatesTitle || updatesToolTip || updatesLength
     }
 }
 
@@ -410,6 +438,11 @@ final class MenuPanelCoordinator: NSObject, NSWindowDelegate {
 
     private func observeState() {
         store.$systemCPU
+            .throttle(
+                for: .seconds(StatusItemState.cpuUpdateIntervalSeconds),
+                scheduler: RunLoop.main,
+                latest: true
+            )
             .combineLatest(store.$isEnabled)
             .sink { [weak self] systemCPU, isEnabled in
                 guard let self else { return }
@@ -489,16 +522,32 @@ final class MenuPanelCoordinator: NSObject, NSWindowDelegate {
             isEnabled: isEnabled,
             preferences: preferences
         )
-        guard renderedStatusItemState != state else { return }
+        let changes = StatusItemRenderChanges(
+            previous: renderedStatusItemState,
+            next: state
+        )
+        guard changes.hasUpdates else { return }
+
+        if changes.updatesImage {
+            let configuration = NSImage.SymbolConfiguration(pointSize: 14, weight: .medium)
+            button.image = NSImage(
+                systemSymbolName: state.symbolName,
+                accessibilityDescription: "Tempra"
+            )?.withSymbolConfiguration(configuration)
+            button.image?.isTemplate = true
+        }
+        if changes.updatesTitle {
+            button.title = state.title
+        }
+        if changes.updatesToolTip {
+            button.toolTip = state.toolTip
+        }
+        if changes.updatesLength {
+            statusItem.length = state.title.isEmpty
+                ? NSStatusItem.squareLength
+                : ceil(button.fittingSize.width)
+        }
         renderedStatusItemState = state
-        let configuration = NSImage.SymbolConfiguration(pointSize: 14, weight: .medium)
-        button.image = NSImage(
-            systemSymbolName: state.symbolName,
-            accessibilityDescription: "Tempra"
-        )?.withSymbolConfiguration(configuration)
-        button.image?.isTemplate = true
-        button.title = state.title
-        button.toolTip = state.toolTip
     }
 
     @objc private func toggleMainPanel() {

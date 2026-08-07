@@ -105,6 +105,7 @@ enum TerminationFailureAction: Sendable {
 @MainActor
 final class ApplicationTerminationCoordinator {
     private var hasStarted = false
+    private var pendingReplies: [@MainActor @Sendable (Bool) -> Void] = []
 
     func begin(
         shutdown: @escaping @MainActor @Sendable () async -> ProcessRestorationResult,
@@ -114,6 +115,7 @@ final class ApplicationTerminationCoordinator {
         invalidate: @escaping @MainActor @Sendable () -> Void,
         reply: @escaping @MainActor @Sendable (Bool) -> Void
     ) {
+        pendingReplies.append(reply)
         guard !hasStarted else { return }
         hasStarted = true
         Task {
@@ -126,7 +128,9 @@ final class ApplicationTerminationCoordinator {
             } else {
                 hasStarted = false
             }
-            reply(shouldTerminate)
+            let replies = pendingReplies
+            pendingReplies.removeAll(keepingCapacity: true)
+            replies.forEach { $0(shouldTerminate) }
         }
     }
 
