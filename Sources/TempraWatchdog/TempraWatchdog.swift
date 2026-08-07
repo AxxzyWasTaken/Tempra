@@ -99,17 +99,10 @@ enum TempraWatchdogMain {
                         let deadline = armedAt.advanced(
                             by: .milliseconds(Int64(entry.resumeAfterMilliseconds))
                         )
-                        if let state = automaticResumeStates[entry.process] {
-                            automaticResumeStates[entry.process] = AutomaticResumeState(
-                                deadline: state.deadline,
-                                intervalMilliseconds: entry.resumeAfterMilliseconds
-                            )
-                        } else {
-                            automaticResumeStates[entry.process] = AutomaticResumeState(
-                                deadline: deadline,
-                                intervalMilliseconds: entry.resumeAfterMilliseconds
-                            )
-                        }
+                        automaticResumeStates[entry.process] = AutomaticResumeState(
+                            deadline: deadline,
+                            intervalMilliseconds: entry.resumeAfterMilliseconds
+                        )
                     }
                     guard acknowledgeAutomaticResumeArm() else {
                         return recover(trackedProcesses) ? 2 : 3

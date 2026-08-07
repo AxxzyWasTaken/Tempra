@@ -151,7 +151,11 @@ enum ProcessLimitTargetSelector {
         let preferredControlledCPU = normalizedSamples.reduce(0) { result, sample in
             result + (preferredControlled.contains(sample.identity) ? sample.cpuPercent : 0)
         }
-        if totalCPU - preferredControlledCPU <= selectionThreshold {
+        let previousEligibleProcesses = previousControlledProcesses.intersection(
+            eligible.map(\.identity)
+        )
+        if totalCPU - preferredControlledCPU <= selectionThreshold,
+           !preferredControlled.isEmpty || previousEligibleProcesses.isEmpty {
             return makeSelection(
                 controlled: preferredControlled,
                 samples: normalizedSamples,

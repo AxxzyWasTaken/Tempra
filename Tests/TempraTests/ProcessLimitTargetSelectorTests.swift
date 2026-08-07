@@ -137,6 +137,24 @@ struct ProcessLimitTargetSelectorTests {
         #expect(selection.targetIsReachable)
     }
 
+    @Test("A constrained main process stays selected across monitor samples")
+    func constrainedMainProcessKeepsPreviousSelection() {
+        for sampledCPU in [6.5, 0.2] {
+            let player = sample(62, cpu: sampledCPU, main: true)
+            let crashHandler = sample(63, cpu: 0)
+
+            let selection = ProcessLimitTargetSelector.select(
+                samples: [player, crashHandler],
+                limitPercent: 6,
+                previousControlledProcesses: [player.identity]
+            )
+
+            #expect(selection.controlledProcesses == [player.identity])
+            #expect(selection.alwaysRunningProcesses == [crashHandler.identity])
+            #expect(selection.targetIsReachable)
+        }
+    }
+
     @Test("A network worker is selected when it is required to reach the target")
     func requiredNetworkWorkerIsSelected() {
         let main = sample(70, cpu: 2, main: true)
