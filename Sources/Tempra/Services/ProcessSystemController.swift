@@ -24,9 +24,6 @@ private enum ProcessSystemControllerError: LocalizedError {
 protocol ProcessSystemControlling: Sendable {
     func totalCPUTime(for processes: Set<ProcessIdentity>) async throws -> UInt64
     func networkActivity(for process: ProcessIdentity) async -> ProcessNetworkActivity
-    func networkConnectionSnapshot(
-        for process: ProcessIdentity
-    ) async -> ProcessNetworkConnectionSnapshot
     func criticalFileActivity(
         for process: ProcessIdentity
     ) async -> ProcessCriticalFileActivity
@@ -38,18 +35,6 @@ protocol ProcessSystemControlling: Sendable {
     func lowerPriority(_ processes: Set<ProcessIdentity>) async -> ProcessOperationResult
     func restorePriority(_ processes: Set<ProcessIdentity>) async -> ProcessOperationResult
     func terminate(_ processes: Set<ProcessIdentity>) async -> ProcessOperationResult
-}
-
-extension ProcessSystemControlling {
-    func networkConnectionSnapshot(
-        for process: ProcessIdentity
-    ) async -> ProcessNetworkConnectionSnapshot {
-        let activity = await networkActivity(for: process)
-        return ProcessNetworkConnectionSnapshot(
-            activity: activity,
-            isComplete: activity != .unknown
-        )
-    }
 }
 
 struct LiveProcessSystemController: ProcessSystemControlling {
@@ -71,12 +56,6 @@ struct LiveProcessSystemController: ProcessSystemControlling {
 
     func networkActivity(for process: ProcessIdentity) async -> ProcessNetworkActivity {
         await ProcessNetworkActivityProbe().activityWithoutBlockingController(for: process)
-    }
-
-    func networkConnectionSnapshot(
-        for process: ProcessIdentity
-    ) async -> ProcessNetworkConnectionSnapshot {
-        await ProcessNetworkActivityProbe().snapshotWithoutBlockingController(for: process)
     }
 
     func criticalFileActivity(
@@ -215,12 +194,6 @@ struct RoutedProcessSystemController: ProcessSystemControlling {
         await local.networkActivity(for: process)
     }
 
-    func networkConnectionSnapshot(
-        for process: ProcessIdentity
-    ) async -> ProcessNetworkConnectionSnapshot {
-        await local.networkConnectionSnapshot(for: process)
-    }
-
     func criticalFileActivity(
         for process: ProcessIdentity
     ) async -> ProcessCriticalFileActivity {
@@ -290,11 +263,23 @@ struct RoutedProcessSystemController: ProcessSystemControlling {
         to processes: Set<ProcessIdentity>
     ) async -> ProcessOperationResult {
         guard !processes.isEmpty else { return ProcessOperationResult() }
+
+        let stale = Set(processes.filter {
+            LiveProcessSystemController.currentIdentity(for: $0.pid) != $0
+        })
+        let current = processes.subtracting(stale)
+        guard !current.isEmpty else {
+            return ProcessOperationResult(stale: stale)
+        }
+
         do {
-            return try await privileged.perform(action, processes: processes)
+            var result = try await privileged.perform(action, processes: current)
+            result.stale.formUnion(stale)
+            return result
         } catch {
             return ProcessOperationResult(
-                failed: processes,
+                stale: stale,
+                failed: current,
                 failureDescription: error.localizedDescription
             )
         }

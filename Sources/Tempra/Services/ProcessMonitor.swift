@@ -1267,7 +1267,7 @@ final class ProcessMonitor {
                     group.processSamples.append(ManagedProcessSample(
                         identity: identity,
                         cpuPercent: cpuByPID[process.pid, default: 0],
-                        isMainProcess: true,
+                        isMainProcess: false,
                         networkActivity: probesNetworkActivity
                             ? networkActivity(identity)
                             : .inactive,
@@ -1294,7 +1294,7 @@ final class ProcessMonitor {
                         [ManagedProcessSample(
                             identity: identity,
                             cpuPercent: cpuByPID[process.pid, default: 0],
-                            isMainProcess: true,
+                            isMainProcess: false,
                             networkActivity: probesNetworkActivity
                                 ? networkActivity(identity)
                                 : .inactive,
@@ -1309,13 +1309,32 @@ final class ProcessMonitor {
         }
 
         return groups.values.map { group in
-            ManagedApp(
+            let processSamples = group.processSamples
+                .sorted { first, second in
+                    if first.identity.pid != second.identity.pid {
+                        return first.identity.pid < second.identity.pid
+                    }
+                    return first.identity.startTimeMicroseconds
+                        < second.identity.startTimeMicroseconds
+                }
+                .enumerated()
+                .map { index, sample in
+                    ManagedProcessSample(
+                        identity: sample.identity,
+                        cpuPercent: sample.cpuPercent,
+                        isMainProcess: index == 0,
+                        isPlayingAudio: sample.isPlayingAudio,
+                        networkActivity: sample.networkActivity,
+                        hasCPUMeasurement: sample.hasCPUMeasurement
+                    )
+                }
+            return ManagedApp(
                 bundleIdentifier: group.identifier,
                 name: group.name,
                 bundleURL: group.url,
                 processIdentifiers: group.pids.sorted(),
                 processIdentities: group.processIdentities.sorted { $0.pid < $1.pid },
-                processSamples: group.processSamples,
+                processSamples: processSamples,
                 launchedAt: group.processIdentities.map {
                     Date(
                         timeIntervalSince1970: Double($0.startTimeMicroseconds) / 1_000_000
@@ -1329,6 +1348,7 @@ final class ProcessMonitor {
                 isService: true,
                 isBackgroundProcess: true,
                 isSystemProcess: group.isSystemProcess,
+                windowVisibility: .hiddenOrMinimized,
                 status: .normal
             )
         }

@@ -244,6 +244,110 @@ struct ProcessMonitorTests {
         #expect(ordinary.processSamples.first?.networkActivity == .inactive)
     }
 
+    @Test("Standalone background services are hidden")
+    func standaloneBackgroundServicesAreHidden() async throws {
+        let identity = ProcessIdentity(
+            pid: 100,
+            startTimeMicroseconds: 1_000_000
+        )
+        let executablePath = "/usr/local/bin/example-service"
+        let reader = StubProcessSnapshotReader(
+            snapshots: [
+                identity.pid: snapshot(identity, executableName: "example-service"),
+            ],
+            paths: [identity.pid: executablePath]
+        )
+        let monitor = ProcessMonitor(
+            processReader: reader,
+            currentUserID: 501,
+            uptime: { 1 },
+            audioProcessIdentifiers: { [] },
+            windowSnapshot: { nil },
+            processTableReader: { nil },
+            privilegedSnapshotReader: { _ in [:] }
+        )
+
+        let result = await monitor.sample(
+            inventory: inventory(),
+            includingEssentialSystemProcesses: true
+        )
+        let group = try #require(result.first {
+            $0.bundleIdentifier == BackgroundProcessPolicy.userOwnedIdentifier(
+                command: executablePath,
+                pid: identity.pid
+            )
+        })
+
+        #expect(group.isHidden)
+        #expect(group.windowVisibility == .hiddenOrMinimized)
+    }
+
+    @Test("Standalone background main selection is stable")
+    func standaloneBackgroundMainSelectionIsStable() async throws {
+        let mainIdentity = ProcessIdentity(
+            pid: 100,
+            startTimeMicroseconds: 2_000_000
+        )
+        let helperIdentity = ProcessIdentity(
+            pid: 200,
+            startTimeMicroseconds: 1_000_000
+        )
+        let executablePath = "/usr/local/bin/example-worker"
+
+        for processOrder in [
+            [helperIdentity.pid, mainIdentity.pid],
+            [mainIdentity.pid, helperIdentity.pid],
+        ] {
+            let reader = StubProcessSnapshotReader(
+                snapshots: [
+                    mainIdentity.pid: snapshot(
+                        mainIdentity,
+                        executableName: "example-worker"
+                    ),
+                    helperIdentity.pid: snapshot(
+                        helperIdentity,
+                        executableName: "example-worker"
+                    ),
+                ],
+                paths: [
+                    mainIdentity.pid: executablePath,
+                    helperIdentity.pid: executablePath,
+                ],
+                orderedProcessIdentifiers: processOrder
+            )
+            let monitor = ProcessMonitor(
+                processReader: reader,
+                currentUserID: 501,
+                uptime: { 1 },
+                audioProcessIdentifiers: { [] },
+                windowSnapshot: { nil },
+                processTableReader: { nil },
+                privilegedSnapshotReader: { _ in [:] }
+            )
+
+            let result = await monitor.sample(
+                inventory: inventory(),
+                includingEssentialSystemProcesses: true
+            )
+            let group = try #require(result.first {
+                $0.bundleIdentifier == BackgroundProcessPolicy.userOwnedIdentifier(
+                    command: executablePath,
+                    pid: mainIdentity.pid
+                )
+            })
+
+            #expect(group.processSamples.count == 2)
+            #expect(
+                group.processSamples.filter(\.isMainProcess).map(\.identity)
+                    == [mainIdentity]
+            )
+            #expect(
+                group.processSamples.filter { !$0.isMainProcess }.map(\.identity)
+                    == [helperIdentity]
+            )
+        }
+    }
+
     @Test("A reset baseline is measured again instead of caching zero CPU")
     func resetBaselineIsNotCached() async throws {
         let identity = ProcessIdentity(pid: 100, startTimeMicroseconds: 2_000_000)
@@ -1022,18 +1126,21 @@ struct ProcessMonitorTests {
 private final class StubProcessSnapshotReader: ProcessSnapshotReading {
     var snapshots: [pid_t: ProcessKernelSnapshot]
     var paths: [pid_t: String]
+    private let orderedProcessIdentifiers: [pid_t]?
     private(set) var pathReads: [pid_t: Int] = [:]
 
     init(
         snapshots: [pid_t: ProcessKernelSnapshot],
-        paths: [pid_t: String]
+        paths: [pid_t: String],
+        orderedProcessIdentifiers: [pid_t]? = nil
     ) {
         self.snapshots = snapshots
         self.paths = paths
+        self.orderedProcessIdentifiers = orderedProcessIdentifiers
     }
 
     func processIdentifiers() -> [pid_t] {
-        snapshots.keys.sorted()
+        orderedProcessIdentifiers ?? snapshots.keys.sorted()
     }
 
     func snapshot(for pid: pid_t) -> ProcessKernelSnapshot? {

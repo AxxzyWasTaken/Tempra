@@ -94,8 +94,6 @@ actor ProcessController {
     private let minimumRunDuration: TimeInterval
     private let clock: ProcessControlClock
     private let signalTelemetry: ProcessControlSignalTelemetry
-    private let networkLimitCalibrationStore:
-        any ProcessNetworkLimitCalibrationPersisting
     private let failureRetryInterval: TimeInterval = 1
     private let minimumLimitFrameDuration: TimeInterval = 0.1
     private let minimumLimitRestDuration: TimeInterval = 0.001
@@ -128,11 +126,6 @@ actor ProcessController {
     private var lastFrontmostProbeAt: ContinuousClock.Instant?
     private var networkSensitiveProcesses: [String: Set<ProcessIdentity>] = [:]
     private var networkSensitiveUntil: [String: [ProcessIdentity: ContinuousClock.Instant]] = [:]
-    private var networkLimitCalibrator: ProcessNetworkLimitCalibrator
-    private var networkCalibrationPersistenceKeys: [String: String] = [:]
-    private var learnedNetworkStopDurations: [String: TimeInterval] = [:]
-    private var loadedNetworkCalibrationIdentifiers: Set<String> = []
-    private var networkCalibrationPersistenceFailures: Set<String> = []
     private var downloadProtectedProcesses: [String: Set<ProcessIdentity>] = [:]
     private var criticalFileActivityCache: [ProcessIdentity: CriticalFileActivityCacheEntry] = [:]
     private var automaticResumeIntervals: [ProcessIdentity: TimeInterval] = [:]
@@ -233,12 +226,7 @@ actor ProcessController {
         controlInterval: TimeInterval = 0.5,
         minimumRunDuration: TimeInterval = 0.005,
         clock: ProcessControlClock = .continuous,
-        signalTelemetry: ProcessControlSignalTelemetry = ProcessControlSignalTelemetry(),
-        networkLimitCalibrationConfiguration:
-            ProcessNetworkLimitCalibrationConfiguration = .conservative,
-        networkLimitCalibrationStore:
-            any ProcessNetworkLimitCalibrationPersisting =
-                UserDefaultsProcessNetworkLimitCalibrationStore()
+        signalTelemetry: ProcessControlSignalTelemetry = ProcessControlSignalTelemetry()
     ) {
         self.system = system
         self.crashWatchdog = crashWatchdog
@@ -252,10 +240,6 @@ actor ProcessController {
         self.minimumRunDuration = minimumRunDuration
         self.clock = clock
         self.signalTelemetry = signalTelemetry
-        self.networkLimitCalibrator = ProcessNetworkLimitCalibrator(
-            configuration: networkLimitCalibrationConfiguration
-        )
-        self.networkLimitCalibrationStore = networkLimitCalibrationStore
     }
 
     func setEventHandler(_ handler: @escaping EventHandler) {
@@ -270,7 +254,6 @@ actor ProcessController {
     ) async -> ProcessControlSnapshot {
         guard revision >= self.revision else { return snapshot() }
         let previousRules = self.rules
-        let previousGroupIdentifiers = Set(groups.keys)
         self.revision = revision
         stateID = UUID()
         groups = Dictionary(uniqueKeysWithValues: targets.map { ($0.bundleIdentifier, $0) })
@@ -283,19 +266,13 @@ actor ProcessController {
         let changedRuleIdentifiers = Set(previousRules.keys).union(self.rules.keys).filter {
             previousRules[$0] != self.rules[$0]
         }
-        let removedGroupIdentifiers = previousGroupIdentifiers.subtracting(Set(groups.keys))
-        for identifier in Set(changedRuleIdentifiers).union(removedGroupIdentifiers) {
+        for identifier in changedRuleIdentifiers {
             limitDeadlines.remove(identifier: identifier)
             limitRuntimes.removeValue(forKey: identifier)
             limitSelections.removeValue(forKey: identifier)
             networkSensitiveProcesses.removeValue(forKey: identifier)
             networkSensitiveUntil.removeValue(forKey: identifier)
             downloadProtectedProcesses.removeValue(forKey: identifier)
-            networkLimitCalibrator.reset(identifier)
-            networkCalibrationPersistenceKeys.removeValue(forKey: identifier)
-            learnedNetworkStopDurations.removeValue(forKey: identifier)
-            loadedNetworkCalibrationIdentifiers.remove(identifier)
-            networkCalibrationPersistenceFailures.remove(identifier)
             limitPulseArbiter.release(identifier: identifier)
         }
         if !managementIsActive {
@@ -303,7 +280,6 @@ actor ProcessController {
             networkSensitiveUntil.removeAll()
             downloadProtectedProcesses.removeAll()
             criticalFileActivityCache.removeAll()
-            networkLimitCalibrator.resetAll()
             limitPulseArbiter.removeAll()
         }
         refreshNetworkSensitivity()
@@ -801,128 +777,14 @@ actor ProcessController {
             downloadProtectedProcesses[identifier, default: []]
         )
         guard !sensitiveProcesses.isDisjoint(with: processes) else {
-            networkLimitCalibrator.reset(identifier)
             return offlineMaximumLimitStopDuration
         }
         switch app.windowVisibility {
         case .hiddenOrMinimized, .covered:
-            return networkLimitCalibrator.stopDuration(
-                for: identifier,
-                processIdentities: processes
-            ) ?? offlineMaximumLimitStopDuration
+            return offlineMaximumLimitStopDuration
         case .visible, .unknown:
-            networkLimitCalibrator.reset(identifier)
             return networkMaximumLimitStopDuration
         }
-    }
-
-    private func updateNetworkLimitCalibration(
-        for identifier: String,
-        processIdentities: Set<ProcessIdentity>,
-        snapshot: ProcessNetworkConnectionSnapshot
-    ) async {
-        guard rules[identifier]?.action == .limit,
-              let app = groups[identifier] else {
-            networkLimitCalibrator.reset(identifier)
-            return
-        }
-        switch app.windowVisibility {
-        case .hiddenOrMinimized, .covered:
-            break
-        case .visible, .unknown:
-            networkLimitCalibrator.reset(identifier)
-            return
-        }
-
-        let hasCalibrationSession = networkLimitCalibrator.stopDuration(
-            for: identifier,
-            processIdentities: processIdentities
-        ) != nil
-        guard snapshot.activity != .inactive || hasCalibrationSession else {
-            networkLimitCalibrator.reset(identifier)
-            return
-        }
-
-        let update = networkLimitCalibrator.update(
-            identifier: identifier,
-            processIdentities: processIdentities,
-            snapshot: snapshot,
-            learnedStopDuration: learnedNetworkStopDuration(for: identifier),
-            now: clock.now()
-        )
-        if let learnedStopDuration = update.learnedStopDuration {
-            let persistenceKey = networkCalibrationPersistenceKey(for: identifier)
-            if networkLimitCalibrationStore.saveLearnedStopDuration(
-                learnedStopDuration,
-                for: persistenceKey
-            ) {
-                learnedNetworkStopDurations[identifier] = learnedStopDuration
-                networkCalibrationPersistenceFailures.remove(identifier)
-                let duration = learnedStopDuration.formatted(
-                    .number.precision(.fractionLength(1...3))
-                )
-                await emitActivity(
-                    identifier,
-                    kind: .networkProtected,
-                    detail: "Tempra confirmed a network stop interval of \(duration) seconds."
-                )
-            } else if networkCalibrationPersistenceFailures.insert(identifier).inserted {
-                await emitActivity(
-                    identifier,
-                    kind: .error,
-                    detail: "Tempra could not save the network limit calibration."
-                )
-            }
-        }
-        if update.detectedConnectionWarning {
-            let duration = update.stopDuration.formatted(
-                .number.precision(.fractionLength(1...3))
-            )
-            await emitActivity(
-                identifier,
-                kind: .networkProtected,
-                detail: "Tempra returned the network stop interval to \(duration) seconds because the connection changed."
-            )
-        }
-    }
-
-    private func learnedNetworkStopDuration(for identifier: String) -> TimeInterval? {
-        if loadedNetworkCalibrationIdentifiers.contains(identifier) {
-            return learnedNetworkStopDurations[identifier]
-        }
-        loadedNetworkCalibrationIdentifiers.insert(identifier)
-        let duration = networkLimitCalibrationStore.learnedStopDuration(
-            for: networkCalibrationPersistenceKey(for: identifier)
-        )
-        if let duration {
-            learnedNetworkStopDurations[identifier] = duration
-        }
-        return duration
-    }
-
-    private func networkCalibrationPersistenceKey(for identifier: String) -> String {
-        if let cached = networkCalibrationPersistenceKeys[identifier] {
-            return cached
-        }
-        var components = [identifier]
-        if let applicationURL = rules[identifier]?.applicationURL,
-           let bundle = Bundle(url: applicationURL) {
-            if let shortVersion = bundle.object(
-                forInfoDictionaryKey: "CFBundleShortVersionString"
-            ) as? String,
-               !shortVersion.isEmpty {
-                components.append(shortVersion)
-            }
-            if let buildVersion = bundle.object(
-                forInfoDictionaryKey: "CFBundleVersion"
-            ) as? String,
-               !buildVersion.isEmpty {
-                components.append(buildVersion)
-            }
-        }
-        let key = components.joined(separator: "|")
-        networkCalibrationPersistenceKeys[identifier] = key
-        return key
     }
 
     private func refreshCriticalFileProtection() async {
@@ -1946,9 +1808,6 @@ actor ProcessController {
         limitPercent: Double,
         maximumStopDuration: TimeInterval
     ) -> TimeInterval {
-        if maximumStopDuration > offlineMaximumLimitStopDuration {
-            return maximumStopDuration
-        }
         let normalizedLimit = max(limitPercent, CPULimitRange.minimumPercent)
         let demandRatio = max(estimatedFullSpeedCPU, normalizedLimit) / normalizedLimit
         return min(
@@ -2011,11 +1870,9 @@ actor ProcessController {
         var unavailableProcesses: Set<ProcessIdentity> = []
         var activeDownloadProcesses: Set<ProcessIdentity> = []
         var inactiveDownloadProcesses: Set<ProcessIdentity> = []
-        var networkSnapshots: [ProcessNetworkConnectionSnapshot] = []
-        networkSnapshots.reserveCapacity(processes.count)
 
         for process in processes.sorted(by: { $0.pid < $1.pid }) {
-            let networkSnapshot = await system.networkConnectionSnapshot(for: process)
+            let activity = await system.networkActivity(for: process)
             guard workIsCurrent,
                   limitControlIsCurrent(
                     identifier: identifier,
@@ -2024,8 +1881,6 @@ actor ProcessController {
                   ) else {
                 return false
             }
-            networkSnapshots.append(networkSnapshot)
-            let activity = networkSnapshot.activity
             switch activity {
             case .active:
                 activeProcesses.insert(process)
@@ -2052,20 +1907,6 @@ actor ProcessController {
             case .unknown:
                 break
             }
-        }
-
-        await updateNetworkLimitCalibration(
-            for: identifier,
-            processIdentities: processes,
-            snapshot: .combined(networkSnapshots)
-        )
-        guard workIsCurrent,
-              limitControlIsCurrent(
-                identifier: identifier,
-                generation: generation,
-                processIdentities: processes
-              ) else {
-            return false
         }
 
         if !inactiveDownloadProcesses.isEmpty {

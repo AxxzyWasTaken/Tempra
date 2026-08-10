@@ -2780,81 +2780,6 @@ struct ProcessControllerSchedulingTests {
         await controller.shutdown()
     }
 
-    @Test("A stable covered game applies its calibrated stop interval")
-    func stableCoveredGameAppliesCalibratedStopInterval() async {
-        let manualClock = ManualProcessControlClock()
-        let system = RecordingProcessSystem()
-        let controlledProcess = process(226)
-        let connection = ProcessNetworkConnectionID(
-            process: controlledProcess,
-            socketObject: 1,
-            protocolControlBlock: 2,
-            protocolNumber: 17
-        )
-        system.setNetworkConnectionSnapshot(
-            ProcessNetworkConnectionSnapshot(
-                activity: .active,
-                activeConnections: [connection]
-            ),
-            for: controlledProcess
-        )
-        let controller = ProcessController(
-            system: system,
-            crashWatchdog: RecordingProcessCrashWatchdog(),
-            frontmostProvider: { nil },
-            clock: manualClock.clock,
-            networkLimitCalibrationConfiguration:
-                ProcessNetworkLimitCalibrationConfiguration(
-                    baselineStopDuration: 0.5,
-                    maximumStopDuration: 2,
-                    validationDuration: 0.001,
-                    minimumHealthySamples: 1
-                ),
-            networkLimitCalibrationStore: InMemoryNetworkLimitCalibrationStore()
-        )
-
-        _ = await controller.update(
-            targets: [target(
-                processIdentities: [controlledProcess],
-                processSamples: [ManagedProcessSample(
-                    identity: controlledProcess,
-                    cpuPercent: 260,
-                    isMainProcess: true,
-                    networkActivity: .active
-                )],
-                launchedAt: oldLaunchDate,
-                cpuPercent: 260,
-                isHidden: false,
-                windowVisibility: .covered
-            )],
-            rules: [identifier: limitRule(identifier, limitPercent: 6)],
-            isEnabled: true,
-            revision: 1
-        )
-        #expect(await eventually { manualClock.pendingSleepCount == 2 })
-
-        system.setCPUTimeNanoseconds(13_000_000)
-        manualClock.advance(by: .milliseconds(5))
-        #expect(await eventually { system.stopAttemptCount == 1 })
-        #expect(system.stopAutomaticResumeInterval(for: controlledProcess) == 0.5)
-
-        manualClock.advance(by: .milliseconds(212))
-        #expect(await eventually { system.didAttemptToResume(controlledProcess) })
-        system.setCPUTimeNanoseconds(26_000_000)
-        manualClock.advance(by: .milliseconds(5))
-        #expect(await eventually { system.stopAttemptCount >= 2 })
-        #expect(system.stopAutomaticResumeInterval(for: controlledProcess) == 0.75)
-
-        #expect(system.resumeAttemptCount(for: controlledProcess) == 1)
-        manualClock.advance(by: .milliseconds(700))
-        #expect(system.resumeAttemptCount(for: controlledProcess) == 1)
-        manualClock.advance(by: .milliseconds(50))
-        #expect(await eventually {
-            system.resumeAttemptCount(for: controlledProcess) == 2
-        })
-        await controller.shutdown()
-    }
-
     @Test("A measured CPU burst cannot starve app responsiveness")
     func measuredCPUBurstHasBoundedRecovery() async {
         let manualClock = ManualProcessControlClock()
@@ -3491,8 +3416,6 @@ private final class RecordingProcessSystem: ProcessSystemControlling, @unchecked
     private var resumeFailuresRemaining: [ProcessIdentity: Int] = [:]
     private var priorityRestoreFailuresRemaining: [ProcessIdentity: Int] = [:]
     private var networkActivityByProcess: [ProcessIdentity: ProcessNetworkActivity] = [:]
-    private var networkSnapshotByProcess:
-        [ProcessIdentity: ProcessNetworkConnectionSnapshot] = [:]
     private var criticalFileActivityByProcess:
         [ProcessIdentity: ProcessCriticalFileActivity] = [:]
 
@@ -3600,16 +3523,6 @@ private final class RecordingProcessSystem: ProcessSystemControlling, @unchecked
         }
     }
 
-    func setNetworkConnectionSnapshot(
-        _ snapshot: ProcessNetworkConnectionSnapshot,
-        for process: ProcessIdentity
-    ) {
-        withLock {
-            networkSnapshotByProcess[process] = snapshot
-            networkActivityByProcess[process] = snapshot.activity
-        }
-    }
-
     func setCriticalFileActivity(
         _ activity: ProcessCriticalFileActivity,
         for process: ProcessIdentity
@@ -3625,16 +3538,6 @@ private final class RecordingProcessSystem: ProcessSystemControlling, @unchecked
 
     func networkActivity(for process: ProcessIdentity) -> ProcessNetworkActivity {
         withLock { networkActivityByProcess[process] ?? .inactive }
-    }
-
-    func networkConnectionSnapshot(
-        for process: ProcessIdentity
-    ) -> ProcessNetworkConnectionSnapshot {
-        withLock {
-            networkSnapshotByProcess[process] ?? ProcessNetworkConnectionSnapshot(
-                activity: networkActivityByProcess[process] ?? .inactive
-            )
-        }
     }
 
     func criticalFileActivity(
@@ -3733,29 +3636,6 @@ private final class RecordingProcessSystem: ProcessSystemControlling, @unchecked
             terminationAttempts.append(processes)
             return ProcessOperationResult(applied: processes)
         }
-    }
-
-    private func withLock<Result>(_ operation: () -> Result) -> Result {
-        lock.lock()
-        defer { lock.unlock() }
-        return operation()
-    }
-}
-
-private final class InMemoryNetworkLimitCalibrationStore:
-    ProcessNetworkLimitCalibrationPersisting, @unchecked Sendable {
-    private let lock = NSLock()
-    private var durations: [String: TimeInterval] = [:]
-
-    func learnedStopDuration(for key: String) -> TimeInterval? {
-        withLock { durations[key] }
-    }
-
-    func saveLearnedStopDuration(_ duration: TimeInterval, for key: String) -> Bool {
-        withLock {
-            durations[key] = duration
-        }
-        return true
     }
 
     private func withLock<Result>(_ operation: () -> Result) -> Result {
