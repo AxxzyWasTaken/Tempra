@@ -18,6 +18,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var menuPanelCoordinator: MenuPanelCoordinator?
     private var store: AppStore?
     private let terminationCoordinator = ApplicationTerminationCoordinator()
+    private let updateController = TempraUpdateController()
+    private let guardianLeaseHeartbeat = ProcessGuardianLeaseHeartbeat()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         do {
@@ -25,8 +27,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 Self.presentPersistenceFailure(error)
             }
             self.store = store
-            let menuPanelCoordinator = MenuPanelCoordinator(store: store)
+            let menuPanelCoordinator = MenuPanelCoordinator(
+                store: store,
+                updateController: updateController
+            )
             self.menuPanelCoordinator = menuPanelCoordinator
+            guardianLeaseHeartbeat.start()
             menuPanelCoordinator.presentPrivilegedAccessOnboardingIfNeeded()
         } catch {
             Self.presentStartupFailure(error)
@@ -45,6 +51,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 Self.presentRestorationFailure(result)
             },
             invalidate: { [weak self] in
+                self?.guardianLeaseHeartbeat.stop()
                 self?.menuPanelCoordinator?.invalidate()
                 self?.menuPanelCoordinator = nil
             },

@@ -23,6 +23,7 @@ struct AppDisplayItem: Identifiable {
     let isService: Bool
     let isBackgroundProcess: Bool
     let isSystemProcess: Bool
+    let isCurrentApplication: Bool
     let requiresPrivilegedControl: Bool
     let status: ManagementStatus
     let rule: AppRule?
@@ -51,6 +52,7 @@ struct AppDisplayItem: Identifiable {
         isService: Bool = false,
         isBackgroundProcess: Bool = false,
         isSystemProcess: Bool = false,
+        isCurrentApplication: Bool = false,
         requiresPrivilegedControl: Bool? = nil,
         status: ManagementStatus,
         rule: AppRule?,
@@ -79,6 +81,7 @@ struct AppDisplayItem: Identifiable {
         self.isService = isService
         self.isBackgroundProcess = isBackgroundProcess
         self.isSystemProcess = isSystemProcess
+        self.isCurrentApplication = isCurrentApplication
         self.requiresPrivilegedControl = requiresPrivilegedControl ?? isSystemProcess
         self.status = status
         self.rule = rule
@@ -160,7 +163,7 @@ struct AppDisplayItem: Identifiable {
     }
 
     var canManageProcess: Bool {
-        !isSoundSourceComponent && !isProtectedSystemProcess
+        !isCurrentApplication && !isSoundSourceComponent && !isProtectedSystemProcess
     }
 
     var isSoundSourceComponent: Bool {
@@ -186,6 +189,7 @@ struct AppDisplayItem: Identifiable {
     }
 
     var stateText: String {
+        if isCurrentApplication { return "Current application" }
         if isAttention {
             return status == .normal ? "High CPU" : "High CPU · \(status.label)"
         }

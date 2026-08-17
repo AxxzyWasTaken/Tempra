@@ -25,3 +25,10 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+## Sparkle
+
+Tempra includes Sparkle 2.9.5. Sparkle provides the software-update system.
+The complete Sparkle license and its external license notices are in the
+Sparkle distribution. The Tempra build copies them to
+`Contents/Resources/Sparkle-LICENSE.txt`.

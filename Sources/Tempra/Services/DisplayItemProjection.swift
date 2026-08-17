@@ -18,9 +18,11 @@ enum DisplayItemProjection {
         iconCache: AppIconCache
     ) -> [AppDisplayItem] {
         var items = apps.map { app in
-            let rule = rules[app.bundleIdentifier]
+            let rule = app.isCurrentApplication ? nil : rules[app.bundleIdentifier]
             let status: ManagementStatus
-            if let suspension = suspensions[app.bundleIdentifier], suspension.isActive {
+            if app.isCurrentApplication {
+                status = .normal
+            } else if let suspension = suspensions[app.bundleIdentifier], suspension.isActive {
                 status = .snoozed(suspension.until)
             } else if let rule, !rule.isEnabled || !isEnabled {
                 status = .disabled
@@ -54,10 +56,12 @@ enum DisplayItemProjection {
                 isService: app.isService,
                 isBackgroundProcess: app.isBackgroundProcess,
                 isSystemProcess: app.isSystemProcess,
+                isCurrentApplication: app.isCurrentApplication,
                 requiresPrivilegedControl: app.requiresPrivilegedControl,
                 status: status,
                 rule: rule,
-                isAttention: attentionIdentifiers.contains(app.bundleIdentifier),
+                isAttention: !app.isCurrentApplication
+                    && attentionIdentifiers.contains(app.bundleIdentifier),
                 isCPULimitSessionActive: activeCPULimitSessionIdentifiers.contains(
                     app.bundleIdentifier
                 ),

@@ -141,6 +141,7 @@ struct HighCPUDetectorTests {
             (app(cpuPercent: 120), ["example.hog"], [], true, false),
             (app(cpuPercent: 120, isNestedHelper: true), [], [], true, false),
             (app(cpuPercent: 120, isBackgroundProcess: true), [], [], true, false),
+            (app(cpuPercent: 120, isCurrentApplication: true), [], [], true, false),
             (app(cpuPercent: 120), [], ["example.hog"], true, false),
             (app(cpuPercent: 120), [], [], false, false),
             (
@@ -330,6 +331,7 @@ struct HighCPUDetectorTests {
         isFrontmost: Bool = false,
         isService: Bool = false,
         isBackgroundProcess: Bool = false,
+        isCurrentApplication: Bool = false,
         requiresPrivilegedControl: Bool = false,
         isNestedHelper: Bool = false,
         launchedAt: Date? = nil
@@ -361,6 +363,7 @@ struct HighCPUDetectorTests {
             isService: isService,
             isBackgroundProcess: isBackgroundProcess,
             isSystemProcess: false,
+            isCurrentApplication: isCurrentApplication,
             status: .normal
         )
     }

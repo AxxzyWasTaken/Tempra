@@ -194,6 +194,27 @@ struct ProcessMonitorTests {
         #expect(monitor.cachedMetadataCount == 1)
     }
 
+    @Test("The current application stays in the monitored application list")
+    func currentApplicationIsIncluded() async throws {
+        let identity = ProcessIdentity(pid: 100, startTimeMicroseconds: 2_000_000)
+        let reader = StubProcessSnapshotReader(
+            snapshots: [100: snapshot(identity)],
+            paths: [100: appExecutable("Tempra")]
+        )
+        let monitor = makeMonitor(reader: reader, clock: StubUptime(value: 10))
+        let currentApplication = app("Tempra", pid: identity.pid)
+        let sample = await monitor.sample(inventory: ApplicationInventory(
+            applications: [currentApplication],
+            frontmostBundleIdentifier: nil,
+            ownBundleIdentifier: currentApplication.bundleIdentifier
+        ))
+        let monitoredApplication = try #require(sample.first)
+
+        #expect(monitoredApplication.bundleIdentifier == currentApplication.bundleIdentifier)
+        #expect(monitoredApplication.isCurrentApplication)
+        #expect(monitoredApplication.processIdentifiers == [identity.pid])
+    }
+
     @Test("Network probes run only for CPU-limited app groups")
     func networkProbesAreScopedToLimitedApps() async throws {
         let limitedIdentity = ProcessIdentity(

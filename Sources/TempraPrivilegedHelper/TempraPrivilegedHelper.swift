@@ -422,6 +422,8 @@ private final class PrivilegedProcessSession: NSObject, PrivilegedProcessXPCProt
             return resume(request)
         case .lowerPriority:
             return lowerPriority(request)
+        case .limitPriority:
+            return limitPriority(request)
         case .restorePriority:
             return restorePriority(request)
         case .terminate:
@@ -532,6 +534,32 @@ private final class PrivilegedProcessSession: NSObject, PrivilegedProcessXPCProt
     private func lowerPriority(
         _ request: PrivilegedProcessRequest
     ) -> PrivilegedProcessResponse {
+        applyPriority(request) { [priorityController] originalPriority, processIdentifier in
+            try priorityController.lowerPriority(
+                from: originalPriority,
+                for: processIdentifier
+            )
+        }
+    }
+
+    private func limitPriority(
+        _ request: PrivilegedProcessRequest
+    ) -> PrivilegedProcessResponse {
+        applyPriority(request) { [priorityController] originalPriority, processIdentifier in
+            try priorityController.applyLimitPriority(
+                from: originalPriority,
+                for: processIdentifier
+            )
+        }
+    }
+
+    private func applyPriority(
+        _ request: PrivilegedProcessRequest,
+        mutation: (
+            ProcessPriorityPolicyState,
+            Int32
+        ) throws -> Void
+    ) -> PrivilegedProcessResponse {
         guard let identities = validatedOperationIdentities(request) else {
             return failure(.invalidRequest, "The priority request is invalid.")
         }
@@ -598,10 +626,7 @@ private final class PrivilegedProcessSession: NSObject, PrivilegedProcessXPCProt
                     result.failed.insert(process)
                     continue
                 }
-                try priorityController.lowerPriority(
-                    from: originalPriority,
-                    for: process.pid
-                )
+                try mutation(originalPriority, process.pid)
             } catch {
                 if !wasManaged {
                     proposedPolicies.removeValue(forKey: process)

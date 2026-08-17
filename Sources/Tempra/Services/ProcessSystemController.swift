@@ -23,6 +23,9 @@ private enum ProcessSystemControllerError: LocalizedError {
 
 protocol ProcessSystemControlling: Sendable {
     func totalCPUTime(for processes: Set<ProcessIdentity>) async throws -> UInt64
+    func audioActivity(
+        for processes: Set<ProcessIdentity>
+    ) async -> ProcessAudioActivity
     func networkActivity(for process: ProcessIdentity) async -> ProcessNetworkActivity
     func criticalFileActivity(
         for process: ProcessIdentity
@@ -34,7 +37,16 @@ protocol ProcessSystemControlling: Sendable {
     func resume(_ processes: Set<ProcessIdentity>) async -> ProcessOperationResult
     func lowerPriority(_ processes: Set<ProcessIdentity>) async -> ProcessOperationResult
     func restorePriority(_ processes: Set<ProcessIdentity>) async -> ProcessOperationResult
+    func applyLimitPriority(_ processes: Set<ProcessIdentity>) async -> ProcessOperationResult
     func terminate(_ processes: Set<ProcessIdentity>) async -> ProcessOperationResult
+}
+
+extension ProcessSystemControlling {
+    func audioActivity(
+        for processes: Set<ProcessIdentity>
+    ) async -> ProcessAudioActivity {
+        .inactive
+    }
 }
 
 struct LiveProcessSystemController: ProcessSystemControlling {
@@ -52,6 +64,15 @@ struct LiveProcessSystemController: ProcessSystemControlling {
             total = sum.partialValue
         }
         return total
+    }
+
+    func audioActivity(
+        for processes: Set<ProcessIdentity>
+    ) async -> ProcessAudioActivity {
+        let currentProcessIdentifiers = Set(processes.compactMap { process in
+            Self.currentIdentity(for: process.pid) == process ? process.pid : nil
+        })
+        return AudioOutputProbe.activity(for: currentProcessIdentifiers)
     }
 
     func networkActivity(for process: ProcessIdentity) async -> ProcessNetworkActivity {
@@ -80,6 +101,10 @@ struct LiveProcessSystemController: ProcessSystemControlling {
     }
 
     func restorePriority(_ processes: Set<ProcessIdentity>) async -> ProcessOperationResult {
+        ProcessOperationResult(failed: processes)
+    }
+
+    func applyLimitPriority(_ processes: Set<ProcessIdentity>) async -> ProcessOperationResult {
         ProcessOperationResult(failed: processes)
     }
 
@@ -190,6 +215,12 @@ struct RoutedProcessSystemController: ProcessSystemControlling {
         return sum.partialValue
     }
 
+    func audioActivity(
+        for processes: Set<ProcessIdentity>
+    ) async -> ProcessAudioActivity {
+        await local.audioActivity(for: processes)
+    }
+
     func networkActivity(for process: ProcessIdentity) async -> ProcessNetworkActivity {
         await local.networkActivity(for: process)
     }
@@ -227,6 +258,12 @@ struct RoutedProcessSystemController: ProcessSystemControlling {
         _ processes: Set<ProcessIdentity>
     ) async -> ProcessOperationResult {
         await applyPrivileged(.restorePriority, to: processes)
+    }
+
+    func applyLimitPriority(
+        _ processes: Set<ProcessIdentity>
+    ) async -> ProcessOperationResult {
+        await applyPrivileged(.limitPriority, to: processes)
     }
 
     func terminate(_ processes: Set<ProcessIdentity>) async -> ProcessOperationResult {

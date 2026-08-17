@@ -87,11 +87,22 @@ monitor-only mode. Protected processes include WindowServer, Finder, Dock,
 SystemUIServer, loginwindow, and WindowManager. Tempra does not stop, lower the
 priority of, or terminate these processes.
 
-Before Tempra stops a process, an independent watchdog records its process ID
-and start time. The watchdog resumes only the matching process if Tempra exits
-unexpectedly. The administrator helper also sets automatic-resume deadlines for
-privileged CPU-limit pulses. Tempra blocks a normal quit and shows an error if
-it cannot restore every managed process.
+Before Tempra stops a process, a signed process guardian records the process ID
+and start time in a durable journal. The guardian confirms the journal write
+before it sends the stop signal. The guardian sends a resume signal only when
+the process ID and start time still match.
+
+The guardian has a five-second lease. Tempra renews the lease each second while
+the guardian protects a process. The guardian restores all protected processes
+if Tempra exits, the connection closes, or the lease expires. The `launchd`
+service restarts the guardian after an unsuccessful exit. A new guardian
+restores the journaled processes before it accepts new management requests.
+Tempra does not replace a registered guardian while its journal contains a
+protected process.
+
+The administrator helper also sets automatic-resume deadlines for privileged
+CPU-limit pulses. Tempra blocks a normal quit and shows an error if it cannot
+restore every managed process.
 
 Tempra validates saved rules, preferences, history, and management records
 before it starts process management. If saved data is invalid, Tempra preserves
@@ -103,7 +114,7 @@ Tempra shows an error and does not treat the failed write as successful.
 - macOS 14.2 or later
 - Swift 5.10 or later
 - An Apple Development or Developer ID Application signing identity for the app
-  bundle and its administrator helper
+  bundle, process guardian, and administrator helper
 
 ## Build from source
 
@@ -113,11 +124,12 @@ Run this command from the repository root:
 ./script/build_and_run.sh
 ```
 
-The script makes an optimized release build, adds the watchdog and administrator
-helper, signs every executable with an Apple code-signing identity, creates
-`dist/Tempra.app`, and opens the app. It selects the first available Apple
-Development or Developer ID Application identity. Set `CODE_SIGN_IDENTITY` to
-select a different identity:
+The script makes an optimized release build. It adds the process guardian launch
+agent and the administrator helper. It embeds Sparkle and signs each nested
+component with an Apple code-signing identity. It creates `dist/Tempra.app` and
+opens the app. The script selects the first available Apple Development or
+Developer ID Application identity. Set `CODE_SIGN_IDENTITY` to select a
+different identity:
 
 ```sh
 CODE_SIGN_IDENTITY="Apple Development: Your Name (TEAMID)" ./script/build_and_run.sh
@@ -142,7 +154,8 @@ swift test
 ## Build a release DMG
 
 A release DMG requires a `Developer ID Application` identity and validated
-notarization credentials. An Apple Development identity is not sufficient for
+notarization credentials. It also requires the Tempra Sparkle signing key in
+the login Keychain. An Apple Development identity is not sufficient for
 distribution.
 
 1. Install the `Developer ID Application` identity in the login Keychain.
@@ -160,7 +173,8 @@ distribution.
    ./script/package_release_dmg.sh
    ```
 
-4. If the matching GitHub release exists, add `--upload` to attach the DMG:
+4. If the matching GitHub release exists, add `--upload` to attach the DMG and
+   the signed `appcast.xml` file:
 
    ```sh
    CODE_SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" \
@@ -169,7 +183,25 @@ distribution.
    ```
 
 The script stops if Developer ID signing, notarization, stapling, Gatekeeper
-assessment, or GitHub authentication fails.
+assessment, Sparkle signing, or GitHub authentication fails. Increase both
+`APP_VERSION` and `APP_BUILD` in `script/build_and_run.sh` before each release.
+`APP_BUILD` must always increase.
+
+The Sparkle private key uses the Keychain account `tempra`. To move release
+work to another Mac, export the key on the current release Mac. Import it on
+the new release Mac. Keep the exported file secret. Delete it after the import.
+
+```sh
+.build/artifacts/sparkle/Sparkle/bin/generate_keys \
+  --account tempra -x /secure/path/tempra-sparkle-key
+
+.build/artifacts/sparkle/Sparkle/bin/generate_keys \
+  --account tempra -f /secure/path/tempra-sparkle-key
+```
+
+Tempra reads the stable update feed from the latest GitHub release. The release
+script signs the feed and each update archive. Tempra stops the update if feed
+or archive verification fails.
 
 If an Apple Developer Program membership is not available, you can create an
 explicitly labeled, unnotarized DMG with an Apple Development identity:

@@ -6,6 +6,7 @@ private enum POSIXProcessPriority {
     static let minimumNiceValue = Int32(PRIO_MIN)
     static let maximumNiceValue = Int32(PRIO_MAX)
     static let lowerPriorityNiceValue: Int32 = 10
+    static let limitPulseNiceValue: Int32 = 3
 }
 
 public struct ProcessPriorityPolicyState: Codable, Equatable, Hashable, Sendable {
@@ -43,6 +44,7 @@ public enum ProcessPriorityControllerError: LocalizedError, Equatable, Sendable 
 
 public struct ProcessPriorityController: Sendable {
     public static let lowerPriorityNiceValue = POSIXProcessPriority.lowerPriorityNiceValue
+    public static let limitPulseNiceValue = POSIXProcessPriority.limitPulseNiceValue
 
     public init() {}
 
@@ -57,6 +59,17 @@ public struct ProcessPriorityController: Sendable {
         )
     }
 
+    public static func limitState(
+        from original: ProcessPriorityPolicyState
+    ) throws -> ProcessPriorityPolicyState {
+        guard original.isValid else {
+            throw ProcessPriorityControllerError.invalidPolicyState
+        }
+        return ProcessPriorityPolicyState(
+            niceValue: max(original.niceValue, limitPulseNiceValue)
+        )
+    }
+
     static func shouldRestore(
         current: ProcessPriorityPolicyState,
         original: ProcessPriorityPolicyState
@@ -64,7 +77,9 @@ public struct ProcessPriorityController: Sendable {
         guard current.isValid else {
             throw ProcessPriorityControllerError.invalidPolicyState
         }
-        return current == (try loweredState(from: original))
+        let lowered = try loweredState(from: original)
+        let limited = try limitState(from: original)
+        return current == lowered || current == limited
     }
 
     public func state(for processIdentifier: Int32) throws -> ProcessPriorityPolicyState {
@@ -93,6 +108,20 @@ public struct ProcessPriorityController: Sendable {
         for processIdentifier: Int32
     ) throws {
         try write(Self.loweredState(from: original), to: processIdentifier)
+    }
+
+    public func applyLimitPriority(
+        from original: ProcessPriorityPolicyState,
+        for processIdentifier: Int32
+    ) throws {
+        try write(Self.limitState(from: original), to: processIdentifier)
+    }
+
+    public func setNiceValue(
+        _ niceValue: Int32,
+        for processIdentifier: Int32
+    ) throws {
+        try write(ProcessPriorityPolicyState(niceValue: niceValue), to: processIdentifier)
     }
 
     public func restore(

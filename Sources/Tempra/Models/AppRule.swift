@@ -307,6 +307,16 @@ struct AppRule: Codable, Equatable, Identifiable, Sendable {
     var usesLowerCPUPriority: Bool {
         lowersCPUPriority
     }
+
+    func hasSameLimiterConfiguration(as other: AppRule) -> Bool {
+        action == other.action
+            && lowersCPUPriority == other.lowersCPUPriority
+            && limitPercent == other.limitPercent
+            && delaySeconds == other.delaySeconds
+            && protectAudio == other.protectAudio
+            && onlyWhenHidden == other.onlyWhenHidden
+            && isEnabled == other.isEnabled
+    }
 }
 
 extension AppRule {

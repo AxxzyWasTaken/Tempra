@@ -1,7 +1,52 @@
 import CoreAudio
 import Darwin
 
+enum ProcessAudioActivity: Equatable, Sendable {
+    case active
+    case inactive
+    case unknown
+}
+
 enum AudioOutputProbe {
+    static func activity(
+        for processIdentifiers: Set<pid_t>
+    ) -> ProcessAudioActivity {
+        guard !processIdentifiers.isEmpty else { return .inactive }
+        var hadReadFailure = false
+
+        for processIdentifier in processIdentifiers.sorted() {
+            let processObject = LiveAudioActivityBackend.processObjectResult(
+                for: processIdentifier
+            )
+            guard processObject.status == noErr else {
+                hadReadFailure = true
+                continue
+            }
+            guard processObject.objectID != kAudioObjectUnknown else { continue }
+
+            var isRunningOutput: UInt32 = 0
+            var valueSize = UInt32(MemoryLayout<UInt32>.size)
+            var outputAddress = LiveAudioActivityBackend.runningOutputAddress
+            let status = AudioObjectGetPropertyData(
+                processObject.objectID,
+                &outputAddress,
+                0,
+                nil,
+                &valueSize,
+                &isRunningOutput
+            )
+            guard status == noErr else {
+                hadReadFailure = true
+                continue
+            }
+            if isRunningOutput != 0 {
+                return .active
+            }
+        }
+
+        return hadReadFailure ? .unknown : .inactive
+    }
+
     static func playingProcessIdentifiers() -> Set<pid_t> {
         Set(processObjects().compactMap { processObject in
             guard isProducingOutput(processObject: processObject) else { return nil }
@@ -153,6 +198,15 @@ final class LiveAudioActivityBackend: AudioActivityBackend, @unchecked Sendable 
     }
 
     fileprivate static func processObject(for processIdentifier: pid_t) -> AudioObjectID? {
+        let result = processObjectResult(for: processIdentifier)
+        return result.status == noErr && result.objectID != kAudioObjectUnknown
+            ? result.objectID
+            : nil
+    }
+
+    fileprivate static func processObjectResult(
+        for processIdentifier: pid_t
+    ) -> (status: OSStatus, objectID: AudioObjectID) {
         var pid = processIdentifier
         var objectID = AudioObjectID(kAudioObjectUnknown)
         var size = UInt32(MemoryLayout<AudioObjectID>.size)
@@ -171,7 +225,7 @@ final class LiveAudioActivityBackend: AudioActivityBackend, @unchecked Sendable 
                 &objectID
             )
         }
-        return status == noErr && objectID != kAudioObjectUnknown ? objectID : nil
+        return (status, objectID)
     }
 
     fileprivate static var runningOutputAddress: AudioObjectPropertyAddress {

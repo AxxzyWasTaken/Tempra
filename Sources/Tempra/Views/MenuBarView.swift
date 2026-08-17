@@ -135,6 +135,7 @@ private struct HeaderActionsMenu: View, Equatable {
     let appearance: AppAppearance
     let managementPauseUntil: Date?
     let isMonitorDetached: Bool
+    let canCheckForUpdates: Bool
     let onScopeChange: (MenuScope) -> Void
     let onHistoryRangeChange: (CPUHistoryRange) -> Void
     let onAppearanceChange: (AppAppearance) -> Void
@@ -142,6 +143,7 @@ private struct HeaderActionsMenu: View, Equatable {
     let onResumeManagement: () -> Void
     let onSetMonitorDetached: (Bool) -> Void
     let onExportDiagnostics: () -> Void
+    let onCheckForUpdates: () -> Void
     let onShowSettings: () -> Void
     let onQuit: () -> Void
 
@@ -152,6 +154,7 @@ private struct HeaderActionsMenu: View, Equatable {
             && lhs.appearance == rhs.appearance
             && lhs.managementPauseUntil == rhs.managementPauseUntil
             && lhs.isMonitorDetached == rhs.isMonitorDetached
+            && lhs.canCheckForUpdates == rhs.canCheckForUpdates
     }
 
     var body: some View {
@@ -219,6 +222,8 @@ private struct HeaderActionsMenu: View, Equatable {
 
             Divider()
 
+            Button("Check for Updates…", action: onCheckForUpdates)
+                .disabled(!canCheckForUpdates)
             Button("Settings…", action: onShowSettings)
             Button("Quit Tempra", action: onQuit)
         } label: {
@@ -249,6 +254,7 @@ private struct ProcessRowFramesKey: PreferenceKey {
 struct MenuBarView: View {
     @ObservedObject var store: AppStore
     @ObservedObject var presentation: MenuPanelPresentation
+    @ObservedObject var updateController: TempraUpdateController
 
     @State private var scope: MenuScope = .running
     @State private var searchText = ""
@@ -396,6 +402,7 @@ struct MenuBarView: View {
                 appearance: store.preferences.appearance,
                 managementPauseUntil: store.preferences.managementPauseUntil,
                 isMonitorDetached: presentation.isMonitorDetached,
+                canCheckForUpdates: updateController.canCheckForUpdates,
                 onScopeChange: { scope = $0 },
                 onHistoryRangeChange: store.setHistoryRange,
                 onAppearanceChange: store.setAppearance,
@@ -407,6 +414,7 @@ struct MenuBarView: View {
                         await store.exportDiagnostics()
                     }
                 },
+                onCheckForUpdates: updateController.checkForUpdates,
                 onShowSettings: {
                     presentation.showSettings()
                 },
@@ -685,7 +693,9 @@ struct MenuBarView: View {
             }
         }
         .contextMenu {
-            contextMenu(for: item, anchorKey: anchorKey)
+            if !item.isCurrentApplication {
+                contextMenu(for: item, anchorKey: anchorKey)
+            }
         }
     }
 
@@ -1113,6 +1123,7 @@ struct MenuBarView: View {
     }
 
     private func select(item: AppDisplayItem, anchorKey: String) {
+        guard !item.isCurrentApplication else { return }
         if !item.canManageProcess {
             showActivity(item: item, anchorKey: anchorKey)
             return

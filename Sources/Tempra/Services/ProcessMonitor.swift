@@ -898,6 +898,7 @@ final class ProcessMonitor {
                 isService: bundle.isService,
                 isBackgroundProcess: bundle.isBackgroundProcess,
                 isSystemProcess: bundle.isSystemProcess,
+                isCurrentApplication: bundle.identifier == inventory.ownBundleIdentifier,
                 status: .normal
             )
         }
@@ -1181,8 +1182,7 @@ final class ProcessMonitor {
 
         for application in inventory.applications {
             let identifier = application.bundleIdentifier
-            guard identifier != inventory.ownBundleIdentifier,
-                  BackgroundProcessPolicy.shouldIncludeApplication(
+            guard BackgroundProcessPolicy.shouldIncludeApplication(
                     bundleIdentifier: identifier,
                     activationPolicy: application.activationPolicy,
                     includesBackgroundProcesses: includesEssentialSystemProcesses

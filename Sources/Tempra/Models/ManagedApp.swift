@@ -102,6 +102,7 @@ struct ManagedApp: Identifiable, Sendable {
     let isService: Bool
     let isBackgroundProcess: Bool
     let isSystemProcess: Bool
+    let isCurrentApplication: Bool
     let requiresPrivilegedControl: Bool
     var windowVisibility: AppWindowVisibility
     var isProtectedByForegroundOverlay: Bool
@@ -123,6 +124,7 @@ struct ManagedApp: Identifiable, Sendable {
         isService: Bool = false,
         isBackgroundProcess: Bool = false,
         isSystemProcess: Bool,
+        isCurrentApplication: Bool = false,
         requiresPrivilegedControl: Bool? = nil,
         windowVisibility: AppWindowVisibility = .unknown,
         isProtectedByForegroundOverlay: Bool = false,
@@ -157,6 +159,7 @@ struct ManagedApp: Identifiable, Sendable {
         self.isService = isService
         self.isBackgroundProcess = isBackgroundProcess
         self.isSystemProcess = isSystemProcess
+        self.isCurrentApplication = isCurrentApplication
         self.requiresPrivilegedControl = requiresPrivilegedControl
             ?? (processIdentities.contains(where: \.requiresPrivilegedControl)
                 || (isSystemProcess && processIdentities.isEmpty))

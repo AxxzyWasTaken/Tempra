@@ -388,6 +388,49 @@ struct UIDerivationTests {
         #expect(projected.isCPULimitSessionActive)
     }
 
+    @Test("The current application is visible but cannot have a projected rule")
+    func currentApplicationProjection() throws {
+        let identifier = "example.tempra"
+        let app = ManagedApp(
+            bundleIdentifier: identifier,
+            name: "Tempra",
+            bundleURL: nil,
+            processIdentifiers: [100],
+            cpuPercent: 8,
+            isFrontmost: false,
+            isHidden: false,
+            isPlayingAudio: false,
+            isSystemProcess: false,
+            isCurrentApplication: true,
+            status: .normal
+        )
+        let projected = try #require(DisplayItemProjection.project(
+            apps: [app],
+            rules: [identifier: rule(identifier)],
+            suspensions: [:],
+            isEnabled: true,
+            averageCPUByIdentifier: [identifier: 7],
+            savedCPUByIdentifier: [:],
+            attentionIdentifiers: [identifier],
+            iconCache: AppIconCache()
+        ).first)
+        let runningList = MenuBarItemLists(
+            displayItems: [projected],
+            includesBackgroundAndSystemProcesses: false,
+            scope: .running,
+            processSort: .name,
+            searchText: ""
+        )
+
+        #expect(projected.isCurrentApplication)
+        #expect(projected.rule == nil)
+        #expect(projected.status == .normal)
+        #expect(!projected.isAttention)
+        #expect(!projected.canManageProcess)
+        #expect(runningList.processItems.map(\.bundleIdentifier) == [identifier])
+        #expect(runningList.managedItems.isEmpty)
+    }
+
     @Test("Background and system processes stay hidden from Running when disabled")
     func backgroundAndSystemProcessVisibility() {
         let backgroundIdentifier = BackgroundProcessPolicy.userOwnedIdentifier(
@@ -662,6 +705,11 @@ struct UIDerivationTests {
             name: "Stopped",
             isRunning: false
         )
+        let currentApplication = item(
+            identifier: "tempra",
+            name: "Tempra",
+            isCurrentApplication: true
+        )
         let windowServer = item(
             identifier: BackgroundProcessPolicy.identifier(
                 command: "/System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer",
@@ -688,6 +736,11 @@ struct UIDerivationTests {
         #expect(!standalone.canControlApplication)
         #expect(!protected.canControlApplication)
         #expect(!stopped.canControlApplication)
+        #expect(!currentApplication.canManageProcess)
+        #expect(!currentApplication.canControlApplication)
+        #expect(!currentApplication.canQuitProcess)
+        #expect(!currentApplication.canLimitCPU)
+        #expect(currentApplication.stateText == "Current application")
         #expect(!windowServer.canManageProcess)
         #expect(!windowServer.canLimitCPU)
         #expect(!windowServer.canQuitProcess)
@@ -847,6 +900,7 @@ struct UIDerivationTests {
         isRunning: Bool = true,
         isBackgroundProcess: Bool = false,
         isSystemProcess: Bool = false,
+        isCurrentApplication: Bool = false,
         rule: AppRule? = nil,
         isAttention: Bool = false,
         iconCache: AppIconCache? = nil,
@@ -867,6 +921,7 @@ struct UIDerivationTests {
             isPlayingAudio: false,
             isBackgroundProcess: isBackgroundProcess,
             isSystemProcess: isSystemProcess,
+            isCurrentApplication: isCurrentApplication,
             status: status ?? (isRunning ? .normal : .notRunning),
             rule: rule,
             isAttention: isAttention,

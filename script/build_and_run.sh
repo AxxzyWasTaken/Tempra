@@ -9,6 +9,9 @@ LEGACY_APP_NAME="Temper"
 BUNDLE_ID="io.github.temperapp.Temper"
 MIN_SYSTEM_VERSION="14.2"
 APP_VERSION="0.3.1"
+APP_BUILD="4"
+SPARKLE_FEED_URL="https://github.com/AxxzyWasTaken/Tempra/releases/latest/download/appcast.xml"
+SPARKLE_PUBLIC_ED_KEY="KSf1SkknxXbBw4qzlfjX+nYI2ebO/LBh+uFMVSyU/ek="
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DIST_DIR="$ROOT_DIR/dist"
@@ -16,27 +19,54 @@ APP_BUNDLE="$DIST_DIR/$APP_NAME.app"
 APP_CONTENTS="$APP_BUNDLE/Contents"
 APP_MACOS="$APP_CONTENTS/MacOS"
 APP_RESOURCES="$APP_CONTENTS/Resources"
+APP_FRAMEWORKS="$APP_CONTENTS/Frameworks"
 APP_HELPER_TOOLS="$APP_CONTENTS/Library/HelperTools"
+APP_LAUNCH_AGENTS="$APP_CONTENTS/Library/LaunchAgents"
 APP_LAUNCH_DAEMONS="$APP_CONTENTS/Library/LaunchDaemons"
 APP_BINARY="$APP_MACOS/$APP_NAME"
 WATCHDOG_BINARY="$APP_MACOS/$WATCHDOG_NAME"
+PROCESS_GUARDIAN_LABEL="$BUNDLE_ID.ProcessGuardian"
+PROCESS_GUARDIAN_PLIST="$APP_LAUNCH_AGENTS/$PROCESS_GUARDIAN_LABEL.plist"
 PRIVILEGED_HELPER_BINARY="$APP_HELPER_TOOLS/$PRIVILEGED_HELPER_NAME"
 PRIVILEGED_HELPER_LABEL="$BUNDLE_ID.PrivilegedHelper"
 PRIVILEGED_HELPER_PLIST="$APP_LAUNCH_DAEMONS/$PRIVILEGED_HELPER_LABEL.plist"
 INFO_PLIST="$APP_CONTENTS/Info.plist"
 APP_ICON="$ROOT_DIR/Resources/AppIcon.icns"
+SPARKLE_FRAMEWORK_SOURCE="$ROOT_DIR/.build/artifacts/sparkle/Sparkle/Sparkle.xcframework/macos-arm64_x86_64/Sparkle.framework"
+SPARKLE_LICENSE_SOURCE="$ROOT_DIR/.build/artifacts/sparkle/Sparkle/LICENSE"
+SPARKLE_FRAMEWORK="$APP_FRAMEWORKS/Sparkle.framework"
+SPARKLE_VERSION_DIRECTORY="$SPARKLE_FRAMEWORK/Versions/B"
 
 stop_running_process() {
   local process_name="$1"
   local attempt
+  local quit_request_pid
 
   if ! pgrep -x "$process_name" >/dev/null; then
     return 0
   fi
 
-  if ! /usr/bin/osascript \
-    -e "tell application id \"$BUNDLE_ID\" to quit" >/dev/null 2>&1; then
-    echo "Could not quit $process_name cleanly; refusing to leave managed apps stopped" >&2
+  /usr/bin/osascript \
+    -e "tell application id \"$BUNDLE_ID\" to quit" >/dev/null 2>&1 &
+  quit_request_pid=$!
+
+  for ((attempt = 0; attempt < 50; attempt++)); do
+    if ! /bin/kill -0 "$quit_request_pid" >/dev/null 2>&1; then
+      if ! wait "$quit_request_pid"; then
+        echo "Could not request a clean quit from $process_name." >&2
+        return 1
+      fi
+      quit_request_pid=""
+      break
+    fi
+    sleep 0.1
+  done
+
+  if [[ -n "$quit_request_pid" ]]; then
+    /bin/kill "$quit_request_pid" >/dev/null 2>&1 || true
+    wait "$quit_request_pid" 2>/dev/null || true
+    echo "Timed out while requesting a clean quit from $process_name." >&2
+    echo "The build stopped so it did not replace a running app." >&2
     return 1
   fi
 
@@ -68,6 +98,15 @@ BUILD_BIN_DIR="$(swift build -c "$BUILD_CONFIGURATION" --show-bin-path)"
 BUILD_BINARY="$BUILD_BIN_DIR/$APP_NAME"
 BUILD_WATCHDOG_BINARY="$BUILD_BIN_DIR/$WATCHDOG_NAME"
 BUILD_PRIVILEGED_HELPER_BINARY="$BUILD_BIN_DIR/$PRIVILEGED_HELPER_NAME"
+if [[ ! -d "$SPARKLE_FRAMEWORK_SOURCE" ]]; then
+  echo "The Sparkle framework is missing from the Swift package artifacts." >&2
+  echo "Run swift package resolve and retry the build." >&2
+  exit 1
+fi
+if [[ ! -f "$SPARKLE_LICENSE_SOURCE" ]]; then
+  echo "The Sparkle license is missing from the Swift package artifacts." >&2
+  exit 1
+fi
 
 SIGN_IDENTITY="${CODE_SIGN_IDENTITY:-}"
 if [[ -z "$SIGN_IDENTITY" ]]; then
@@ -94,11 +133,19 @@ case "${CODE_SIGN_TIMESTAMP:-0}" in
 esac
 
 rm -rf "$APP_BUNDLE"
-mkdir -p "$APP_MACOS" "$APP_RESOURCES" "$APP_HELPER_TOOLS" "$APP_LAUNCH_DAEMONS"
+mkdir -p \
+  "$APP_MACOS" \
+  "$APP_RESOURCES" \
+  "$APP_FRAMEWORKS" \
+  "$APP_HELPER_TOOLS" \
+  "$APP_LAUNCH_AGENTS" \
+  "$APP_LAUNCH_DAEMONS"
 cp "$BUILD_BINARY" "$APP_BINARY"
 cp "$BUILD_WATCHDOG_BINARY" "$WATCHDOG_BINARY"
 cp "$BUILD_PRIVILEGED_HELPER_BINARY" "$PRIVILEGED_HELPER_BINARY"
 cp "$APP_ICON" "$APP_RESOURCES/AppIcon.icns"
+cp "$SPARKLE_LICENSE_SOURCE" "$APP_RESOURCES/Sparkle-LICENSE.txt"
+/usr/bin/ditto "$SPARKLE_FRAMEWORK_SOURCE" "$SPARKLE_FRAMEWORK"
 chmod +x "$APP_BINARY" "$WATCHDOG_BINARY" "$PRIVILEGED_HELPER_BINARY"
 
 cat >"$INFO_PLIST" <<PLIST
@@ -117,7 +164,7 @@ cat >"$INFO_PLIST" <<PLIST
   <key>CFBundleShortVersionString</key>
   <string>$APP_VERSION</string>
   <key>CFBundleVersion</key>
-  <string>4</string>
+  <string>$APP_BUILD</string>
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>LSMinimumSystemVersion</key>
@@ -128,6 +175,45 @@ cat >"$INFO_PLIST" <<PLIST
   <true/>
   <key>NSPrincipalClass</key>
   <string>NSApplication</string>
+  <key>SUFeedURL</key>
+  <string>$SPARKLE_FEED_URL</string>
+  <key>SUPublicEDKey</key>
+  <string>$SPARKLE_PUBLIC_ED_KEY</string>
+  <key>SUVerifyUpdateBeforeExtraction</key>
+  <true/>
+  <key>SURequireSignedFeed</key>
+  <true/>
+  <key>SUSignedFeedFailureExpirationInterval</key>
+  <integer>0</integer>
+</dict>
+</plist>
+PLIST
+
+cat >"$PROCESS_GUARDIAN_PLIST" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>AssociatedBundleIdentifiers</key>
+  <array>
+    <string>$BUNDLE_ID</string>
+  </array>
+  <key>Label</key>
+  <string>$PROCESS_GUARDIAN_LABEL</string>
+  <key>BundleProgram</key>
+  <string>Contents/MacOS/$WATCHDOG_NAME</string>
+  <key>MachServices</key>
+  <dict>
+    <key>$PROCESS_GUARDIAN_LABEL</key>
+    <true/>
+  </dict>
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+  <key>ProcessType</key>
+  <string>Interactive</string>
 </dict>
 </plist>
 PLIST
@@ -156,7 +242,20 @@ cat >"$PRIVILEGED_HELPER_PLIST" <<PLIST
 </plist>
 PLIST
 
-/usr/bin/plutil -lint "$INFO_PLIST" "$PRIVILEGED_HELPER_PLIST"
+/usr/bin/plutil -lint \
+  "$INFO_PLIST" \
+  "$PROCESS_GUARDIAN_PLIST" \
+  "$PRIVILEGED_HELPER_PLIST"
+/usr/bin/codesign "${SIGNING_ARGUMENTS[@]}" \
+  "$SPARKLE_VERSION_DIRECTORY/XPCServices/Installer.xpc"
+/usr/bin/codesign "${SIGNING_ARGUMENTS[@]}" \
+  --preserve-metadata=entitlements \
+  "$SPARKLE_VERSION_DIRECTORY/XPCServices/Downloader.xpc"
+/usr/bin/codesign "${SIGNING_ARGUMENTS[@]}" \
+  "$SPARKLE_VERSION_DIRECTORY/Autoupdate"
+/usr/bin/codesign "${SIGNING_ARGUMENTS[@]}" \
+  "$SPARKLE_VERSION_DIRECTORY/Updater.app"
+/usr/bin/codesign "${SIGNING_ARGUMENTS[@]}" "$SPARKLE_FRAMEWORK"
 /usr/bin/codesign "${SIGNING_ARGUMENTS[@]}" \
   --identifier "$BUNDLE_ID.watchdog" "$WATCHDOG_BINARY"
 /usr/bin/codesign "${SIGNING_ARGUMENTS[@]}" \

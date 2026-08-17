@@ -12,11 +12,10 @@ enum ProcessLimitSchedulerModel {
         var lastAccountingAt: ContinuousClock.Instant
         var runStartedAt: ContinuousClock.Instant?
         var estimatedFullSpeedCPU: Double
-        var cpuCreditNanoseconds: Double
         var lastMeasuredCPUPercent: Double?
-        var demandProbeCPUNanoseconds: Double
-        var demandProbeWallDuration: TimeInterval
+        var dutyFactor: TimeInterval
         var hasActivatedLimit: Bool
+        var scheduledStopDuration: TimeInterval
         var stoppedAt: ContinuousClock.Instant?
         var generation: UInt64
         var phase: Phase

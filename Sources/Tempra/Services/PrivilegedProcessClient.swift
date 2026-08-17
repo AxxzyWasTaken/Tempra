@@ -620,29 +620,31 @@ actor PrivilegedProcessClient {
     private func send(
         _ request: PrivilegedProcessRequest
     ) async throws -> PrivilegedProcessResponse {
-        let lifecycle = await registrationLifecycle()
-        do {
-            let preparation = try await lifecycle.prepareForRequest()
-            if preparation.didRefresh {
+        if connection == nil {
+            let lifecycle = await registrationLifecycle()
+            do {
+                let preparation = try await lifecycle.prepareForRequest()
+                if preparation.didRefresh {
+                    invalidate()
+                }
+            } catch let error as PrivilegedHelperLifecycleError {
                 invalidate()
-            }
-        } catch let error as PrivilegedHelperLifecycleError {
-            invalidate()
-            switch error {
-            case .serviceNotEnabled:
-                throw PrivilegedProcessClientError.serviceNotEnabled
-            case .requiresApproval:
-                throw PrivilegedProcessClientError.serviceRequiresApproval
-            case .unregistrationFailed, .registrationFailed:
+                switch error {
+                case .serviceNotEnabled:
+                    throw PrivilegedProcessClientError.serviceNotEnabled
+                case .requiresApproval:
+                    throw PrivilegedProcessClientError.serviceRequiresApproval
+                case .unregistrationFailed, .registrationFailed:
+                    throw PrivilegedProcessClientError.helperUpdateFailed(
+                        error.localizedDescription
+                    )
+                }
+            } catch {
+                invalidate()
                 throw PrivilegedProcessClientError.helperUpdateFailed(
                     error.localizedDescription
                 )
             }
-        } catch {
-            invalidate()
-            throw PrivilegedProcessClientError.helperUpdateFailed(
-                error.localizedDescription
-            )
         }
 
         let encoded = try JSONEncoder().encode(request)

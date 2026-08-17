@@ -54,7 +54,8 @@ struct HighCPUDetector {
         now: Date = Date()
     ) -> HighCPUDetectionResult {
         let trackedApps = apps.compactMap { app -> (ManagedApp, ProcessIdentity)? in
-            guard !app.isSystemProcess,
+            guard !app.isCurrentApplication,
+                  !app.isSystemProcess,
                   !SoundSourceCompatibilityPolicy.isProtected(
                       bundleIdentifier: app.bundleIdentifier,
                       applicationURL: app.bundleURL

@@ -98,8 +98,12 @@ struct ProcessRowView: View {
             )
         }
         .buttonStyle(.plain)
-        .opacity(item.isRunning ? 1 : 0.58)
+        .disabled(item.isCurrentApplication)
+        .opacity(
+            item.isCurrentApplication ? 0.45 : (item.isRunning ? 1 : 0.58)
+        )
         .help(rowHelp)
+        .accessibilityHint(rowHelp)
     }
 
     @ViewBuilder
@@ -122,6 +126,9 @@ struct ProcessRowView: View {
     }
 
     private var ruleTag: String? {
+        if item.isCurrentApplication {
+            return "this app"
+        }
         if item.isSoundSourceComponent {
             return "audio"
         }
@@ -141,6 +148,9 @@ struct ProcessRowView: View {
     }
 
     private var rowHelp: String {
+        if item.isCurrentApplication {
+            return "Tempra cannot control itself"
+        }
         if item.isSoundSourceComponent {
             return "SoundSource audio component · monitor only"
         }

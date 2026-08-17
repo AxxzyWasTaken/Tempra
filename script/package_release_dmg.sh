@@ -6,6 +6,10 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BUILD_SCRIPT="$ROOT_DIR/script/build_and_run.sh"
 DIST_DIR="$ROOT_DIR/dist"
 APP_BUNDLE="$DIST_DIR/$APP_NAME.app"
+UPDATES_DIR="$DIST_DIR/updates"
+APPCAST_PATH="$UPDATES_DIR/appcast.xml"
+SPARKLE_ACCOUNT="tempra"
+SPARKLE_GENERATE_APPCAST="$ROOT_DIR/.build/artifacts/sparkle/Sparkle/bin/generate_appcast"
 UPLOAD_RELEASE=false
 UNNOTARIZED=false
 
@@ -32,6 +36,11 @@ done
 APP_VERSION="$(/usr/bin/sed -n 's/^APP_VERSION="\([0-9][0-9.]*\)"$/\1/p' "$BUILD_SCRIPT")"
 if [[ ! "$APP_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
   echo "The app version in $BUILD_SCRIPT is missing or invalid." >&2
+  exit 1
+fi
+APP_BUILD="$(/usr/bin/sed -n 's/^APP_BUILD="\([0-9][0-9]*\)"$/\1/p' "$BUILD_SCRIPT")"
+if [[ ! "$APP_BUILD" =~ ^[0-9]+$ ]]; then
+  echo "The app build number in $BUILD_SCRIPT is missing or invalid." >&2
   exit 1
 fi
 
@@ -195,9 +204,34 @@ fi
 /bin/mv -f "$TEMP_DMG_PATH" "$DMG_PATH"
 /usr/bin/shasum -a 256 "$DMG_PATH"
 
+if ! $UNNOTARIZED; then
+  if [[ ! -x "$SPARKLE_GENERATE_APPCAST" ]]; then
+    echo "The Sparkle appcast tool is missing from the Swift package artifacts." >&2
+    exit 1
+  fi
+  mkdir -p "$UPDATES_DIR"
+  /usr/bin/ditto "$DMG_PATH" "$UPDATES_DIR/$DMG_FILENAME"
+  "$SPARKLE_GENERATE_APPCAST" \
+    --account "$SPARKLE_ACCOUNT" \
+    --download-url-prefix \
+    "https://github.com/AxxzyWasTaken/Tempra/releases/download/v$APP_VERSION/" \
+    --maximum-deltas 0 \
+    --versions "$APP_BUILD" \
+    "$UPDATES_DIR"
+  /usr/bin/xmllint --noout "$APPCAST_PATH"
+fi
+
 if $UPLOAD_RELEASE; then
-  gh release upload "v$APP_VERSION" "$DMG_PATH" --clobber
-  echo "Uploaded $DMG_PATH to release v$APP_VERSION."
+  if $UNNOTARIZED; then
+    gh release upload "v$APP_VERSION" "$DMG_PATH" --clobber
+    echo "Uploaded $DMG_PATH to release v$APP_VERSION."
+  else
+    gh release upload "v$APP_VERSION" "$DMG_PATH" "$APPCAST_PATH" --clobber
+    echo "Uploaded $DMG_PATH and $APPCAST_PATH to release v$APP_VERSION."
+  fi
 else
   echo "Created $DMG_PATH."
+  if ! $UNNOTARIZED; then
+    echo "Created $APPCAST_PATH."
+  fi
 fi

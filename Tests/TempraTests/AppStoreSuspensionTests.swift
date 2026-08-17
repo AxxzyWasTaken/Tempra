@@ -5,6 +5,61 @@ import Testing
 @Suite("App store suspensions")
 @MainActor
 struct AppStoreSuspensionTests {
+    @Test("A saved rule cannot manage the current application")
+    func currentApplicationCannotBeManaged() async throws {
+        try await withDefaults { defaults in
+            let identifier = "example.tempra"
+            let persistence = AppPersistence(defaults: defaults)
+            try persistence.saveRules([identifier: AppRule(
+                bundleIdentifier: identifier,
+                displayName: "Tempra",
+                action: .pause,
+                delaySeconds: 0
+            )])
+            let coordinator = ProcessManagementCoordinator(
+                controller: ProcessController(
+                    crashWatchdog: SuspensionTestProcessCrashWatchdog(),
+                    frontmostProvider: { nil }
+                ),
+                processWatcher: ManagedProcessWatcher(
+                    audioMonitor: SuspensionTestAudioMonitor()
+                )
+            )
+            let store = try AppStore(
+                persistence: persistence,
+                managementCoordinator: coordinator,
+                monitoringService: SuspensionTestMonitoringService(),
+                launchAtLoginController: SuspensionTestLaunchAtLoginController(),
+                startsMonitoring: false,
+                persistenceErrorHandler: { _ in }
+            )
+            store.applyMonitoringSample(
+                MonitoringSample(
+                    generation: 1,
+                    systemCPU: nil,
+                    apps: [ManagedApp(
+                        bundleIdentifier: identifier,
+                        name: "Tempra",
+                        bundleURL: nil,
+                        processIdentifiers: [],
+                        cpuPercent: 10,
+                        isFrontmost: false,
+                        isHidden: false,
+                        isPlayingAudio: false,
+                        isSystemProcess: false,
+                        isCurrentApplication: true,
+                        status: .normal
+                    )],
+                    didRefreshApplications: true
+                ),
+                demand: .dormant
+            )
+
+            #expect(await eventually { coordinator.statuses[identifier] == nil })
+            _ = await store.shutdown()
+        }
+    }
+
     @Test("A snoozed rule resumes at its deadline without another monitoring event")
     func snoozeExpiresWithoutMonitoringEvent() async throws {
         try await withDefaults { defaults in
@@ -19,6 +74,7 @@ struct AppStoreSuspensionTests {
             let clock = ManualSuspensionExpirationClock(now: Date())
             let coordinator = ProcessManagementCoordinator(
                 controller: ProcessController(
+                    crashWatchdog: SuspensionTestProcessCrashWatchdog(),
                     frontmostProvider: { nil },
                     windowSnapshotProvider: {
                         WindowVisibilitySnapshot(windowsFrontToBack: [], screenBounds: [])
@@ -92,7 +148,10 @@ struct AppStoreSuspensionTests {
             let store = try AppStore(
                 persistence: persistence,
                 managementCoordinator: ProcessManagementCoordinator(
-                    controller: ProcessController(frontmostProvider: { nil }),
+                    controller: ProcessController(
+                        crashWatchdog: SuspensionTestProcessCrashWatchdog(),
+                        frontmostProvider: { nil }
+                    ),
                     processWatcher: ManagedProcessWatcher(
                         audioMonitor: SuspensionTestAudioMonitor()
                     )
@@ -139,7 +198,10 @@ struct AppStoreSuspensionTests {
             let store = try AppStore(
                 persistence: persistence,
                 managementCoordinator: ProcessManagementCoordinator(
-                    controller: ProcessController(frontmostProvider: { nil }),
+                    controller: ProcessController(
+                        crashWatchdog: SuspensionTestProcessCrashWatchdog(),
+                        frontmostProvider: { nil }
+                    ),
                     processWatcher: ManagedProcessWatcher(
                         audioMonitor: SuspensionTestAudioMonitor()
                     )
@@ -176,6 +238,7 @@ struct AppStoreSuspensionTests {
             let clock = ManualSuspensionExpirationClock(now: Date())
             let coordinator = ProcessManagementCoordinator(
                 controller: ProcessController(
+                    crashWatchdog: SuspensionTestProcessCrashWatchdog(),
                     frontmostProvider: { nil },
                     windowSnapshotProvider: {
                         WindowVisibilitySnapshot(windowsFrontToBack: [], screenBounds: [])
@@ -248,6 +311,7 @@ struct AppStoreSuspensionTests {
             let clock = ManualSuspensionExpirationClock(now: Date())
             let coordinator = ProcessManagementCoordinator(
                 controller: ProcessController(
+                    crashWatchdog: SuspensionTestProcessCrashWatchdog(),
                     frontmostProvider: { nil },
                     windowSnapshotProvider: {
                         WindowVisibilitySnapshot(windowsFrontToBack: [], screenBounds: [])
@@ -419,6 +483,23 @@ private actor SuspensionTestAudioMonitor: AudioActivityMonitoring {
     ) {}
 
     func stop(revision: UInt64) {}
+}
+
+private actor SuspensionTestProcessCrashWatchdog:
+    ProcessCrashWatchdogControlling {
+    func prepareToStop(_ processes: Set<ProcessIdentity>) {}
+
+    func armAutomaticResume(
+        _ intervalsByProcess: [ProcessIdentity: TimeInterval]
+    ) {}
+
+    func synchronizeAutomaticResume(
+        _ intervalsByProcess: [ProcessIdentity: TimeInterval]
+    ) {}
+
+    func synchronize(_ processes: Set<ProcessIdentity>) {}
+
+    func disarm() {}
 }
 
 private actor SuspensionTestMonitoringService: MonitoringServicing {

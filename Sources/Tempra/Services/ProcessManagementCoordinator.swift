@@ -136,9 +136,16 @@ final class ProcessManagementCoordinator {
         onProcessChange: @escaping ChangeHandler
     ) {
         guard acceptsControllerResults, revision < .max else { return }
-        let protectedAudioIdentifiers = resolveProtectedAudioIdentifiers(for: apps)
+        let controllableApps = apps.filter { !$0.isCurrentApplication }
+        let currentApplicationIdentifiers = Set(
+            apps.lazy.filter(\.isCurrentApplication).map(\.bundleIdentifier)
+        )
+        let protectedAudioIdentifiers = resolveProtectedAudioIdentifiers(
+            for: controllableApps
+        )
         let effectiveRules = rules.compactMapValues { rule -> AppRule? in
             guard rule.isEnabled,
+                  !currentApplicationIdentifiers.contains(rule.bundleIdentifier),
                   !protectedAudioIdentifiers.contains(rule.bundleIdentifier),
                   suspensions[rule.bundleIdentifier]?.isActive != true else {
                 return nil
@@ -148,7 +155,9 @@ final class ProcessManagementCoordinator {
             )
             return normalized.hasBehavior ? normalized : nil
         }
-        let managedApps = apps.filter { effectiveRules[$0.bundleIdentifier] != nil }
+        let managedApps = controllableApps.filter {
+            effectiveRules[$0.bundleIdentifier] != nil
+        }
         processWatcher.watch(
             processIdentities: Set(managedApps.flatMap(\.processIdentities)),
             audioProcessIdentifiers: Set(managedApps.lazy.filter {
@@ -157,7 +166,7 @@ final class ProcessManagementCoordinator {
             onChange: onProcessChange
         )
 
-        let targets = apps.lazy.map {
+        let targets = controllableApps.lazy.map {
             ProcessControlTarget(
                 bundleIdentifier: $0.bundleIdentifier,
                 processIdentities: Set($0.processIdentities),

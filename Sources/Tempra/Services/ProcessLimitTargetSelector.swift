@@ -65,7 +65,7 @@ enum ProcessLimitTargetSelector {
         }
 
         let hardProtectedProcesses = Set(normalizedSamples.compactMap { sample in
-            !sample.hasCPUMeasurement
+            (normalizedSamples.count > 1 && !sample.hasCPUMeasurement)
                 || (protectsAudio && sample.isPlayingAudio)
                 ? sample.identity
                 : nil

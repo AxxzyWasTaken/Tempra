@@ -127,6 +127,69 @@ enum ProcessControlMath {
     static func releaseThreshold(for limitPercent: Double) -> Double {
         max(0, limitPercent - max(1, limitPercent * 0.1))
     }
+
+    static let limitPeriod: TimeInterval = 0.1
+    static let minimumDutyFactor: TimeInterval = 0.02
+    static let dutyFactorGain: Double = 0.2
+    static let firstEmptySamplePeriod: TimeInterval = 1
+
+    static func normalizedCPUPercent(_ value: Double) -> Double {
+        value.isFinite ? max(0, value) : 0
+    }
+
+    static func controlPeriod(
+        usage: Double,
+        previousDutyFactor: TimeInterval
+    ) -> TimeInterval {
+        let normalizedUsage = normalizedCPUPercent(usage)
+        let normalizedFactor = previousDutyFactor.isFinite ? max(0, previousDutyFactor) : 0
+        if normalizedUsage == 0 && normalizedFactor == 0 {
+            return firstEmptySamplePeriod
+        }
+        return limitPeriod
+    }
+
+    static func nextDutyFactor(
+        usage: Double,
+        limitPercent: Double,
+        previousDutyFactor: TimeInterval
+    ) -> TimeInterval {
+        let normalizedUsage = normalizedCPUPercent(usage)
+        let normalizedLimit = normalizedCPUPercent(limitPercent)
+        let previousFactor = previousDutyFactor.isFinite ? max(0, previousDutyFactor) : 0
+        let error = normalizedUsage - normalizedLimit
+        let period = controlPeriod(
+            usage: normalizedUsage,
+            previousDutyFactor: previousFactor
+        )
+        let seed = previousFactor == 0 && error > 0
+            ? minimumDutyFactor
+            : previousFactor
+        let factor = seed + dutyFactorGain * error * period
+        if factor > period {
+            return period
+        }
+        if factor < minimumDutyFactor {
+            return 0
+        }
+        return factor
+    }
+
+    static func requiredDutyFactor(
+        estimatedFullSpeedCPU: Double,
+        limitPercent: Double
+    ) -> TimeInterval {
+        let normalizedLimit = normalizedCPUPercent(limitPercent)
+        let demand = max(
+            normalizedCPUPercent(estimatedFullSpeedCPU),
+            normalizedLimit
+        )
+        guard demand > 0, normalizedLimit < demand else { return 0 }
+        let stopDuration = limitPeriod * (1 - normalizedLimit / demand)
+        return stopDuration < minimumDutyFactor
+            ? 0
+            : min(limitPeriod, stopDuration)
+    }
 }
 
 enum ApplicationCommand: Equatable, Sendable {

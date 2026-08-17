@@ -178,6 +178,7 @@ final class MenuPanelCoordinator: NSObject, NSWindowDelegate {
     let presentation = MenuPanelPresentation()
 
     private let store: AppStore
+    private let updateController: TempraUpdateController
     private let statusItem: NSStatusItem
     private var mainPanel: TempraPanel?
     private var inspectorPanel: TempraPanel?
@@ -192,8 +193,9 @@ final class MenuPanelCoordinator: NSObject, NSWindowDelegate {
     private var presentedHighCPUAlertID: UUID?
     private var isInvalidated = false
 
-    init(store: AppStore) {
+    init(store: AppStore, updateController: TempraUpdateController) {
         self.store = store
+        self.updateController = updateController
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         super.init()
 
@@ -361,7 +363,11 @@ final class MenuPanelCoordinator: NSObject, NSWindowDelegate {
         if let mainPanel { return mainPanel }
         let panel = makeTempraPanel(size: TempraLayout.mainPanelSize)
         panel.contentViewController = NSHostingController(
-            rootView: MenuBarView(store: store, presentation: presentation)
+            rootView: MenuBarView(
+                store: store,
+                presentation: presentation,
+                updateController: updateController
+            )
         )
         mainPanel = panel
         return panel
@@ -428,7 +434,11 @@ final class MenuPanelCoordinator: NSObject, NSWindowDelegate {
         )
         configureDetachedMonitorPanel(panel)
         panel.contentViewController = NSHostingController(
-            rootView: MenuBarView(store: store, presentation: presentation)
+            rootView: MenuBarView(
+                store: store,
+                presentation: presentation,
+                updateController: updateController
+            )
         )
         panel.setContentSize(TempraLayout.mainPanelSize)
         panel.appearance = store.preferences.appearance.nsAppearance

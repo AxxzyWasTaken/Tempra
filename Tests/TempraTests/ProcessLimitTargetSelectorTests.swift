@@ -64,6 +64,39 @@ struct ProcessLimitTargetSelectorTests {
         ])
     }
 
+    @Test("A single unmeasured process remains eligible for limiting")
+    func unmeasuredSingleProcessIsSelected() {
+        let worker = sample(23, cpu: 80, main: true, measured: false)
+
+        let selection = ProcessLimitTargetSelector.select(
+            samples: [worker],
+            limitPercent: 10
+        )
+
+        #expect(selection.controlledProcesses == [worker.identity])
+        #expect(selection.alwaysRunningProcesses.isEmpty)
+        #expect(selection.targetIsReachable)
+        #expect(selection.protectionReasons[worker.identity] == nil)
+    }
+
+    @Test("An unmeasured helper beside a measured worker stays protected")
+    func unmeasuredHelperBesideMeasuredWorkerIsProtected() {
+        let worker = sample(24, cpu: 80, main: true)
+        let helper = sample(25, cpu: 40, measured: false)
+
+        let selection = ProcessLimitTargetSelector.select(
+            samples: [worker, helper],
+            limitPercent: 10
+        )
+
+        #expect(selection.controlledProcesses == [worker.identity])
+        #expect(selection.alwaysRunningProcesses == [helper.identity])
+        #expect(!selection.targetIsReachable)
+        #expect(selection.protectionReasons[helper.identity] == [
+            .missingCPUMeasurement
+        ])
+    }
+
     @Test("A connected single-process app remains limitable")
     func connectedSingleProcessIsSelected() {
         let onlineGame = sample(30, cpu: 80, main: true, network: .active)

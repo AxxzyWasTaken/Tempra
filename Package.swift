@@ -15,6 +15,12 @@ let package = Package(
             targets: ["TempraPrivilegedHelper"]
         )
     ],
+    dependencies: [
+        .package(
+            url: "https://github.com/sparkle-project/Sparkle",
+            exact: "2.9.5"
+        )
+    ],
     targets: [
         .target(
             name: "TempraSafety",
@@ -31,12 +37,20 @@ let package = Package(
         ),
         .executableTarget(
             name: "Tempra",
-            dependencies: ["TempraSafety", "TempraSensors"],
+            dependencies: [
+                "TempraSafety",
+                "TempraSensors",
+                .product(name: "Sparkle", package: "Sparkle")
+            ],
             linkerSettings: [
                 .linkedFramework("AppKit"),
                 .linkedFramework("CoreAudio"),
                 .linkedFramework("IOKit"),
-                .linkedFramework("ServiceManagement")
+                .linkedFramework("ServiceManagement"),
+                .unsafeFlags([
+                    "-Xlinker", "-rpath",
+                    "-Xlinker", "@executable_path/../Frameworks"
+                ])
             ]
         ),
         .executableTarget(
@@ -49,7 +63,18 @@ let package = Package(
         ),
         .testTarget(
             name: "TempraTests",
-            dependencies: ["Tempra", "TempraSafety"]
+            dependencies: [
+                "Tempra",
+                "TempraSafety",
+                "TempraWatchdog",
+                .product(name: "Sparkle", package: "Sparkle")
+            ],
+            linkerSettings: [
+                .unsafeFlags([
+                    "-Xlinker", "-rpath",
+                    "-Xlinker", "@loader_path/../../.."
+                ])
+            ]
         )
     ],
     cLanguageStandard: .c2x

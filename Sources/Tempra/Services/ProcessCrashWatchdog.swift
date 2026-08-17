@@ -4,6 +4,7 @@ import OSLog
 import TempraSafety
 
 protocol ProcessCrashWatchdogControlling: Sendable {
+    var controlsLimitPulseCadence: Bool { get }
     func prepareToStop(_ processes: Set<ProcessIdentity>) async throws
     func armAutomaticResume(
         _ intervalsByProcess: [ProcessIdentity: TimeInterval]
@@ -13,6 +14,10 @@ protocol ProcessCrashWatchdogControlling: Sendable {
     ) async throws
     func synchronize(_ processes: Set<ProcessIdentity>) async throws
     func disarm() async
+}
+
+extension ProcessCrashWatchdogControlling {
+    var controlsLimitPulseCadence: Bool { false }
 }
 
 enum ProcessCrashWatchdogError: LocalizedError {
@@ -42,7 +47,8 @@ actor ProcessCrashWatchdog: ProcessCrashWatchdogControlling {
     typealias HelperURLProvider = @Sendable () -> URL?
 
     private static let automaticResumeAcknowledgementTimeout: Duration = .seconds(1)
-    private let helperURLProvider: HelperURLProvider
+    private let guardian: (any ProcessGuardianControlling)?
+    private let helperURLProvider: HelperURLProvider?
     private let logger = Logger(
         subsystem: Bundle.main.bundleIdentifier ?? "io.github.temperapp.Temper",
         category: "ProcessSafety"
@@ -55,23 +61,37 @@ actor ProcessCrashWatchdog: ProcessCrashWatchdogControlling {
     private var automaticResumeAcknowledgementTimeoutTask: Task<Void, Never>?
     private var trackedProcesses: Set<ProcessIdentity> = []
     private var automaticResumeMillisecondsByProcess: [ProcessIdentity: UInt32] = [:]
+    nonisolated let controlsLimitPulseCadence: Bool
 
-    init(helperURLProvider: @escaping HelperURLProvider = {
-        guard let executableURL = Bundle.main.executableURL else { return nil }
-        return executableURL
-            .deletingLastPathComponent()
-            .appendingPathComponent("TempraWatchdog", isDirectory: false)
-    }) {
-        self.helperURLProvider = helperURLProvider
+    init(
+        guardian: any ProcessGuardianControlling = ProcessGuardianClient.shared
+    ) {
+        self.guardian = guardian
+        helperURLProvider = nil
+        controlsLimitPulseCadence = true
     }
 
-    func prepareToStop(_ processes: Set<ProcessIdentity>) throws {
+    init(helperURLProvider: @escaping HelperURLProvider) {
+        guardian = nil
+        self.helperURLProvider = helperURLProvider
+        controlsLimitPulseCadence = false
+    }
+
+    func prepareToStop(_ processes: Set<ProcessIdentity>) async throws {
+        if let guardian {
+            try await guardian.prepare(processes)
+            return
+        }
         try sendUpdate(trackedProcesses.union(processes))
     }
 
     func armAutomaticResume(
         _ intervalsByProcess: [ProcessIdentity: TimeInterval]
     ) async throws {
+        if let guardian {
+            try await guardian.armAutomaticResume(intervalsByProcess)
+            return
+        }
         let processes = Set(intervalsByProcess.keys)
         guard !processes.isEmpty, processes.isSubset(of: trackedProcesses) else {
             throw ProcessCrashWatchdogError.invalidResumeDeadline
@@ -96,7 +116,11 @@ actor ProcessCrashWatchdog: ProcessCrashWatchdogControlling {
 
     func synchronizeAutomaticResume(
         _ intervalsByProcess: [ProcessIdentity: TimeInterval]
-    ) throws {
+    ) async throws {
+        if let guardian {
+            try await guardian.synchronizeAutomaticResume(intervalsByProcess)
+            return
+        }
         let processes = Set(intervalsByProcess.keys)
         guard processes.isSubset(of: trackedProcesses) else {
             throw ProcessCrashWatchdogError.invalidResumeDeadline
@@ -121,7 +145,11 @@ actor ProcessCrashWatchdog: ProcessCrashWatchdogControlling {
         automaticResumeMillisecondsByProcess = millisecondsByProcess
     }
 
-    func synchronize(_ processes: Set<ProcessIdentity>) throws {
+    func synchronize(_ processes: Set<ProcessIdentity>) async throws {
+        if let guardian {
+            try await guardian.synchronize(processes)
+            return
+        }
         if processes.isEmpty {
             guard helperProcess?.isRunning == true else {
                 trackedProcesses.removeAll()
@@ -133,7 +161,17 @@ actor ProcessCrashWatchdog: ProcessCrashWatchdogControlling {
         try sendUpdate(processes)
     }
 
-    func disarm() {
+    func disarm() async {
+        if let guardian {
+            do {
+                try await guardian.disarm()
+            } catch {
+                logger.error(
+                    "Could not disarm process guardian cleanly: \(error.localizedDescription, privacy: .public)"
+                )
+            }
+            return
+        }
         guard helperProcess != nil else {
             trackedProcesses.removeAll()
             automaticResumeMillisecondsByProcess.removeAll()
@@ -175,7 +213,7 @@ actor ProcessCrashWatchdog: ProcessCrashWatchdogControlling {
         }
         closeConnection()
 
-        guard let helperURL = helperURLProvider(),
+        guard let helperURL = helperURLProvider?(),
               FileManager.default.isExecutableFile(atPath: helperURL.path) else {
             throw ProcessCrashWatchdogError.helperUnavailable
         }
@@ -184,6 +222,7 @@ actor ProcessCrashWatchdog: ProcessCrashWatchdogControlling {
         let outputPipe = Pipe()
         let process = Process()
         process.executableURL = helperURL
+        process.arguments = ["--stdio"]
         process.standardInput = inputPipe
         process.standardOutput = outputPipe
         process.standardError = FileHandle.nullDevice

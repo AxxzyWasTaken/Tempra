@@ -15,7 +15,10 @@ enum TempraWatchdogMain {
     }
 
     static func main() {
-        exit(run())
+        if CommandLine.arguments.dropFirst().first == "--stdio" {
+            exit(run())
+        }
+        exit(ProcessGuardianService.run())
     }
 
     private static func run() -> Int32 {

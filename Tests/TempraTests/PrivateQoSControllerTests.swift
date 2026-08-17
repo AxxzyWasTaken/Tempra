@@ -22,6 +22,17 @@ struct ProcessPriorityControllerTests {
         ).niceValue == 15)
     }
 
+    @Test("Limit priority uses nice value 3 without raising process priority")
+    func limitPriorityUsesSupportedNiceValue() throws {
+        #expect(ProcessPriorityController.limitPulseNiceValue == 3)
+        #expect(try ProcessPriorityController.limitState(
+            from: ProcessPriorityPolicyState(niceValue: 0)
+        ).niceValue == 3)
+        #expect(try ProcessPriorityController.limitState(
+            from: ProcessPriorityPolicyState(niceValue: 8)
+        ).niceValue == 8)
+    }
+
     @Test("The controller reads the current process nice value")
     func readsCurrentPriority() throws {
         let state = try ProcessPriorityController().state(for: getpid())
@@ -55,6 +66,10 @@ struct ProcessPriorityControllerTests {
         let original = ProcessPriorityPolicyState(niceValue: 0)
         #expect(try ProcessPriorityController.shouldRestore(
             current: ProcessPriorityPolicyState(niceValue: 10),
+            original: original
+        ))
+        #expect(try ProcessPriorityController.shouldRestore(
+            current: ProcessPriorityPolicyState(niceValue: 3),
             original: original
         ))
         #expect(try !ProcessPriorityController.shouldRestore(
