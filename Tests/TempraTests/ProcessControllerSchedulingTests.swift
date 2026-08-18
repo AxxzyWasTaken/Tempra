@@ -813,6 +813,48 @@ struct ProcessControllerSchedulingTests {
         await controller.shutdown()
     }
 
+    @Test("A system transition preserves its resume failure reason")
+    func systemTransitionPreservesResumeFailureReason() async throws {
+        let controlledProcess = process(196)
+        let processSystem = RecordingProcessSystem()
+        let controller = ProcessController(
+            system: processSystem,
+            crashWatchdog: RecordingProcessCrashWatchdog(),
+            frontmostProvider: { nil }
+        )
+        let rule = AppRule(
+            bundleIdentifier: identifier,
+            displayName: "Example",
+            action: .pause
+        )
+
+        _ = await controller.update(
+            targets: [target(
+                processIdentities: [controlledProcess],
+                launchedAt: oldLaunchDate
+            )],
+            rules: [identifier: rule],
+            isEnabled: true,
+            revision: 1
+        )
+        processSystem.failResume(
+            for: controlledProcess,
+            attempts: 3,
+            description: "The privileged helper rejected the recovered process."
+        )
+
+        _ = await controller.suspendForSystemTransition()
+        let failure = try #require(
+            (await controller.currentRestorationResult()).failures.first
+        )
+
+        #expect(
+            failure.resumeFailureDescription
+                == "The privileged helper rejected the recovered process."
+        )
+        await controller.shutdown()
+    }
+
     @Test("System sleep fully restores an active limit priority before resume")
     func systemSleepRestoresActiveLimitPriority() async {
         let manualClock = ManualProcessControlClock()
@@ -3784,6 +3826,7 @@ private final class RecordingProcessSystem: ProcessSystemControlling, @unchecked
     private var resumeAttempts: [Set<ProcessIdentity>] = []
     private var lowerPriorityAttempts: [Set<ProcessIdentity>] = []
     private var lowerPriorityFailureDescription: String?
+    private var resumeFailureDescription: String?
     private var priorityRestoreAttempts: [Set<ProcessIdentity>] = []
     private var limitPriorityAttempts: [Set<ProcessIdentity>] = []
     private var terminationAttempts: [Set<ProcessIdentity>] = []
@@ -3885,9 +3928,14 @@ private final class RecordingProcessSystem: ProcessSystemControlling, @unchecked
         }
     }
 
-    func failResume(for process: ProcessIdentity, attempts: Int) {
+    func failResume(
+        for process: ProcessIdentity,
+        attempts: Int,
+        description: String? = nil
+    ) {
         withLock {
             resumeFailuresRemaining[process] = max(0, attempts)
+            resumeFailureDescription = description
         }
     }
 
@@ -4009,6 +4057,9 @@ private final class RecordingProcessSystem: ProcessSystemControlling, @unchecked
                 cpuTimeNanoseconds = updatedCPUTime.overflow
                     ? .max
                     : updatedCPUTime.partialValue
+            }
+            if !result.failed.isEmpty {
+                result.failureDescription = resumeFailureDescription
             }
             return result
         }

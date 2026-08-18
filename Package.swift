@@ -67,6 +67,7 @@ let package = Package(
                 "Tempra",
                 "TempraSafety",
                 "TempraWatchdog",
+                "TempraPrivilegedHelper",
                 .product(name: "Sparkle", package: "Sparkle")
             ],
             linkerSettings: [

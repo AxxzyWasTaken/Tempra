@@ -278,6 +278,9 @@ struct RoutedProcessSystemController: ProcessSystemControlling {
     ) async -> ProcessOperationResult {
         let (localProcesses, privilegedProcesses) = partition(processes)
         var result = await localOperation(localProcesses)
+        if !result.failed.isEmpty, result.failureDescription == nil {
+            result.failureDescription = Self.failureDescription(for: action)
+        }
         guard !privilegedProcesses.isEmpty else { return result }
         do {
             let privilegedResult = try await privileged.perform(
@@ -291,6 +294,9 @@ struct RoutedProcessSystemController: ProcessSystemControlling {
         } catch {
             result.failed.formUnion(privilegedProcesses)
             result.failureDescription = error.localizedDescription
+        }
+        if !result.failed.isEmpty, result.failureDescription == nil {
+            result.failureDescription = Self.failureDescription(for: action)
         }
         return result
     }
@@ -312,6 +318,9 @@ struct RoutedProcessSystemController: ProcessSystemControlling {
         do {
             var result = try await privileged.perform(action, processes: current)
             result.stale.formUnion(stale)
+            if !result.failed.isEmpty, result.failureDescription == nil {
+                result.failureDescription = Self.failureDescription(for: action)
+            }
             return result
         } catch {
             return ProcessOperationResult(
@@ -319,6 +328,26 @@ struct RoutedProcessSystemController: ProcessSystemControlling {
                 failed: current,
                 failureDescription: error.localizedDescription
             )
+        }
+    }
+
+    private static func failureDescription(
+        for action: PrivilegedProcessAction
+    ) -> String {
+        switch action {
+        case .resume:
+            "The process resume request failed."
+        case .restorePriority:
+            "The process priority restore request failed."
+        case .stop:
+            "The process stop request failed."
+        case .lowerPriority, .limitPriority:
+            "The process priority request failed."
+        case .terminate:
+            "The process termination request failed."
+        case .ping, .snapshot, .totalCPUTime,
+             .acknowledgeResumeRecovery, .acknowledgePriorityRecovery:
+            "The privileged process request failed."
         }
     }
 

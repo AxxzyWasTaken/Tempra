@@ -3,7 +3,9 @@ import Foundation
 enum ProcessRestorationState {
     static func result(
         stoppedByIdentifier: [String: Set<ProcessIdentity>],
-        backgroundedByIdentifier: [String: Set<ProcessIdentity>]
+        backgroundedByIdentifier: [String: Set<ProcessIdentity>],
+        resumeFailureDescriptions: [String: String],
+        priorityFailureDescriptions: [String: String]
     ) -> ProcessRestorationResult {
         let identifiers = Set(stoppedByIdentifier.keys).union(backgroundedByIdentifier.keys)
         let failures = identifiers.compactMap { identifier -> ProcessRestorationFailure? in
@@ -13,7 +15,9 @@ enum ProcessRestorationState {
             return ProcessRestorationFailure(
                 bundleIdentifier: identifier,
                 stoppedProcesses: stopped,
-                backgroundPriorityProcesses: backgrounded
+                backgroundPriorityProcesses: backgrounded,
+                resumeFailureDescription: resumeFailureDescriptions[identifier],
+                priorityFailureDescription: priorityFailureDescriptions[identifier]
             )
         }.sorted { $0.bundleIdentifier < $1.bundleIdentifier }
         return ProcessRestorationResult(failures: failures)

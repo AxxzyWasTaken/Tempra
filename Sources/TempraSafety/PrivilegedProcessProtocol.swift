@@ -3,7 +3,7 @@ import Foundation
 import Security
 
 public enum PrivilegedProcessProtocol {
-    public static let version = 3
+    public static let version = 4
     public static let daemonPlistName = "io.github.temperapp.Temper.PrivilegedHelper.plist"
     public static let machServiceName = "io.github.temperapp.Temper.PrivilegedHelper"
     public static let applicationIdentifier = "io.github.temperapp.Temper"
@@ -26,6 +26,8 @@ public enum PrivilegedProcessAction: String, Codable, Sendable {
     case lowerPriority
     case limitPriority
     case restorePriority
+    case acknowledgeResumeRecovery
+    case acknowledgePriorityRecovery
     case terminate
 }
 

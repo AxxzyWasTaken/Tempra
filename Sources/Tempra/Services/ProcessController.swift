@@ -83,6 +83,11 @@ actor ProcessController {
         )
     }
 
+    private struct ProcessRetryResult {
+        let unresolved: Set<ProcessIdentity>
+        let failureDescription: String?
+    }
+
     private let system: any ProcessSystemControlling
     private let crashWatchdog: any ProcessCrashWatchdogControlling
     private let frontmostProvider: FrontmostProvider
@@ -114,6 +119,8 @@ actor ProcessController {
     private var loweredByTempra: [String: Set<ProcessIdentity>] = [:]
     private var limitPulseLoweredProcesses: [String: Set<ProcessIdentity>] = [:]
     private var limitPriorityProcesses: [String: Set<ProcessIdentity>] = [:]
+    private var resumeRestorationFailureDescriptions: [String: String] = [:]
+    private var priorityRestorationFailureDescriptions: [String: String] = [:]
     private var limitRuntimes: [String: LimitRuntime] = [:]
     private var limitSelections: [String: ProcessLimitSelection] = [:]
     private var pausedBaselineCPU: [String: Double] = [:]
@@ -2393,7 +2400,7 @@ actor ProcessController {
         } else {
             priorityRestored = true
         }
-        let unresolved = await performWithRetries(
+        let retryResult = await performWithRetries(
             stoppedProcesses,
             attempts: attempts,
             operation: {
@@ -2405,6 +2412,13 @@ actor ProcessController {
                 )
             }
         )
+        let unresolved = retryResult.unresolved
+        if unresolved.isEmpty {
+            resumeRestorationFailureDescriptions.removeValue(forKey: identifier)
+        } else {
+            resumeRestorationFailureDescriptions[identifier] =
+                retryResult.failureDescription ?? "The process resume request failed."
+        }
         let synchronized = await setStoppedProcesses(unresolved, for: identifier)
         return priorityRestored
             && unresolved.isEmpty
@@ -2613,7 +2627,9 @@ actor ProcessController {
     private func restorationResult() -> ProcessRestorationResult {
         ProcessRestorationState.result(
             stoppedByIdentifier: stoppedByTempra,
-            backgroundedByIdentifier: loweredByTempra
+            backgroundedByIdentifier: loweredByTempra,
+            resumeFailureDescriptions: resumeRestorationFailureDescriptions,
+            priorityFailureDescriptions: priorityRestorationFailureDescriptions
         )
     }
 
@@ -2624,11 +2640,18 @@ actor ProcessController {
         let limitPriority = limitPriorityProcesses[identifier, default: []]
         let priorityProcesses = loweredByTempra[identifier, default: []]
             .union(limitPriority)
-        let unresolved = await performWithRetries(
+        let retryResult = await performWithRetries(
             priorityProcesses,
             attempts: attempts,
             operation: { await system.restorePriority($0) }
         )
+        let unresolved = retryResult.unresolved
+        if unresolved.isEmpty {
+            priorityRestorationFailureDescriptions.removeValue(forKey: identifier)
+        } else {
+            priorityRestorationFailureDescriptions[identifier] =
+                retryResult.failureDescription ?? "The process priority restore request failed."
+        }
 
         limitPulseLoweredProcesses.removeValue(forKey: identifier)
         let unresolvedLimitPriority = limitPriority.intersection(unresolved)
@@ -2646,11 +2669,18 @@ actor ProcessController {
     }
 
     private func restoreLowerPriority(for identifier: String, attempts: Int) async -> Bool {
-        let unresolved = await performWithRetries(
+        let retryResult = await performWithRetries(
             loweredByTempra[identifier, default: []],
             attempts: attempts,
             operation: { await system.restorePriority($0) }
         )
+        let unresolved = retryResult.unresolved
+        if unresolved.isEmpty {
+            priorityRestorationFailureDescriptions.removeValue(forKey: identifier)
+        } else {
+            priorityRestorationFailureDescriptions[identifier] =
+                retryResult.failureDescription ?? "The process priority restore request failed."
+        }
         if unresolved.isEmpty {
             loweredByTempra.removeValue(forKey: identifier)
             return workIsCurrent
@@ -2663,21 +2693,30 @@ actor ProcessController {
         _ processes: Set<ProcessIdentity>,
         attempts: Int,
         operation: (Set<ProcessIdentity>) async -> ProcessOperationResult
-    ) async -> Set<ProcessIdentity> {
+    ) async -> ProcessRetryResult {
         var unresolved = processes
-        guard !unresolved.isEmpty else { return [] }
+        var failureDescription: String?
+        guard !unresolved.isEmpty else {
+            return ProcessRetryResult(unresolved: [], failureDescription: nil)
+        }
 
         for attempt in 0..<max(1, attempts) {
             guard workIsCurrent else { break }
             let result = await operation(unresolved)
             unresolved = result.failed
+            if !unresolved.isEmpty, let detail = result.failureDescription {
+                failureDescription = detail
+            }
             guard workIsCurrent else { break }
             if unresolved.isEmpty { break }
             if attempt + 1 < attempts {
                 try? await Task.sleep(nanoseconds: 100_000_000)
             }
         }
-        return unresolved
+        return ProcessRetryResult(
+            unresolved: unresolved,
+            failureDescription: failureDescription
+        )
     }
 
     private func isFrontmost(_ app: ProcessControlTarget) async -> Bool {

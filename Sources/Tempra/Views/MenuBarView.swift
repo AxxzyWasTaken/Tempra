@@ -316,7 +316,7 @@ struct MenuBarView: View {
                 panelNotice(
                     symbolName: "exclamationmark.triangle.fill",
                     color: TempraPalette.stopped,
-                    message: lifecycleFailureMessage(restorationFailure),
+                    message: Self.lifecycleFailureMessage(restorationFailure),
                     actionTitle: "Retry",
                     action: {
                         Task {
@@ -1282,12 +1282,41 @@ struct MenuBarView: View {
             : profile.name
     }
 
-    private func lifecycleFailureMessage(_ result: ProcessRestorationResult) -> String {
-        let processCount = Set(result.failures.flatMap(\.processIdentifiers)).count
-        let appCount = result.failures.count
-        let processUnit = processCount == 1 ? "process" : "processes"
-        let appUnit = appCount == 1 ? "app" : "apps"
-        return "Tempra could not resume \(processCount) \(processUnit) in "
-            + "\(appCount) \(appUnit) during a system transition. Management remains blocked."
+    static func lifecycleFailureMessage(_ result: ProcessRestorationResult) -> String {
+        var messages: [String] = []
+        let resumeFailures = result.failures.filter { !$0.stoppedProcesses.isEmpty }
+        let resumeProcessCount = Set(resumeFailures.flatMap(\.stoppedProcesses)).count
+        if resumeProcessCount > 0 {
+            let appCount = resumeFailures.count
+            messages.append(
+                "Tempra could not resume \(resumeProcessCount) "
+                    + (resumeProcessCount == 1 ? "process" : "processes")
+                    + " in \(appCount) "
+                    + (appCount == 1 ? "app." : "apps.")
+            )
+        }
+
+        let priorityFailures = result.failures.filter {
+            !$0.backgroundPriorityProcesses.isEmpty
+        }
+        let priorityProcessCount = Set(
+            priorityFailures.flatMap(\.backgroundPriorityProcesses)
+        ).count
+        if priorityProcessCount > 0 {
+            let appCount = priorityFailures.count
+            messages.append(
+                "Tempra could not restore normal priority for \(priorityProcessCount) "
+                    + (priorityProcessCount == 1 ? "process" : "processes")
+                    + " in \(appCount) "
+                    + (appCount == 1 ? "app." : "apps.")
+            )
+        }
+
+        let details = Set(result.failures.flatMap {
+            [$0.resumeFailureDescription, $0.priorityFailureDescription].compactMap { $0 }
+        })
+        messages.append(contentsOf: details.sorted())
+        messages.append("Management remains blocked.")
+        return messages.joined(separator: " ")
     }
 }

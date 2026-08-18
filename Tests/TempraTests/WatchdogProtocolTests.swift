@@ -144,6 +144,15 @@ struct WatchdogProtocolTests {
         #expect(decodedRequest == request)
         #expect(decodedRequest.protocolVersion == PrivilegedProcessProtocol.version)
         #expect(decodedRequest.automaticResumeAfterMilliseconds == 100)
+        let acknowledgement = PrivilegedProcessRequest(
+            action: .acknowledgeResumeRecovery,
+            processes: [identity]
+        )
+        let decodedAcknowledgement = try JSONDecoder().decode(
+            PrivilegedProcessRequest.self,
+            from: JSONEncoder().encode(acknowledgement)
+        )
+        #expect(decodedAcknowledgement == acknowledgement)
 
         let response = PrivilegedProcessResponse(
             applied: [identity],

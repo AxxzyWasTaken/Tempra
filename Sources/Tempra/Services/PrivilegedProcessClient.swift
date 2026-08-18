@@ -452,6 +452,10 @@ actor PrivilegedProcessClient {
     static let shared = PrivilegedProcessClient()
 
     private var connection: NSXPCConnection?
+    private var pendingResumeRecoveryAcknowledgements: Set<ProcessIdentity> = []
+    private var pendingPriorityRecoveryAcknowledgements: Set<ProcessIdentity> = []
+    private var stoppedByActiveSession: Set<ProcessIdentity> = []
+    private var prioritiesChangedByActiveSession: Set<ProcessIdentity> = []
     private let requestTimeout: Duration
     private var lifecycle: PrivilegedHelperLifecycle?
 
@@ -529,6 +533,7 @@ actor PrivilegedProcessClient {
         processes: Set<ProcessIdentity>,
         automaticResumeAfter: TimeInterval? = nil
     ) async throws -> ProcessOperationResult {
+        try await flushRecoveryAcknowledgements()
         try validateOperationProcesses(processes)
         let response = try await send(try operationRequest(
             action,
@@ -553,12 +558,68 @@ actor PrivilegedProcessClient {
               applied.union(stale).union(failed) == processes else {
             throw PrivilegedProcessClientError.invalidResponse
         }
-        return ProcessOperationResult(applied: applied, stale: stale, failed: failed)
+        let result = ProcessOperationResult(applied: applied, stale: stale, failed: failed)
+        let resolved = applied.union(stale)
+        switch action {
+        case .stop:
+            stoppedByActiveSession.formUnion(applied)
+            stoppedByActiveSession.subtract(stale)
+        case .resume:
+            pendingResumeRecoveryAcknowledgements.formUnion(
+                resolved.subtracting(stoppedByActiveSession)
+            )
+            stoppedByActiveSession.subtract(resolved)
+        case .lowerPriority, .limitPriority:
+            prioritiesChangedByActiveSession.formUnion(applied)
+            prioritiesChangedByActiveSession.subtract(stale)
+        case .restorePriority:
+            pendingPriorityRecoveryAcknowledgements.formUnion(
+                resolved.subtracting(prioritiesChangedByActiveSession)
+            )
+            prioritiesChangedByActiveSession.subtract(resolved)
+        case .terminate:
+            stoppedByActiveSession.subtract(resolved)
+            prioritiesChangedByActiveSession.subtract(resolved)
+        case .ping, .snapshot, .totalCPUTime,
+             .acknowledgeResumeRecovery, .acknowledgePriorityRecovery:
+            break
+        }
+        await flushRecoveryAcknowledgementsAfterSuccessfulOperation()
+        return result
     }
 
     func invalidate() {
         connection?.invalidate()
         connection = nil
+        stoppedByActiveSession.removeAll()
+        prioritiesChangedByActiveSession.removeAll()
+    }
+
+    private func flushRecoveryAcknowledgementsAfterSuccessfulOperation() async {
+        do {
+            try await flushRecoveryAcknowledgements()
+        } catch {
+            // The operation already succeeded. Keep the acknowledgement for the next request.
+        }
+    }
+
+    private func flushRecoveryAcknowledgements() async throws {
+        if !pendingResumeRecoveryAcknowledgements.isEmpty {
+            let acknowledged = pendingResumeRecoveryAcknowledgements
+            _ = try await send(try operationRequest(
+                .acknowledgeResumeRecovery,
+                processes: acknowledged
+            ))
+            pendingResumeRecoveryAcknowledgements.subtract(acknowledged)
+        }
+        if !pendingPriorityRecoveryAcknowledgements.isEmpty {
+            let acknowledged = pendingPriorityRecoveryAcknowledgements
+            _ = try await send(try operationRequest(
+                .acknowledgePriorityRecovery,
+                processes: acknowledged
+            ))
+            pendingPriorityRecoveryAcknowledgements.subtract(acknowledged)
+        }
     }
 
     private func operationRequest(
@@ -704,6 +765,7 @@ actor PrivilegedProcessClient {
             throw PrivilegedProcessClientError.invalidResponse
         }
         if response.errorCode != nil || response.errorMessage != nil {
+            invalidate()
             throw PrivilegedProcessClientError.remoteFailure(
                 response.errorMessage ?? "The privileged helper reported an operation failure."
             )

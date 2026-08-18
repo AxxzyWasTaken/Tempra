@@ -324,8 +324,160 @@ private final class PrivilegedSafetyWatchdog {
     }
 }
 
+struct PrivilegedRecoveryOperationResult: Equatable {
+    var applied: Set<PrivilegedProcessIdentity> = []
+    var stale: Set<PrivilegedProcessIdentity> = []
+    var failed: Set<PrivilegedProcessIdentity> = []
+}
+
+struct PrivilegedRecoveryReport: Equatable {
+    var resumed: Set<PrivilegedProcessIdentity> = []
+    var staleResumes: Set<PrivilegedProcessIdentity> = []
+    var failedResumes: Set<PrivilegedProcessIdentity> = []
+    var restoredPriorities: Set<PrivilegedProcessIdentity> = []
+    var stalePriorities: Set<PrivilegedProcessIdentity> = []
+    var failedPriorities: [PrivilegedProcessIdentity: ProcessPriorityPolicyState] = [:]
+
+    var resumeProcesses: Set<PrivilegedProcessIdentity> {
+        resumed.union(staleResumes).union(failedResumes)
+    }
+
+    var priorityProcesses: Set<PrivilegedProcessIdentity> {
+        restoredPriorities.union(stalePriorities).union(failedPriorities.keys)
+    }
+
+    var succeeded: Bool {
+        failedResumes.isEmpty && failedPriorities.isEmpty
+    }
+
+    mutating func removeResumeState(for processes: Set<PrivilegedProcessIdentity>) {
+        resumed.subtract(processes)
+        staleResumes.subtract(processes)
+        failedResumes.subtract(processes)
+    }
+
+    mutating func removePriorityState(for processes: Set<PrivilegedProcessIdentity>) {
+        restoredPriorities.subtract(processes)
+        stalePriorities.subtract(processes)
+        for process in processes {
+            failedPriorities.removeValue(forKey: process)
+        }
+    }
+
+    mutating func recordResumed(_ process: PrivilegedProcessIdentity) {
+        removeResumeState(for: [process])
+        resumed.insert(process)
+    }
+
+    mutating func recordStaleResume(_ process: PrivilegedProcessIdentity) {
+        removeResumeState(for: [process])
+        staleResumes.insert(process)
+    }
+
+    mutating func recordFailedResume(_ process: PrivilegedProcessIdentity) {
+        removeResumeState(for: [process])
+        failedResumes.insert(process)
+    }
+
+    mutating func recordRestoredPriority(_ process: PrivilegedProcessIdentity) {
+        removePriorityState(for: [process])
+        restoredPriorities.insert(process)
+    }
+
+    mutating func recordStalePriority(_ process: PrivilegedProcessIdentity) {
+        removePriorityState(for: [process])
+        stalePriorities.insert(process)
+    }
+
+    mutating func recordFailedPriority(
+        _ process: PrivilegedProcessIdentity,
+        originalPriority: ProcessPriorityPolicyState
+    ) {
+        removePriorityState(for: [process])
+        failedPriorities[process] = originalPriority
+    }
+
+    mutating func resolveResumes(
+        _ requested: Set<PrivilegedProcessIdentity>,
+        identityIsCurrent: (PrivilegedProcessIdentity) -> Bool,
+        resume: (PrivilegedProcessIdentity) -> Bool
+    ) -> PrivilegedRecoveryOperationResult {
+        let recovered = requested.intersection(resumeProcesses)
+        var result = PrivilegedRecoveryOperationResult(
+            applied: recovered.intersection(resumed),
+            stale: recovered.intersection(staleResumes)
+        )
+        for process in recovered.intersection(failedResumes) {
+            guard identityIsCurrent(process) else {
+                recordStaleResume(process)
+                result.stale.insert(process)
+                continue
+            }
+            if resume(process) {
+                recordResumed(process)
+                result.applied.insert(process)
+            } else {
+                result.failed.insert(process)
+            }
+        }
+        return result
+    }
+
+    mutating func resolvePriorities(
+        _ requested: Set<PrivilegedProcessIdentity>,
+        identityIsCurrent: (PrivilegedProcessIdentity) -> Bool,
+        restore: (
+            PrivilegedProcessIdentity,
+            ProcessPriorityPolicyState
+        ) -> Bool
+    ) -> PrivilegedRecoveryOperationResult {
+        let recovered = requested.intersection(priorityProcesses)
+        var result = PrivilegedRecoveryOperationResult(
+            applied: recovered.intersection(restoredPriorities),
+            stale: recovered.intersection(stalePriorities)
+        )
+        for process in recovered {
+            guard let originalPriority = failedPriorities[process] else { continue }
+            guard identityIsCurrent(process) else {
+                recordStalePriority(process)
+                result.stale.insert(process)
+                continue
+            }
+            guard restore(process, originalPriority) else {
+                result.failed.insert(process)
+                continue
+            }
+            guard identityIsCurrent(process) else {
+                recordStalePriority(process)
+                result.stale.insert(process)
+                continue
+            }
+            recordRestoredPriority(process)
+            result.applied.insert(process)
+        }
+        return result
+    }
+
+    mutating func merge(_ newer: PrivilegedRecoveryReport) {
+        removeResumeState(for: newer.resumeProcesses)
+        resumed.formUnion(newer.resumed)
+        staleResumes.formUnion(newer.staleResumes)
+        failedResumes.formUnion(newer.failedResumes)
+
+        removePriorityState(for: newer.priorityProcesses)
+        restoredPriorities.formUnion(newer.restoredPriorities)
+        stalePriorities.formUnion(newer.stalePriorities)
+        failedPriorities.merge(newer.failedPriorities) { _, newValue in newValue }
+    }
+}
+
+final class PrivilegedRecoveryCoordinator {
+    var report = PrivilegedRecoveryReport()
+}
+
 private final class PrivilegedProcessSession: NSObject, PrivilegedProcessXPCProtocol {
-    private let queue = DispatchQueue(label: "io.github.temperapp.Temper.privileged-session")
+    private let queue: DispatchQueue
+    private let recoveryCoordinator: PrivilegedRecoveryCoordinator
     private let helperPID = getpid()
     private let helperExecutablePath: String
     private let watchdog: PrivilegedSafetyWatchdog
@@ -337,8 +489,14 @@ private final class PrivilegedProcessSession: NSObject, PrivilegedProcessXPCProt
         [PrivilegedProcessIdentity: UInt32] = [:]
     private var isInvalidated = false
 
-    init(executableURL: URL) {
+    init(
+        executableURL: URL,
+        queue: DispatchQueue,
+        recoveryCoordinator: PrivilegedRecoveryCoordinator
+    ) {
         helperExecutablePath = executableURL.standardizedFileURL.path
+        self.queue = queue
+        self.recoveryCoordinator = recoveryCoordinator
         watchdog = PrivilegedSafetyWatchdog(executableURL: executableURL)
     }
 
@@ -356,8 +514,8 @@ private final class PrivilegedProcessSession: NSObject, PrivilegedProcessXPCProt
     }
 
     func invalidate() {
-        queue.async { [weak self] in
-            guard let self, !isInvalidated else { return }
+        queue.async { [self] in
+            guard !isInvalidated else { return }
             isInvalidated = true
             _ = emergencyRecover()
         }
@@ -426,6 +584,10 @@ private final class PrivilegedProcessSession: NSObject, PrivilegedProcessXPCProt
             return limitPriority(request)
         case .restorePriority:
             return restorePriority(request)
+        case .acknowledgeResumeRecovery:
+            return acknowledgeRecovery(request, restoresPriority: false)
+        case .acknowledgePriorityRecovery:
+            return acknowledgeRecovery(request, restoresPriority: true)
         case .terminate:
             return terminate(request)
         }
@@ -510,6 +672,9 @@ private final class PrivilegedProcessSession: NSObject, PrivilegedProcessXPCProt
                     : "Tempra lost its privileged safety process. Its safety process attempted recovery."
             )
         }
+        recoveryCoordinator.report.removeResumeState(
+            for: result.applied.union(result.stale)
+        )
         return response(result)
     }
 
@@ -517,18 +682,54 @@ private final class PrivilegedProcessSession: NSObject, PrivilegedProcessXPCProt
         guard let identities = validatedOperationIdentities(request) else {
             return failure(.invalidRequest, "The resume request is invalid.")
         }
-        guard Set(identities).isSubset(of: stopped) else {
+        let requested = Set(identities)
+        let recovered = requested.intersection(recoveryCoordinator.report.resumeProcesses)
+        guard requested.subtracting(stopped).isSubset(of: recovered) else {
             return failure(
                 .invalidRequest,
-                "Tempra can resume only processes that this helper stopped."
+                "Tempra can resume only processes that this helper stopped or recovered."
             )
         }
-        let result = apply(identities) { kill($0, SIGCONT) }
-        stopped.subtract(result.applied.union(result.stale))
+
+        let recoveredResult = recoveryCoordinator.report.resolveResumes(
+            recovered,
+            identityIsCurrent: {
+                Self.currentIdentity(for: $0.pid) == $0
+            },
+            resume: { kill($0.pid, SIGCONT) == 0 }
+        )
+        var result = OperationResult(
+            applied: recoveredResult.applied,
+            stale: recoveredResult.stale,
+            failed: recoveredResult.failed
+        )
+
+        let ownedProcesses = Array(requested.intersection(stopped))
+        let ownedResult = apply(ownedProcesses) { kill($0, SIGCONT) }
+        result.applied.formUnion(ownedResult.applied)
+        result.stale.formUnion(ownedResult.stale)
+        result.failed.formUnion(ownedResult.failed)
+        stopped.subtract(ownedResult.applied.union(ownedResult.stale))
         for process in result.applied.union(result.stale) {
             automaticResumeMillisecondsByProcess.removeValue(forKey: process)
         }
         return finishStateChange(result)
+    }
+
+    private func acknowledgeRecovery(
+        _ request: PrivilegedProcessRequest,
+        restoresPriority: Bool
+    ) -> PrivilegedProcessResponse {
+        guard let identities = validatedOperationIdentities(request) else {
+            return failure(.invalidRequest, "The recovery acknowledgement is invalid.")
+        }
+        let processes = Set(identities)
+        if restoresPriority {
+            recoveryCoordinator.report.removePriorityState(for: processes)
+        } else {
+            recoveryCoordinator.report.removeResumeState(for: processes)
+        }
+        return response(OperationResult(applied: processes))
     }
 
     private func lowerPriority(
@@ -655,6 +856,9 @@ private final class PrivilegedProcessSession: NSObject, PrivilegedProcessXPCProt
                 automaticResumeMillisecondsByProcess:
                     automaticResumeMillisecondsByProcess
             )
+            recoveryCoordinator.report.removePriorityState(
+                for: result.applied.union(result.stale)
+            )
         } catch {
             let recoverySucceeded = emergencyRecover()
             result.failed.formUnion(result.applied)
@@ -676,15 +880,36 @@ private final class PrivilegedProcessSession: NSObject, PrivilegedProcessXPCProt
         guard let identities = validatedOperationIdentities(request) else {
             return failure(.invalidRequest, "The priority restore request is invalid.")
         }
-        guard Set(identities).isSubset(of: Set(originalPriorities.keys)) else {
+        let requested = Set(identities)
+        let recovered = requested.intersection(recoveryCoordinator.report.priorityProcesses)
+        guard requested.subtracting(originalPriorities.keys).isSubset(of: recovered) else {
             return failure(
                 .invalidRequest,
-                "Tempra can restore only priorities that this helper changed."
+                "Tempra can restore only priorities that this helper changed or recovered."
             )
         }
 
-        var result = OperationResult()
-        for process in identities {
+        let recoveredResult = recoveryCoordinator.report.resolvePriorities(
+            recovered,
+            identityIsCurrent: {
+                Self.currentIdentity(for: $0.pid) == $0
+            },
+            restore: { [priorityController] process, originalPriority in
+                do {
+                    try priorityController.restore(originalPriority, to: process.pid)
+                    return true
+                } catch {
+                    return false
+                }
+            }
+        )
+        var result = OperationResult(
+            applied: recoveredResult.applied,
+            stale: recoveredResult.stale,
+            failed: recoveredResult.failed
+        )
+
+        for process in requested.intersection(originalPriorities.keys) {
             guard Self.currentIdentity(for: process.pid) == process else {
                 originalPriorities.removeValue(forKey: process)
                 result.stale.insert(process)
@@ -807,25 +1032,53 @@ private final class PrivilegedProcessSession: NSObject, PrivilegedProcessXPCProt
     }
 
     private func emergencyRecover() -> Bool {
+        let managedPriorities = originalPriorities
+        let managedStopped = stopped
         let watchdogRecovered = watchdog.triggerRecovery()
-        var succeeded = true
-        for (process, originalPriority) in originalPriorities
-            where Self.currentIdentity(for: process.pid) == process {
+        var report = PrivilegedRecoveryReport()
+
+        for (process, originalPriority) in managedPriorities {
+            guard Self.currentIdentity(for: process.pid) == process else {
+                report.recordStalePriority(process)
+                continue
+            }
+            if watchdogRecovered {
+                report.recordRestoredPriority(process)
+                continue
+            }
             do {
                 try priorityController.restore(originalPriority, to: process.pid)
             } catch {
-                succeeded = false
+                report.recordFailedPriority(
+                    process,
+                    originalPriority: originalPriority
+                )
+                continue
+            }
+            if Self.currentIdentity(for: process.pid) == process {
+                report.recordRestoredPriority(process)
+            } else {
+                report.recordStalePriority(process)
             }
         }
-        for process in stopped where Self.currentIdentity(for: process.pid) == process {
-            if kill(process.pid, SIGCONT) != 0 {
-                succeeded = false
+
+        for process in managedStopped {
+            guard Self.currentIdentity(for: process.pid) == process else {
+                report.recordStaleResume(process)
+                continue
+            }
+            if watchdogRecovered || kill(process.pid, SIGCONT) == 0 {
+                report.recordResumed(process)
+            } else {
+                report.recordFailedResume(process)
             }
         }
+
+        recoveryCoordinator.report.merge(report)
         stopped.removeAll()
         originalPriorities.removeAll()
         automaticResumeMillisecondsByProcess.removeAll()
-        return succeeded && watchdogRecovered
+        return report.succeeded
     }
 
     private func canApplyDisruptiveControl(
@@ -913,7 +1166,7 @@ private final class PrivilegedProcessSession: NSObject, PrivilegedProcessXPCProt
             return encoded
         } catch {
             return Data(
-                "{\"protocolVersion\":2,\"errorCode\":\"operationFailed\",\"errorMessage\":\"The helper could not encode its response.\",\"snapshots\":[],\"applied\":[],\"stale\":[],\"failed\":[],\"totalCPUTimeNanoseconds\":0}".utf8
+                "{\"protocolVersion\":4,\"errorCode\":\"operationFailed\",\"errorMessage\":\"The helper could not encode its response.\",\"snapshots\":[],\"applied\":[],\"stale\":[],\"failed\":[],\"totalCPUTimeNanoseconds\":0}".utf8
             )
         }
     }
@@ -1022,6 +1275,10 @@ private final class PrivilegedProcessSession: NSObject, PrivilegedProcessXPCProt
 private final class PrivilegedHelperListenerDelegate: NSObject, NSXPCListenerDelegate {
     private let lock = NSLock()
     private let executableURL: URL
+    private let sessionQueue = DispatchQueue(
+        label: "io.github.temperapp.Temper.privileged-sessions"
+    )
+    private let recoveryCoordinator = PrivilegedRecoveryCoordinator()
     private var activeConnection: NSXPCConnection?
 
     init(executableURL: URL) {
@@ -1043,7 +1300,11 @@ private final class PrivilegedHelperListenerDelegate: NSObject, NSXPCListenerDel
         defer { lock.unlock() }
         guard activeConnection == nil else { return false }
 
-        let session = PrivilegedProcessSession(executableURL: executableURL)
+        let session = PrivilegedProcessSession(
+            executableURL: executableURL,
+            queue: sessionQueue,
+            recoveryCoordinator: recoveryCoordinator
+        )
         connection.exportedInterface = NSXPCInterface(
             with: PrivilegedProcessXPCProtocol.self
         )
