@@ -1028,8 +1028,8 @@ actor ProcessController {
                 continue
             }
 
-            if rule.action != .limit,
-               (rule.action != .none || rule.lowersCPUPriority),
+            if rule.action == .none,
+               rule.lowersCPUPriority,
                app.windowVisibility.protectsFromDisruptiveManagement {
                 if await prepareForDeferredAction(
                     rule: rule,
@@ -1056,10 +1056,7 @@ actor ProcessController {
                 continue
             }
 
-            let visibilityDelay = rule.action == .limit
-                ? 0
-                : app.windowVisibility.minimumDisruptiveDelay
-            let startDelay = max(rule.delaySeconds, visibilityDelay)
+            let startDelay = rule.delaySeconds
             if rule.action != .none, backgroundDuration < startDelay {
                 if await prepareForDeferredAction(
                     rule: rule,
@@ -1494,7 +1491,13 @@ actor ProcessController {
                 )
                 limitRuntimes.removeValue(forKey: identifier)
                 _ = await setStoppedProcesses([], for: identifier)
-                await setStatus(.normal, for: identifier)
+                await setStatus(
+                    limitObservationStatus(
+                        for: identifier,
+                        fallback: requestedLimitPercent
+                    ),
+                    for: identifier
+                )
                 return
             }
             guard await setStoppedProcesses(
@@ -1552,7 +1555,15 @@ actor ProcessController {
             limitPulseArbiter.release(identifier: identifier)
             limitDeadlines.remove(identifier: identifier)
             limitRuntimes.removeValue(forKey: identifier)
-            await setStatus(selection.targetIsReachable ? .normal : .waiting, for: identifier)
+            await setStatus(
+                selection.targetIsReachable
+                    ? limitObservationStatus(
+                        for: identifier,
+                        fallback: requestedLimitPercent
+                    )
+                    : .waiting,
+                for: identifier
+            )
             return
         }
 
@@ -1593,7 +1604,10 @@ actor ProcessController {
             await setStatus(
                 startsAboveLimit
                     ? limitStatus(for: identifier, fallback: requestedLimitPercent)
-                    : .normal,
+                    : limitObservationStatus(
+                        for: identifier,
+                        fallback: requestedLimitPercent
+                    ),
                 for: identifier
             )
             return
@@ -1893,7 +1907,13 @@ actor ProcessController {
             )
             limitRuntimes.removeValue(forKey: identifier)
             _ = await setStoppedProcesses([], for: identifier)
-            await setStatus(.normal, for: identifier)
+            await setStatus(
+                limitObservationStatus(
+                    for: identifier,
+                    fallback: requestedLimitPercent
+                ),
+                for: identifier
+            )
             return
         }
         guard await setStoppedProcesses(result.applied, for: identifier) else {
@@ -2797,6 +2817,10 @@ actor ProcessController {
         if limitRuntimes[identifier]?.hasActivatedLimit == true {
             return limitStatus(for: identifier, fallback: fallback)
         }
+        if rules[identifier]?.usesLowerCPUPriority == true,
+           loweredByTempra[identifier]?.isEmpty == false {
+            return .lowerPriority
+        }
         return .normal
     }
 
@@ -3031,21 +3055,15 @@ actor ProcessController {
             if rule.action != .none || rule.lowersCPUPriority {
                 include(visibilityRecheckInterval)
             }
-            if rule.action != .limit,
-               (rule.action != .none || rule.lowersCPUPriority),
+            if rule.action == .none,
+               rule.lowersCPUPriority,
                app.windowVisibility.protectsFromDisruptiveManagement {
                 continue
             }
             guard !(rule.onlyWhenHidden && !app.isHidden), rule.action != .none else {
                 continue
             }
-            let visibilityDelay = rule.action == .limit
-                ? 0
-                : app.windowVisibility.minimumDisruptiveDelay
-            let ruleStart = backgroundStart.addingTimeInterval(max(
-                rule.delaySeconds,
-                visibilityDelay
-            ))
+            let ruleStart = backgroundStart.addingTimeInterval(rule.delaySeconds)
             if ruleStart > now {
                 include(ruleStart.timeIntervalSince(now))
             }

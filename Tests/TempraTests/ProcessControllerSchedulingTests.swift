@@ -1419,6 +1419,41 @@ struct ProcessControllerSchedulingTests {
         await controller.shutdown()
     }
 
+    @Test("A combined limit reports lower priority while it observes below the limit")
+    func combinedLimitBelowAllowanceReportsLowerPriority() async {
+        let system = RecordingProcessSystem()
+        let controlledProcess = process(206)
+        let controller = ProcessController(
+            system: system,
+            crashWatchdog: RecordingProcessCrashWatchdog()
+        )
+        let rule = AppRule(
+            bundleIdentifier: identifier,
+            displayName: "Example",
+            action: .limit,
+            lowersCPUPriority: true,
+            limitPercent: 10,
+            delaySeconds: 0
+        )
+
+        let snapshot = await controller.update(
+            targets: [target(
+                processIdentities: [controlledProcess],
+                launchedAt: oldLaunchDate,
+                cpuPercent: 5
+            )],
+            rules: [identifier: rule],
+            isEnabled: true,
+            revision: 1
+        )
+
+        #expect(system.didAttemptToLowerPriority(controlledProcess))
+        #expect(!system.didAttemptToStop(controlledProcess))
+        #expect(snapshot.statuses[identifier] == .lowerPriority)
+        #expect(!snapshot.activeCPULimitSessionIdentifiers.contains(identifier))
+        await controller.shutdown()
+    }
+
     @Test("CPU limiting and lower priority run together")
     func combinedLimitUsesLowerPriority() async {
         let manualClock = ManualProcessControlClock()
@@ -1686,8 +1721,13 @@ struct ProcessControllerSchedulingTests {
         await controller.shutdown()
     }
 
-    @Test("A visible background app still defers pause")
-    func visibleBackgroundAppDefersPause() async {
+    @Test(
+        "A visible background pause respects the hidden-only setting",
+        arguments: [false, true]
+    )
+    func visibleBackgroundPauseRespectsHiddenOnlyCondition(
+        onlyWhenHidden: Bool
+    ) async {
         let controlledProcess = process(225)
         let system = RecordingProcessSystem()
         let controller = ProcessController(
@@ -1699,7 +1739,8 @@ struct ProcessControllerSchedulingTests {
             bundleIdentifier: identifier,
             displayName: "Example",
             action: .pause,
-            delaySeconds: 0
+            delaySeconds: 0,
+            onlyWhenHidden: onlyWhenHidden
         )
         let snapshot = await controller.update(
             targets: [target(
@@ -1714,8 +1755,8 @@ struct ProcessControllerSchedulingTests {
             revision: 1
         )
 
-        #expect(snapshot.statuses[identifier] == .waiting)
-        #expect(!system.didAttemptToStop(controlledProcess))
+        #expect(snapshot.statuses[identifier] == (onlyWhenHidden ? .waiting : .paused))
+        #expect(system.didAttemptToStop(controlledProcess) == !onlyWhenHidden)
         await controller.shutdown()
     }
 
