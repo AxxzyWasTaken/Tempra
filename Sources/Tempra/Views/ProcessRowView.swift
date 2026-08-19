@@ -5,6 +5,58 @@ private struct TempraDotAppearance {
     let fill: TempraDotFill
 }
 
+struct ManagedProcessPresentation: Equatable {
+    enum Indicator: Equatable {
+        case runtimeStatus
+        case cpuLimit(isActive: Bool)
+    }
+
+    let actionLabel: String
+    let statusLabel: String
+    let indicator: Indicator
+
+    init(item: AppDisplayItem) {
+        statusLabel = item.status.label
+
+        switch item.status {
+        case .limited(let percent):
+            actionLabel = Self.limitLabel(percent)
+            indicator = .cpuLimit(isActive: true)
+        case .limitedWithProtectedProcesses(let percent):
+            actionLabel = "Best effort · \(Int(percent))%"
+            indicator = .cpuLimit(isActive: true)
+        case .paused:
+            actionLabel = "Paused"
+            indicator = .runtimeStatus
+        case .lowerPriority:
+            if let rule = item.rule, rule.isEnabled, rule.action == .limit {
+                actionLabel = Self.limitLabel(rule.limitPercent)
+                indicator = .cpuLimit(isActive: false)
+            } else {
+                actionLabel = "Lower CPU priority"
+                indicator = .runtimeStatus
+            }
+        case .normal, .waiting, .audioProtected, .networkProtected, .snoozed,
+                .managementPaused, .disabled, .notRunning, .unavailable:
+            guard item.isCPULimitSessionActive else {
+                actionLabel = item.status.label
+                indicator = .runtimeStatus
+                return
+            }
+            if let rule = item.rule, rule.isEnabled, rule.action == .limit {
+                actionLabel = Self.limitLabel(rule.limitPercent)
+            } else {
+                actionLabel = "CPU limit active"
+            }
+            indicator = .cpuLimit(isActive: true)
+        }
+    }
+
+    private static func limitLabel(_ percent: Double) -> String {
+        "Limited to \(Int(percent))%"
+    }
+}
+
 private func dotAppearance(
     for item: AppDisplayItem,
     highlightsFrontmostWaiting: Bool = false
@@ -36,6 +88,9 @@ private func dotAppearance(
     case .unavailable:
         return TempraDotAppearance(color: TempraPalette.stopped, fill: .half)
     case .normal, .notRunning:
+        if item.isCPULimitSessionActive {
+            return TempraDotAppearance(color: TempraPalette.slowed, fill: .full)
+        }
         guard let rule = item.rule, rule.isEnabled else {
             return TempraDotAppearance(color: TempraPalette.running, fill: .none)
         }
@@ -75,10 +130,10 @@ struct ProcessRowView: View {
                         .lineLimit(1)
                         .layoutPriority(1)
 
-                    if let ruleTag {
-                        Text(ruleTag)
+                    if let classificationTag {
+                        Text(classificationTag)
                             .font(TempraTypography.ruleTag)
-                            .foregroundStyle(ruleTagColor)
+                            .foregroundStyle(TempraPalette.secondaryText)
                             .lineLimit(1)
                     }
                 }
@@ -125,10 +180,7 @@ struct ProcessRowView: View {
             .foregroundStyle(item.isAttention ? TempraPalette.waiting : TempraPalette.primaryText)
     }
 
-    private var ruleTag: String? {
-        if item.isCurrentApplication {
-            return "this app"
-        }
+    private var classificationTag: String? {
         if item.isSoundSourceComponent {
             return "audio"
         }
@@ -138,13 +190,7 @@ struct ProcessRowView: View {
         if item.isStandaloneProcess {
             return "process"
         }
-        guard let rule = item.rule else { return item.isService ? "service" : nil }
-        guard rule.isEnabled, item.status != .disabled else { return "off" }
-        return switch rule.action {
-        case .none: rule.lowersCPUPriority ? "priority" : nil
-        case .limit: "< \(Int(rule.limitPercent))%"
-        case .pause: "paused"
-        }
+        return item.isService ? "service" : nil
     }
 
     private var rowHelp: String {
@@ -160,17 +206,6 @@ struct ProcessRowView: View {
         return "\(item.stateText) · Current \(item.cpuText) · 1-minute average \(item.averageCPUText)"
     }
 
-    private var ruleTagColor: Color {
-        if isSystemProcess {
-            return TempraPalette.secondaryText
-        }
-        guard item.rule?.isEnabled == true, item.status != .disabled else {
-            return TempraPalette.secondaryText
-        }
-        return item.status == .paused
-            ? TempraPalette.stopped
-            : TempraPalette.secondaryText
-    }
 
     private var dot: TempraDotAppearance {
         dotAppearance(for: item, highlightsFrontmostWaiting: true)
@@ -198,12 +233,10 @@ struct ManagedProcessRowView: View {
                         .font(TempraTypography.process)
                         .lineLimit(1)
                         .layoutPriority(1)
-                    if let ruleTag {
-                        Text(ruleTag)
-                            .font(TempraTypography.ruleTag)
-                            .foregroundStyle(TempraPalette.secondaryText)
-                            .lineLimit(1)
-                    }
+                    Text(actionLabel)
+                        .font(TempraTypography.ruleTag)
+                        .foregroundStyle(TempraPalette.secondaryText)
+                        .lineLimit(1)
                 }
 
                 Spacer(minLength: 6)
@@ -224,24 +257,37 @@ struct ManagedProcessRowView: View {
         }
         .buttonStyle(.plain)
         .opacity(item.isRunning ? 1 : 0.58)
-        .help(item.stateText)
+        .help(
+            "\(actionLabel) · Current state: \(presentation.statusLabel) "
+                + "· Saved CPU \(savedCPUValue)"
+        )
+        .accessibilityLabel("\(item.name), \(actionLabel)")
+        .accessibilityValue(
+            "Current state: \(presentation.statusLabel), saved CPU \(savedCPUValue)"
+        )
     }
 
     private var savedCPUValue: String {
         item.savedCPUText
     }
 
-    private var ruleTag: String? {
-        guard let rule = item.rule else { return nil }
-        guard rule.isEnabled, item.status != .disabled else { return "off" }
-        return switch rule.action {
-        case .none: rule.lowersCPUPriority ? "priority" : nil
-        case .limit: "< \(Int(rule.limitPercent))%"
-        case .pause: "paused"
-        }
+    private var actionLabel: String {
+        presentation.actionLabel
+    }
+
+    private var presentation: ManagedProcessPresentation {
+        ManagedProcessPresentation(item: item)
     }
 
     private var dot: TempraDotAppearance {
-        dotAppearance(for: item)
+        switch presentation.indicator {
+        case .runtimeStatus:
+            dotAppearance(for: item)
+        case .cpuLimit(let isActive):
+            TempraDotAppearance(
+                color: TempraPalette.slowed,
+                fill: isActive ? .full : .half
+            )
+        }
     }
 }

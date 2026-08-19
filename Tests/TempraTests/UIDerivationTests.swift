@@ -273,46 +273,71 @@ struct UIDerivationTests {
         #expect(!presentation.showsPrivilegedAccessOnboarding)
     }
 
-    @Test("Managed items keep active CPU limit sessions visible during observation")
-    func managedItemOrdering() {
+    @Test("Managed now contains only active actions in effect order")
+    func activeManagedItemOrdering() {
         let items = [
             item(
                 identifier: "closed",
-                name: "Alpha Closed",
+                name: "Closed",
                 isRunning: false,
                 rule: rule("closed")
             ),
             item(
-                identifier: "running",
-                name: "Beta Running",
-                rule: rule("running")
+                identifier: "configured",
+                name: "Configured",
+                rule: rule("configured")
             ),
             item(
                 identifier: "waiting",
-                name: "Charlie Waiting",
+                name: "Waiting",
                 rule: rule("waiting"),
                 status: .waiting
             ),
             item(
+                identifier: "protected",
+                name: "Protected",
+                rule: rule("protected"),
+                status: .audioProtected
+            ),
+            item(
                 identifier: "lower-priority",
-                name: "Delta Efficient",
+                name: "Lower Priority",
                 rule: rule("lower-priority"),
                 status: .lowerPriority
             ),
             item(
-                identifier: "limited-a",
-                name: "Echo Limited",
+                identifier: "limited-low",
+                name: "Limited Low",
                 savedCPU: 5,
-                rule: rule("limited-a"),
+                rule: rule("limited-low"),
+                status: .limited(40)
+            ),
+            item(
+                identifier: "limit-session",
+                name: "Limit Session",
+                savedCPU: 10,
+                rule: rule("limit-session"),
                 status: .normal,
                 isCPULimitSessionActive: true
             ),
             item(
-                identifier: "limited-b",
-                name: "Foxtrot Limited",
+                identifier: "limited-high",
+                name: "Limited High",
                 savedCPU: 50,
-                rule: rule("limited-b"),
-                status: .limited(25)
+                rule: rule("limited-high"),
+                status: .limitedWithProtectedProcesses(25)
+            ),
+            item(
+                identifier: "paused-z",
+                name: "Zulu Paused",
+                rule: rule("paused-z"),
+                status: .paused
+            ),
+            item(
+                identifier: "paused-a",
+                name: "Alpha Paused",
+                rule: rule("paused-a"),
+                status: .paused
             ),
         ]
         let lists = MenuBarItemLists(
@@ -322,9 +347,65 @@ struct UIDerivationTests {
             processSort: .name,
             searchText: ""
         )
-        #expect(lists.managedItems.map(\.bundleIdentifier) == [
-            "limited-a", "limited-b", "lower-priority", "waiting", "running", "closed",
+        #expect(lists.activeManagedItems.map(\.bundleIdentifier) == [
+            "paused-a",
+            "paused-z",
+            "limited-high",
+            "limit-session",
+            "limited-low",
+            "lower-priority",
         ])
+
+        let searched = MenuBarItemLists(
+            displayItems: items,
+            includesBackgroundAndSystemProcesses: true,
+            scope: .running,
+            processSort: .name,
+            searchText: "SESSION"
+        )
+        #expect(searched.activeManagedItems.map(\.bundleIdentifier) == [
+            "limit-session",
+        ])
+    }
+
+    @Test("A combined CPU rule keeps its primary presentation across runtime states")
+    func combinedCPURulePresentation() {
+        let combinedRule = AppRule(
+            bundleIdentifier: "combined",
+            displayName: "Combined",
+            action: .limit,
+            lowersCPUPriority: true,
+            limitPercent: 10,
+            delaySeconds: 5
+        )
+        let priorityOnly = ManagedProcessPresentation(item: item(
+            identifier: "priority-only",
+            name: "Priority Only",
+            rule: combinedRule,
+            status: .lowerPriority
+        ))
+        let activelyLimited = ManagedProcessPresentation(item: item(
+            identifier: "actively-limited",
+            name: "Actively Limited",
+            rule: combinedRule,
+            status: .limited(10)
+        ))
+        let observingLimit = ManagedProcessPresentation(item: item(
+            identifier: "observing-limit",
+            name: "Observing Limit",
+            rule: combinedRule,
+            status: .normal,
+            isCPULimitSessionActive: true
+        ))
+
+        #expect(priorityOnly.actionLabel == "Limited to 10%")
+        #expect(activelyLimited.actionLabel == priorityOnly.actionLabel)
+        #expect(observingLimit.actionLabel == priorityOnly.actionLabel)
+        #expect(priorityOnly.indicator == .cpuLimit(isActive: false))
+        #expect(activelyLimited.indicator == .cpuLimit(isActive: true))
+        #expect(observingLimit.indicator == .cpuLimit(isActive: true))
+        #expect(priorityOnly.statusLabel == "Lower CPU priority")
+        #expect(activelyLimited.statusLabel == "Limited to 10%")
     }
 
     @Test("Saved CPU text only appears while CPU control is active")
@@ -428,7 +509,7 @@ struct UIDerivationTests {
         #expect(!projected.isAttention)
         #expect(!projected.canManageProcess)
         #expect(runningList.processItems.map(\.bundleIdentifier) == [identifier])
-        #expect(runningList.managedItems.isEmpty)
+        #expect(runningList.activeManagedItems.isEmpty)
     }
 
     @Test("Background and system processes stay hidden from Running when disabled")
@@ -443,12 +524,14 @@ struct UIDerivationTests {
                 identifier: "com.apple.dock",
                 name: "Dock",
                 isSystemProcess: true,
-                rule: rule("com.apple.dock")
+                rule: rule("com.apple.dock"),
+                status: .limited(50),
             ),
             item(
                 identifier: backgroundIdentifier,
                 name: "Game.exe",
-                rule: rule(backgroundIdentifier)
+                rule: rule(backgroundIdentifier),
+                status: .limited(50),
             ),
             item(
                 identifier: "background-agent",
@@ -465,7 +548,7 @@ struct UIDerivationTests {
             searchText: ""
         )
         #expect(hidden.processItems.map(\.bundleIdentifier) == ["ordinary"])
-        #expect(Set(hidden.managedItems.map(\.bundleIdentifier)) == [
+        #expect(Set(hidden.activeManagedItems.map(\.bundleIdentifier)) == [
             "com.apple.dock", backgroundIdentifier,
         ])
 
@@ -841,7 +924,7 @@ struct UIDerivationTests {
         let repeated = try #require(repeatedLists)
 
         #expect(snapshot.processItems.map(\.id) == repeated.processItems.map(\.id))
-        #expect(snapshot.managedItems.map(\.id) == repeated.managedItems.map(\.id))
+        #expect(snapshot.activeManagedItems.map(\.id) == repeated.activeManagedItems.map(\.id))
         print(
             "Menu derivation benchmark: 1000 items; repeated \(repeatedElapsed); "
                 + "single snapshot \(snapshotElapsed)"
