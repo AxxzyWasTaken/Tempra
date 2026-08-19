@@ -167,166 +167,177 @@ struct CPUHistoryChartView: View {
         GeometryReader { geometry in
             ZStack {
                 Chart {
-                ForEach(chartData.points) { point in
-                    AreaMark(
-                        x: .value("Time", point.sample.date),
-                        yStart: .value("Efficiency Start", 0),
-                        yEnd: .value("Efficiency", point.sample.efficiencyCPUPercent),
-                        series: .value("Series", "Efficiency-\(point.segment)")
-                    )
-                    .foregroundStyle(TempraPalette.efficiencyArea)
-                    .interpolationMethod(.linear)
-                }
-
-                ForEach(chartData.points) { point in
-                    AreaMark(
-                        x: .value("Time", point.sample.date),
-                        yStart: .value(
-                            "Performance Start",
-                            point.sample.efficiencyCPUPercent
-                        ),
-                        yEnd: .value(
-                            "Performance",
-                            point.combinedCPUPercent
-                        ),
-                        series: .value("Series", "Performance-\(point.segment)")
-                    )
-                    .foregroundStyle(TempraPalette.performanceArea)
-                    .interpolationMethod(.linear)
-                }
-
-                ForEach(chartData.points) { point in
-                    LineMark(
-                        x: .value("Time", point.sample.date),
-                        y: .value("Efficiency Boundary", point.sample.efficiencyCPUPercent),
-                        series: .value("Series", "Efficiency Boundary-\(point.segment)")
-                    )
-                    .foregroundStyle(TempraPalette.efficiency.opacity(0.80))
-                    .lineStyle(StrokeStyle(lineWidth: 0.55, lineJoin: .round))
-                    .interpolationMethod(.linear)
-                }
-
-                ForEach(chartData.points) { point in
-                    if point.sample.hasEstimatedSavedCPUMeasurement,
-                       let savedCPUSegment = point.savedCPUSegment {
-                        LineMark(
+                    ForEach(chartData.points) { point in
+                        AreaMark(
                             x: .value("Time", point.sample.date),
-                            y: .value("Saved", point.sample.estimatedSavedCPUPercent),
-                            series: .value("Series", "Saved-\(savedCPUSegment)")
+                            yStart: .value("Efficiency Start", 0),
+                            yEnd: .value("Efficiency", point.sample.efficiencyCPUPercent),
+                            series: .value("Series", "Efficiency-\(point.segment)")
                         )
-                        .foregroundStyle(TempraPalette.saved)
-                        .lineStyle(StrokeStyle(lineWidth: 1.0, lineJoin: .round))
-                        .interpolationMethod(.linear)
-                    }
-                }
-
-                ForEach(chartData.points) { point in
-                    if let temperatureChartValue = point.temperatureChartValue,
-                       let temperatureSegment = point.temperatureSegment {
-                        LineMark(
-                            x: .value("Time", point.sample.date),
-                            y: .value(
-                                "CPU Temperature",
-                                temperatureChartValue
-                            ),
-                            series: .value(
-                                "Series",
-                                "CPU Temperature-\(temperatureSegment)"
+                        .foregroundStyle(
+                            LinearGradient(
+                                colors: [
+                                    TempraPalette.efficiency.opacity(0.38),
+                                    TempraPalette.efficiency.opacity(0.06)
+                                ],
+                                startPoint: .top,
+                                endPoint: .bottom
                             )
                         )
-                        .foregroundStyle(TempraPalette.thermal.opacity(0.94))
+                        .interpolationMethod(.catmullRom)
+                    }
+
+                    ForEach(chartData.points) { point in
+                        AreaMark(
+                            x: .value("Time", point.sample.date),
+                            yStart: .value(
+                                "Performance Start",
+                                point.sample.efficiencyCPUPercent
+                            ),
+                            yEnd: .value(
+                                "Performance",
+                                point.combinedCPUPercent
+                            ),
+                            series: .value("Series", "Performance-\(point.segment)")
+                        )
+                        .foregroundStyle(
+                            LinearGradient(
+                                colors: [
+                                    TempraPalette.performance.opacity(0.44),
+                                    TempraPalette.performance.opacity(0.08)
+                                ],
+                                startPoint: .top,
+                                endPoint: .bottom
+                            )
+                        )
+                        .interpolationMethod(.catmullRom)
+                    }
+
+                    ForEach(chartData.points) { point in
+                        LineMark(
+                            x: .value("Time", point.sample.date),
+                            y: .value("Efficiency Boundary", point.sample.efficiencyCPUPercent),
+                            series: .value("Series", "Efficiency Boundary-\(point.segment)")
+                        )
+                        .foregroundStyle(TempraPalette.efficiency.opacity(0.65))
+                        .lineStyle(StrokeStyle(lineWidth: 0.65, lineJoin: .round))
+                        .interpolationMethod(.catmullRom)
+                    }
+
+                    ForEach(chartData.points) { point in
+                        if point.sample.hasEstimatedSavedCPUMeasurement,
+                           let savedCPUSegment = point.savedCPUSegment {
+                            LineMark(
+                                x: .value("Time", point.sample.date),
+                                y: .value("Saved", point.sample.estimatedSavedCPUPercent),
+                                series: .value("Series", "Saved-\(savedCPUSegment)")
+                            )
+                            .foregroundStyle(TempraPalette.saved.opacity(0.85))
+                            .lineStyle(StrokeStyle(lineWidth: 1.0, lineCap: .round, lineJoin: .round, dash: [3, 3]))
+                            .interpolationMethod(.catmullRom)
+                        }
+                    }
+
+                    ForEach(chartData.points) { point in
+                        if let temperatureChartValue = point.temperatureChartValue,
+                           let temperatureSegment = point.temperatureSegment {
+                            LineMark(
+                                x: .value("Time", point.sample.date),
+                                y: .value(
+                                    "CPU Temperature",
+                                    temperatureChartValue
+                                ),
+                                series: .value(
+                                    "Series",
+                                    "CPU Temperature-\(temperatureSegment)"
+                                )
+                            )
+                            .foregroundStyle(TempraPalette.thermal.opacity(0.85))
+                            .lineStyle(StrokeStyle(lineWidth: 1.0, lineJoin: .round))
+                            .interpolationMethod(.catmullRom)
+                        }
+                    }
+
+                    ForEach(chartData.points) { point in
+                        LineMark(
+                            x: .value("Time", point.sample.date),
+                            y: .value("Total", point.sample.systemCPUPercent),
+                            series: .value("Series", "Total-\(point.segment)")
+                        )
+                        .foregroundStyle(TempraPalette.primaryText.opacity(0.75))
                         .lineStyle(StrokeStyle(lineWidth: 1.0, lineJoin: .round))
-                        .interpolationMethod(.linear)
+                        .interpolationMethod(.catmullRom)
                     }
                 }
-
-                ForEach(chartData.points) { point in
-                    LineMark(
-                        x: .value("Time", point.sample.date),
-                        y: .value("Total", point.sample.systemCPUPercent),
-                        series: .value("Series", "Total-\(point.segment)")
-                    )
-                    .foregroundStyle(TempraPalette.primaryText.opacity(0.96))
-                    .lineStyle(StrokeStyle(lineWidth: 1.1, lineJoin: .round))
-                    .interpolationMethod(.linear)
+                .chartLegend(.hidden)
+                .chartXScale(
+                    domain: chartData.chartStartDate...chartData.chartEndDate,
+                    range: .plotDimension(startPadding: 6, endPadding: 6)
+                )
+                .chartYScale(domain: 0...chartData.chartCeiling)
+                .chartPlotStyle { plotArea in
+                    plotArea
                 }
-
-            }
-            .chartLegend(.hidden)
-            .chartXScale(
-                domain: chartData.chartStartDate...chartData.chartEndDate,
-                range: .plotDimension(startPadding: 9, endPadding: 9)
-            )
-            .chartYScale(domain: 0...chartData.chartCeiling)
-            .chartPlotStyle { plotArea in
-                plotArea
-                    .background(TempraPalette.chartPlotFill)
-                    .border(TempraPalette.chartBorder, width: 0.6)
-            }
                 .chartXAxis {
                     AxisMarks(values: CPUHistoryAxis.tickDates(
                         for: range,
                         endingAt: chartData.chartEndDate,
                         availableWidth: geometry.size.width
                     )) { value in
-                    AxisGridLine(stroke: StrokeStyle(lineWidth: 0.5))
-                        .foregroundStyle(TempraPalette.chartGrid)
-                    if let date = value.as(Date.self) {
-                        AxisValueLabel(
-                            anchor: xAxisLabelAnchor(
-                                index: value.index,
-                                count: value.count
-                            ),
-                            collisionResolution: .disabled
-                        ) {
-                            Text(CPUHistoryAxis.label(
-                                for: date,
-                                range: range,
-                                relativeTo: chartData.chartEndDate
+                        if let date = value.as(Date.self) {
+                            AxisValueLabel(
+                                anchor: xAxisLabelAnchor(
+                                    index: value.index,
+                                    count: value.count
+                                ),
+                                collisionResolution: .disabled
+                            ) {
+                                Text(CPUHistoryAxis.label(
+                                    for: date,
+                                    range: range,
+                                    relativeTo: chartData.chartEndDate
                                 ))
-                                .font(.system(size: 8.75, weight: .regular).monospacedDigit())
-                                .foregroundStyle(TempraPalette.secondaryText)
+                                .font(.system(size: 8.5, weight: .medium).monospacedDigit())
+                                .foregroundStyle(TempraPalette.tertiaryText)
+                            }
                         }
                     }
                 }
-            }
-            .chartYAxis {
-                AxisMarks(position: .leading, values: .automatic(desiredCount: 4)) { value in
-                    AxisGridLine(stroke: StrokeStyle(lineWidth: 0.5))
-                        .foregroundStyle(TempraPalette.chartGrid)
-                    AxisValueLabel {
-                        if let percent = value.as(Double.self) {
-                            Text("\(Int(percent))%")
-                                .font(.system(size: 8.75, weight: .regular).monospacedDigit())
-                                .foregroundStyle(TempraPalette.secondaryText)
+                .chartYAxis {
+                    AxisMarks(position: .leading, values: .automatic(desiredCount: 3)) { value in
+                        AxisGridLine(stroke: StrokeStyle(lineWidth: 0.5, dash: [2, 3]))
+                            .foregroundStyle(TempraPalette.chartGrid.opacity(0.6))
+                        AxisValueLabel {
+                            if let percent = value.as(Double.self) {
+                                Text("\(Int(percent))%")
+                                    .font(.system(size: 8.5, weight: .medium).monospacedDigit())
+                                    .foregroundStyle(TempraPalette.tertiaryText)
+                            }
                         }
                     }
                 }
-                AxisMarks(
-                    position: .trailing,
-                    values: [0, chartData.chartCeiling / 2, chartData.chartCeiling]
-                ) { value in
-                    AxisValueLabel {
-                        if let chartValue = value.as(Double.self) {
-                            Text("\(Int(chartData.temperatureValue(forChartValue: chartValue)))°")
-                                .font(.system(size: 8.75, weight: .regular).monospacedDigit())
-                                .foregroundStyle(TempraPalette.secondaryText)
-                        }
-                    }
-                }
-                }
+
                 if chartData.points.count < 2 {
-                    Text("Collecting system CPU history")
-                        .font(.system(size: 10))
-                        .foregroundStyle(TempraPalette.secondaryText)
+                    VStack(spacing: 4) {
+                        Image(systemName: "chart.xyaxis.line")
+                            .font(.system(size: 14, weight: .medium))
+                            .foregroundStyle(TempraPalette.tertiaryText)
+                        Text("Collecting CPU history…")
+                            .font(.system(size: 10, weight: .medium))
+                            .foregroundStyle(TempraPalette.secondaryText)
+                    }
                 }
             }
-            .padding(.horizontal, 10)
-            .padding(.top, 10)
-            .padding(.bottom, 8)
+            .padding(.horizontal, 8)
+            .padding(.top, 8)
+            .padding(.bottom, 6)
         }
-        .frame(height: 138)
-        .background(TempraPalette.chartFill, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .frame(height: 128)
+        .background(TempraPalette.chartFill, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .strokeBorder(TempraPalette.border.opacity(0.4), lineWidth: 0.5)
+        )
     }
 
     private func xAxisLabelAnchor(index: Int, count: Int) -> UnitPoint {
