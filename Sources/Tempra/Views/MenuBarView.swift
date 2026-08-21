@@ -889,11 +889,11 @@ struct MenuBarView: View {
                 .help("Show all saved rules")
                 .accessibilityLabel("All Rules")
 
-                Text("Saved % CPU")
+                Text("Saved")
                     .font(TempraTypography.tableHeader)
                     .foregroundStyle(TempraPalette.secondaryText)
                     .lineLimit(1)
-                    .minimumScaleFactor(0.8)
+                    .accessibilityLabel("Saved CPU percentage")
                     .frame(
                         width: TempraLayout.averageCPUColumnWidth,
                         alignment: .trailing
