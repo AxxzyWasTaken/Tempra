@@ -20,6 +20,14 @@ private enum ProcessSystemControllerError: LocalizedError {
         "A process CPU-time counter overflowed."
     }
 }
+private func kernelIdentityMatches(
+    _ current: ProcessIdentity?,
+    _ requested: ProcessIdentity
+) -> Bool {
+    guard let current else { return false }
+    return current.pid == requested.pid
+        && current.startTimeMicroseconds == requested.startTimeMicroseconds
+}
 
 protocol ProcessSystemControlling: Sendable {
     func totalCPUTime(for processes: Set<ProcessIdentity>) async throws -> UInt64
@@ -53,7 +61,7 @@ struct LiveProcessSystemController: ProcessSystemControlling {
     func totalCPUTime(for processes: Set<ProcessIdentity>) async throws -> UInt64 {
         var total: UInt64 = 0
         for process in processes {
-            guard Self.currentIdentity(for: process.pid) == process,
+            guard kernelIdentityMatches(Self.currentIdentity(for: process.pid), process),
                   let counter = Self.cpuTimeNanoseconds(for: process.pid) else {
                 continue
             }
@@ -70,7 +78,7 @@ struct LiveProcessSystemController: ProcessSystemControlling {
         for processes: Set<ProcessIdentity>
     ) async -> ProcessAudioActivity {
         let currentProcessIdentifiers = Set(processes.compactMap { process in
-            Self.currentIdentity(for: process.pid) == process ? process.pid : nil
+            kernelIdentityMatches(Self.currentIdentity(for: process.pid), process) ? process.pid : nil
         })
         return AudioOutputProbe.activity(for: currentProcessIdentifiers)
     }
@@ -118,7 +126,7 @@ struct LiveProcessSystemController: ProcessSystemControlling {
     ) -> ProcessOperationResult {
         var result = ProcessOperationResult()
         for process in processes {
-            guard Self.currentIdentity(for: process.pid) == process else {
+            guard kernelIdentityMatches(Self.currentIdentity(for: process.pid), process) else {
                 result.stale.insert(process)
                 continue
             }
@@ -308,7 +316,7 @@ struct RoutedProcessSystemController: ProcessSystemControlling {
         guard !processes.isEmpty else { return ProcessOperationResult() }
 
         let stale = Set(processes.filter {
-            LiveProcessSystemController.currentIdentity(for: $0.pid) != $0
+            !kernelIdentityMatches(LiveProcessSystemController.currentIdentity(for: $0.pid), $0)
         })
         let current = processes.subtracting(stale)
         guard !current.isEmpty else {

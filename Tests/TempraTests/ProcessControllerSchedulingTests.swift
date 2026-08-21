@@ -1528,6 +1528,124 @@ struct ProcessControllerSchedulingTests {
         #expect(system.didAttemptToRestorePriority(controlledProcess))
     }
 
+    @Test("Changing an active combined limit to pause restores pulse priority")
+    func combinedLimitTransitionRestoresPriority() async {
+        let manualClock = ManualProcessControlClock()
+        let system = RecordingProcessSystem()
+        let watchdog = RecordingProcessCrashWatchdog()
+        let controlledProcess = process(218)
+        let controller = ProcessController(
+            system: system,
+            crashWatchdog: watchdog,
+            frontmostProvider: { nil },
+            clock: manualClock.clock
+        )
+        let limitRule = AppRule(
+            bundleIdentifier: identifier,
+            displayName: "Example",
+            action: .limit,
+            lowersCPUPriority: true,
+            limitPercent: 10,
+            delaySeconds: 0
+        )
+
+        _ = await controller.update(
+            targets: [target(
+                processIdentities: [controlledProcess],
+                launchedAt: oldLaunchDate,
+                cpuPercent: 100
+            )],
+            rules: [identifier: limitRule],
+            isEnabled: true,
+            revision: 1
+        )
+        #expect(await eventually { manualClock.pendingSleepCount == 2 })
+        system.setCPUTimeNanoseconds(10_000_000)
+        manualClock.advance(by: .milliseconds(10))
+        #expect(await eventually { system.didAttemptToStop(controlledProcess) })
+
+        system.clearOperationHistory()
+        let pauseRule = AppRule(
+            bundleIdentifier: identifier,
+            displayName: "Example",
+            action: .pause
+        )
+        let paused = await controller.update(
+            targets: [target(
+                processIdentities: [controlledProcess],
+                launchedAt: oldLaunchDate,
+                cpuPercent: 100
+            )],
+            rules: [identifier: pauseRule],
+            isEnabled: true,
+            revision: 2
+        )
+
+        #expect(paused.statuses[identifier] == .paused)
+        #expect(system.didAttemptToRestorePriority(controlledProcess))
+        let restoration = await controller.shutdown()
+        #expect(restoration.succeeded)
+    }
+
+    @Test("A stale lower-priority pulse result does not fail restoration")
+    func staleLowerPriorityPulseRestorationSucceeds() async {
+        let manualClock = ManualProcessControlClock()
+        let system = RecordingProcessSystem()
+        let watchdog = RecordingProcessCrashWatchdog()
+        let controlledProcess = process(219)
+        let controller = ProcessController(
+            system: system,
+            crashWatchdog: watchdog,
+            frontmostProvider: { nil },
+            clock: manualClock.clock
+        )
+        let limitRule = AppRule(
+            bundleIdentifier: identifier,
+            displayName: "Example",
+            action: .limit,
+            lowersCPUPriority: true,
+            limitPercent: 10,
+            delaySeconds: 0
+        )
+
+        _ = await controller.update(
+            targets: [target(
+                processIdentities: [controlledProcess],
+                launchedAt: oldLaunchDate,
+                cpuPercent: 100
+            )],
+            rules: [identifier: limitRule],
+            isEnabled: true,
+            revision: 1
+        )
+        #expect(await eventually { manualClock.pendingSleepCount == 2 })
+        system.setCPUTimeNanoseconds(10_000_000)
+        manualClock.advance(by: .milliseconds(10))
+        #expect(await eventually { system.didAttemptToStop(controlledProcess) })
+
+        system.markPriorityResultsStale(for: controlledProcess)
+        let managedNoneRule = AppRule(
+            bundleIdentifier: identifier,
+            displayName: "Example",
+            action: .none,
+            hideAfterMinutes: 100
+        )
+        _ = await controller.update(
+            targets: [target(
+                processIdentities: [controlledProcess],
+                launchedAt: oldLaunchDate,
+                cpuPercent: 100
+            )],
+            rules: [identifier: managedNoneRule],
+            isEnabled: true,
+            revision: 2
+        )
+
+        #expect((await controller.currentRestorationResult()).succeeded)
+        let restoration = await controller.shutdown()
+        #expect(restoration.succeeded)
+    }
+
     @Test("WindowServer remains monitor-only")
     func windowServerRemainsMonitorOnly() async {
         let system = RecordingProcessSystem()
@@ -2720,6 +2838,54 @@ struct ProcessControllerSchedulingTests {
         await controller.shutdown()
     }
 
+    @Test("A direct activation resume completing after shutdown does not re-add tracking")
+    func directActivationResumeCannotReaddTrackingAfterShutdown() async {
+        let system = SuspendedStopProcessSystem()
+        let watchdog = RecordingProcessCrashWatchdog()
+        let controlledProcess = process(38)
+        let controller = ProcessController(
+            system: system,
+            crashWatchdog: watchdog
+        )
+        let pauseRule = AppRule(
+            bundleIdentifier: identifier,
+            displayName: "Example",
+            action: .pause
+        )
+        let updateTask = Task {
+            await controller.update(
+                targets: [target(
+                    processIdentities: [controlledProcess],
+                    launchedAt: oldLaunchDate
+                )],
+                rules: [identifier: pauseRule],
+                isEnabled: true,
+                revision: 1
+            )
+        }
+        #expect(await eventuallyAsync { await system.stopStarted })
+        await system.releaseStop()
+        _ = await updateTask.value
+
+        await system.suspendNextResume()
+        let activationTask = Task {
+            await controller.applicationDidActivate(bundleIdentifier: identifier)
+        }
+        #expect(await eventuallyAsync { await system.resumeStarted })
+
+        let shutdownTask = Task {
+            await controller.shutdown()
+        }
+        try? await Task.sleep(for: .milliseconds(10))
+        await system.releaseResume()
+
+        _ = await activationTask.value
+        let shutdown = await shutdownTask.value
+        #expect(shutdown.succeeded)
+        #expect((await controller.currentSnapshot()).statuses[identifier] == nil)
+        #expect((await controller.currentRestorationResult()).succeeded)
+    }
+
     @Test("Activation blocks new limit pulses until a fresh background sample arrives")
     func applicationActivationWaitsForFreshSample() async {
         let manualClock = ManualProcessControlClock()
@@ -3670,6 +3836,9 @@ private actor SuspendedAutomaticResumeProcessCrashWatchdog:
 private actor SuspendedStopProcessSystem: ProcessSystemControlling {
     private(set) var stopStarted = false
     private var stopContinuation: CheckedContinuation<Void, Never>?
+    private var resumeContinuation: CheckedContinuation<Void, Never>?
+    private var shouldSuspendResume = false
+    private(set) var resumeStarted = false
     private var stoppedProcesses: Set<ProcessIdentity> = []
     private var resumedProcesses: Set<ProcessIdentity> = []
 
@@ -3699,7 +3868,14 @@ private actor SuspendedStopProcessSystem: ProcessSystemControlling {
         return ProcessOperationResult(applied: processes)
     }
 
-    func resume(_ processes: Set<ProcessIdentity>) -> ProcessOperationResult {
+    func resume(_ processes: Set<ProcessIdentity>) async -> ProcessOperationResult {
+        if shouldSuspendResume {
+            shouldSuspendResume = false
+            resumeStarted = true
+            await withCheckedContinuation { continuation in
+                resumeContinuation = continuation
+            }
+        }
         stoppedProcesses.subtract(processes)
         resumedProcesses.formUnion(processes)
         return ProcessOperationResult(applied: processes)
@@ -3728,6 +3904,14 @@ private actor SuspendedStopProcessSystem: ProcessSystemControlling {
     func releaseStop() {
         stopContinuation?.resume()
         stopContinuation = nil
+    }
+    func suspendNextResume() {
+        shouldSuspendResume = true
+    }
+
+    func releaseResume() {
+        resumeContinuation?.resume()
+        resumeContinuation = nil
     }
 
     func didResume(_ process: ProcessIdentity) -> Bool {
@@ -3877,6 +4061,7 @@ private final class RecordingProcessSystem: ProcessSystemControlling, @unchecked
     private var stopFailuresRemaining: [ProcessIdentity: Int] = [:]
     private var resumeFailuresRemaining: [ProcessIdentity: Int] = [:]
     private var priorityRestoreFailuresRemaining: [ProcessIdentity: Int] = [:]
+    private var stalePriorityProcesses: Set<ProcessIdentity> = []
     private var networkActivityByProcess: [ProcessIdentity: ProcessNetworkActivity] = [:]
     private var criticalFileActivityByProcess:
         [ProcessIdentity: ProcessCriticalFileActivity] = [:]
@@ -3983,6 +4168,11 @@ private final class RecordingProcessSystem: ProcessSystemControlling, @unchecked
     func failPriorityRestore(for process: ProcessIdentity, attempts: Int) {
         withLock {
             priorityRestoreFailuresRemaining[process] = max(0, attempts)
+        }
+    }
+    func markPriorityResultsStale(for process: ProcessIdentity) {
+        withLock {
+            _ = stalePriorityProcesses.insert(process)
         }
     }
 
@@ -4116,7 +4306,11 @@ private final class RecordingProcessSystem: ProcessSystemControlling, @unchecked
                     failureDescription: lowerPriorityFailureDescription
                 )
             }
-            return ProcessOperationResult(applied: processes)
+            let stale = processes.intersection(stalePriorityProcesses)
+            return ProcessOperationResult(
+                applied: processes.subtracting(stale),
+                stale: stale
+            )
         }
     }
 
@@ -4126,12 +4320,16 @@ private final class RecordingProcessSystem: ProcessSystemControlling, @unchecked
             priorityRestoreAttempts.append(processes)
             var result = ProcessOperationResult()
             for process in processes {
-                let failures = priorityRestoreFailuresRemaining[process, default: 0]
-                if failures > 0 {
-                    priorityRestoreFailuresRemaining[process] = failures - 1
-                    result.failed.insert(process)
+                if stalePriorityProcesses.contains(process) {
+                    result.stale.insert(process)
                 } else {
-                    result.applied.insert(process)
+                    let failures = priorityRestoreFailuresRemaining[process, default: 0]
+                    if failures > 0 {
+                        priorityRestoreFailuresRemaining[process] = failures - 1
+                        result.failed.insert(process)
+                    } else {
+                        result.applied.insert(process)
+                    }
                 }
             }
             return result

@@ -735,7 +735,10 @@ private final class PrivilegedProcessSession: NSObject, PrivilegedProcessXPCProt
     private func lowerPriority(
         _ request: PrivilegedProcessRequest
     ) -> PrivilegedProcessResponse {
-        applyPriority(request) { [priorityController] originalPriority, processIdentifier in
+        applyPriority(
+            request,
+            target: { try ProcessPriorityController.loweredState(from: $0) }
+        ) { [priorityController] originalPriority, processIdentifier in
             try priorityController.lowerPriority(
                 from: originalPriority,
                 for: processIdentifier
@@ -746,7 +749,10 @@ private final class PrivilegedProcessSession: NSObject, PrivilegedProcessXPCProt
     private func limitPriority(
         _ request: PrivilegedProcessRequest
     ) -> PrivilegedProcessResponse {
-        applyPriority(request) { [priorityController] originalPriority, processIdentifier in
+        applyPriority(
+            request,
+            target: { try ProcessPriorityController.limitState(from: $0) }
+        ) { [priorityController] originalPriority, processIdentifier in
             try priorityController.applyLimitPriority(
                 from: originalPriority,
                 for: processIdentifier
@@ -756,6 +762,7 @@ private final class PrivilegedProcessSession: NSObject, PrivilegedProcessXPCProt
 
     private func applyPriority(
         _ request: PrivilegedProcessRequest,
+        target: (ProcessPriorityPolicyState) throws -> ProcessPriorityPolicyState,
         mutation: (
             ProcessPriorityPolicyState,
             Int32
@@ -773,6 +780,7 @@ private final class PrivilegedProcessSession: NSObject, PrivilegedProcessXPCProt
 
         var result = OperationResult()
         var proposedPolicies = originalPriorities
+        var obsoleteNoOpState: Set<PrivilegedProcessIdentity> = []
         var candidates: [PrivilegedProcessIdentity] = []
         for process in identities {
             guard Self.currentIdentity(for: process.pid) == process else {
@@ -780,6 +788,7 @@ private final class PrivilegedProcessSession: NSObject, PrivilegedProcessXPCProt
                 proposedPolicies.removeValue(forKey: process)
                 continue
             }
+            let wasManaged = originalPriorities[process] != nil
             if proposedPolicies[process] == nil {
                 do {
                     proposedPolicies[process] = try priorityController.state(
@@ -795,8 +804,32 @@ private final class PrivilegedProcessSession: NSObject, PrivilegedProcessXPCProt
                     continue
                 }
             }
+            guard let originalPriority = proposedPolicies[process] else {
+                result.failed.insert(process)
+                continue
+            }
+            let targetPriority: ProcessPriorityPolicyState
+            do {
+                targetPriority = try target(originalPriority)
+            } catch {
+                if !wasManaged {
+                    proposedPolicies.removeValue(forKey: process)
+                }
+                result.failed.insert(process)
+                continue
+            }
+            if targetPriority == originalPriority {
+                proposedPolicies.removeValue(forKey: process)
+                obsoleteNoOpState.insert(process)
+                result.unchanged.insert(process)
+                continue
+            }
             candidates.append(process)
         }
+        for process in obsoleteNoOpState {
+            originalPriorities.removeValue(forKey: process)
+        }
+        recoveryCoordinator.report.removePriorityState(for: obsoleteNoOpState)
 
         do {
             try watchdog.synchronize(
@@ -857,7 +890,7 @@ private final class PrivilegedProcessSession: NSObject, PrivilegedProcessXPCProt
                     automaticResumeMillisecondsByProcess
             )
             recoveryCoordinator.report.removePriorityState(
-                for: result.applied.union(result.stale)
+                for: result.applied.union(result.stale).union(result.unchanged)
             )
         } catch {
             let recoverySucceeded = emergencyRecover()
@@ -959,7 +992,9 @@ private final class PrivilegedProcessSession: NSObject, PrivilegedProcessXPCProt
         originalPriorities = proposedPolicies
 
         var result = partialResult
-        result.failed.formUnion(Set(identities).subtracting(result.stale))
+        result.failed.formUnion(
+            Set(identities).subtracting(result.stale.union(result.unchanged))
+        )
         result.applied.removeAll()
         let recoverySucceeded = emergencyRecover()
         return response(
@@ -1021,12 +1056,22 @@ private final class PrivilegedProcessSession: NSObject, PrivilegedProcessXPCProt
             return response(result)
         } catch {
             let recoverySucceeded = emergencyRecover()
+            if recoverySucceeded {
+                return response(
+                    OperationResult(
+                        applied: result.applied,
+                        stale: result.stale,
+                        unchanged: result.failed
+                    ))
+            }
             return response(
-                OperationResult(failed: result.failed.union(result.applied)),
+                OperationResult(
+                    stale: result.stale,
+                    failed: result.failed.union(result.applied)
+                ),
                 errorCode: .safetyHelperFailed,
-                errorMessage: recoverySucceeded
-                    ? "Tempra lost its privileged safety process and restored managed processes."
-                    : "Tempra lost its privileged safety process. Its safety process attempted recovery."
+                errorMessage:
+                    "Tempra lost its privileged safety process. Its safety process attempted recovery."
             )
         }
     }
@@ -1142,6 +1187,7 @@ private final class PrivilegedProcessSession: NSObject, PrivilegedProcessXPCProt
             applied: result.applied.sorted(by: Self.identityOrder),
             stale: result.stale.sorted(by: Self.identityOrder),
             failed: result.failed.sorted(by: Self.identityOrder),
+            unchanged: result.unchanged.sorted(by: Self.identityOrder),
             errorCode: errorCode,
             errorMessage: errorMessage
         )
@@ -1166,7 +1212,7 @@ private final class PrivilegedProcessSession: NSObject, PrivilegedProcessXPCProt
             return encoded
         } catch {
             return Data(
-                "{\"protocolVersion\":4,\"errorCode\":\"operationFailed\",\"errorMessage\":\"The helper could not encode its response.\",\"snapshots\":[],\"applied\":[],\"stale\":[],\"failed\":[],\"totalCPUTimeNanoseconds\":0}".utf8
+                "{\"protocolVersion\":5,\"errorCode\":\"operationFailed\",\"errorMessage\":\"The helper could not encode its response.\",\"snapshots\":[],\"applied\":[],\"stale\":[],\"failed\":[],\"unchanged\":[],\"totalCPUTimeNanoseconds\":0}".utf8
             )
         }
     }
@@ -1269,6 +1315,7 @@ private final class PrivilegedProcessSession: NSObject, PrivilegedProcessXPCProt
         var applied: Set<PrivilegedProcessIdentity> = []
         var stale: Set<PrivilegedProcessIdentity> = []
         var failed: Set<PrivilegedProcessIdentity> = []
+        var unchanged: Set<PrivilegedProcessIdentity> = []
     }
 }
 

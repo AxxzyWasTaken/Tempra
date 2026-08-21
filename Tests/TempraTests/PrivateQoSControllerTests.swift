@@ -33,6 +33,21 @@ struct ProcessPriorityControllerTests {
         ).niceValue == 8)
     }
 
+    @Test("Priority operations identify an unchanged target before mutation")
+    func identifiesUnchangedTargetPriority() throws {
+        let loweredOriginal = ProcessPriorityPolicyState(niceValue: 10)
+        let limitedOriginal = ProcessPriorityPolicyState(niceValue: 3)
+
+        #expect(
+            try ProcessPriorityController.loweredState(from: loweredOriginal)
+                == loweredOriginal
+        )
+        #expect(
+            try ProcessPriorityController.limitState(from: limitedOriginal)
+                == limitedOriginal
+        )
+    }
+
     @Test("The controller reads the current process nice value")
     func readsCurrentPriority() throws {
         let state = try ProcessPriorityController().state(for: getpid())

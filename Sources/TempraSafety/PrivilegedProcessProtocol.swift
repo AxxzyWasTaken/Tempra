@@ -3,7 +3,7 @@ import Foundation
 import Security
 
 public enum PrivilegedProcessProtocol {
-    public static let version = 4
+    public static let version = 5
     public static let daemonPlistName = "io.github.temperapp.Temper.PrivilegedHelper.plist"
     public static let machServiceName = "io.github.temperapp.Temper.PrivilegedHelper"
     public static let applicationIdentifier = "io.github.temperapp.Temper"
@@ -105,6 +105,7 @@ public struct PrivilegedProcessResponse: Codable, Equatable, Sendable {
     public let applied: [PrivilegedProcessIdentity]
     public let stale: [PrivilegedProcessIdentity]
     public let failed: [PrivilegedProcessIdentity]
+    public let unchanged: [PrivilegedProcessIdentity]
     public let totalCPUTimeNanoseconds: UInt64
     public let errorCode: PrivilegedProcessErrorCode?
     public let errorMessage: String?
@@ -115,6 +116,7 @@ public struct PrivilegedProcessResponse: Codable, Equatable, Sendable {
         applied: [PrivilegedProcessIdentity] = [],
         stale: [PrivilegedProcessIdentity] = [],
         failed: [PrivilegedProcessIdentity] = [],
+        unchanged: [PrivilegedProcessIdentity] = [],
         totalCPUTimeNanoseconds: UInt64 = 0,
         errorCode: PrivilegedProcessErrorCode? = nil,
         errorMessage: String? = nil
@@ -124,6 +126,7 @@ public struct PrivilegedProcessResponse: Codable, Equatable, Sendable {
         self.applied = applied
         self.stale = stale
         self.failed = failed
+        self.unchanged = unchanged
         self.totalCPUTimeNanoseconds = totalCPUTimeNanoseconds
         self.errorCode = errorCode
         self.errorMessage = errorMessage

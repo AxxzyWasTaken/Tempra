@@ -156,6 +156,12 @@ struct WatchdogProtocolTests {
 
         let response = PrivilegedProcessResponse(
             applied: [identity],
+            unchanged: [
+                PrivilegedProcessIdentity(
+                    pid: 43,
+                    startTimeMicroseconds: 123_457
+                )
+            ],
             totalCPUTimeNanoseconds: 900
         )
         let decodedResponse = try JSONDecoder().decode(
@@ -164,6 +170,7 @@ struct WatchdogProtocolTests {
         )
         #expect(decodedResponse == response)
         #expect(decodedResponse.protocolVersion == PrivilegedProcessProtocol.version)
+        #expect(decodedResponse.unchanged.count == 1)
         #expect(PrivilegedProcessProtocol.maximumProcessCount == 4_096)
     }
 

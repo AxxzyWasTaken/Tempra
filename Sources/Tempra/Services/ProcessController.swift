@@ -414,12 +414,25 @@ actor ProcessController {
         guard let context = Self.reconciliationContext else { return true }
         return context.stateID == stateID
     }
+    private var currentReconciliationContext: ProcessReconciliationContext {
+        Self.reconciliationContext
+            ?? ProcessReconciliationContext(stateID: stateID, revision: revision)
+    }
 
     private var eventRevision: UInt64 {
         Self.reconciliationContext?.revision ?? revision
     }
 
     func restore(bundleIdentifier: String) async -> ProcessControlSnapshot {
+        let context = currentReconciliationContext
+        return await Self.$reconciliationContext.withValue(context) {
+            await restoreDirect(bundleIdentifier: bundleIdentifier)
+        }
+    }
+
+    private func restoreDirect(
+        bundleIdentifier: String
+    ) async -> ProcessControlSnapshot {
         if await restore(identifier: bundleIdentifier, resetDelay: true, attempts: 3) {
             await setStatus(.normal, for: bundleIdentifier)
         } else {
@@ -429,6 +442,7 @@ actor ProcessController {
             )
         }
         await updatePauseWakeMonitoring()
+        guard workIsCurrent else { return snapshot() }
         scheduleLimitScheduler()
         scheduleNextTick()
         return snapshot()
@@ -455,6 +469,15 @@ actor ProcessController {
     func applicationDidActivate(
         bundleIdentifier: String
     ) async -> ProcessControlSnapshot {
+        let context = currentReconciliationContext
+        return await Self.$reconciliationContext.withValue(context) {
+            await applicationDidActivateDirect(bundleIdentifier: bundleIdentifier)
+        }
+    }
+
+    private func applicationDidActivateDirect(
+        bundleIdentifier: String
+    ) async -> ProcessControlSnapshot {
         cachedFrontmostIdentifier = bundleIdentifier
         lastFrontmostProbeAt = clock.now()
         let isManaged = rules[bundleIdentifier]?.hasBehavior == true
@@ -477,6 +500,7 @@ actor ProcessController {
             attempts: restorationAttempts,
             resumeReason: .applicationActivation
         )
+        guard workIsCurrent else { return snapshot() }
         let activationDuration = max(
             0,
             ProcessControlMath.timeInterval(activationStartedAt.duration(to: clock.now()))
@@ -493,6 +517,7 @@ actor ProcessController {
             activePulseCount: limitPulseArbiter.activeCount,
             serviceGap: nil
         ))
+        guard workIsCurrent else { return snapshot() }
 
         if restored {
             await setStatus(.normal, for: bundleIdentifier)
@@ -503,12 +528,26 @@ actor ProcessController {
             )
         }
         await updatePauseWakeMonitoring()
+        guard workIsCurrent else { return snapshot() }
         scheduleLimitScheduler()
         scheduleNextTick()
         return snapshot()
     }
 
     func performApplicationCommand(
+        _ command: ApplicationCommand,
+        bundleIdentifier: String
+    ) async -> ApplicationCommandOutcome {
+        let context = currentReconciliationContext
+        return await Self.$reconciliationContext.withValue(context) {
+            await performApplicationCommandDirect(
+                command,
+                bundleIdentifier: bundleIdentifier
+            )
+        }
+    }
+
+    private func performApplicationCommandDirect(
         _ command: ApplicationCommand,
         bundleIdentifier: String
     ) async -> ApplicationCommandOutcome {
@@ -527,15 +566,18 @@ actor ProcessController {
             resetDelay: true,
             attempts: restorationAttempts
         ) else {
+            guard workIsCurrent else { return .failed(.restorationFailed) }
             await markUnavailable(
                 bundleIdentifier,
                 detail: "Tempra could not restore every process before the app command."
             )
-            await finishApplicationCommand()
+            _ = await finishApplicationCommand()
             return .failed(.restorationFailed)
         }
+        guard workIsCurrent else { return .failed(.restorationFailed) }
 
         await setStatus(.normal, for: bundleIdentifier)
+        guard workIsCurrent else { return .failed(.requestRejected) }
         let requestAccepted = switch command {
         case .bringToFront:
             if groups[bundleIdentifier]?.usesApplicationCommands == true {
@@ -558,6 +600,7 @@ actor ProcessController {
                 await relaunchApplication(bundleIdentifier)
             } else { false }
         }
+        guard workIsCurrent else { return .failed(.requestRejected) }
 
         guard requestAccepted else {
             await emitActivity(
@@ -565,7 +608,7 @@ actor ProcessController {
                 kind: .error,
                 detail: "macOS did not accept the requested app command."
             )
-            await finishApplicationCommand()
+            _ = await finishApplicationCommand()
             return .failed(.requestRejected)
         }
 
@@ -573,10 +616,13 @@ actor ProcessController {
         case .bringToFront:
             break
         case .hide:
+            guard workIsCurrent else { return .failed(.requestRejected) }
             hideRequested.insert(bundleIdentifier)
         case .quit, .quitGracefully:
+            guard workIsCurrent else { return .failed(.requestRejected) }
             quitRequested.insert(bundleIdentifier)
             await setStatus(.waiting, for: bundleIdentifier)
+            guard workIsCurrent else { return .failed(.requestRejected) }
             await emitActivity(
                 bundleIdentifier,
                 kind: command == .quit ? .quit : .gracefulQuit,
@@ -586,6 +632,7 @@ actor ProcessController {
             )
         case .relaunch:
             await setStatus(.normal, for: bundleIdentifier)
+            guard workIsCurrent else { return .failed(.requestRejected) }
             await emitActivity(
                 bundleIdentifier,
                 kind: .relaunched,
@@ -593,12 +640,21 @@ actor ProcessController {
             )
         }
 
-        await finishApplicationCommand()
+        guard await finishApplicationCommand() else {
+            return .failed(.requestRejected)
+        }
         return .succeeded
     }
 
     @discardableResult
     func restoreAll(attempts: Int = 3) async -> ProcessRestorationResult {
+        let context = currentReconciliationContext
+        return await Self.$reconciliationContext.withValue(context) {
+            await restoreAllDirect(attempts: attempts)
+        }
+    }
+
+    private func restoreAllDirect(attempts: Int) async -> ProcessRestorationResult {
         tickTask?.cancel()
         tickTask = nil
         scheduledTickInterval = nil
@@ -638,6 +694,13 @@ actor ProcessController {
     }
 
     func wakePausedApplicationsForUserActivation() async {
+        let context = currentReconciliationContext
+        await Self.$reconciliationContext.withValue(context) {
+            await wakePausedApplicationsForUserActivationDirect()
+        }
+    }
+
+    private func wakePausedApplicationsForUserActivationDirect() async {
         guard managementIsActive else { return }
         let until = Date().addingTimeInterval(userActivationProbeDuration)
         for identifier in Array(stoppedByTempra.keys) where rules[identifier]?.action == .pause {
@@ -647,18 +710,22 @@ actor ProcessController {
                 identifier: identifier,
                 reason: .userActivationProbe
             )
+            guard workIsCurrent else { return }
             let synchronized = await setStoppedProcesses(result.failed, for: identifier)
+            guard workIsCurrent else { return }
             if !synchronized {
                 await markUnavailable(
                     identifier,
                     detail: "Tempra lost its process safety helper while resuming processes."
                 )
+                guard workIsCurrent else { return }
             }
             if !result.applied.isEmpty {
                 pauseActivationProbeUntil[identifier] = until
             }
         }
         await updatePauseWakeMonitoring()
+        guard workIsCurrent else { return }
         scheduleLimitScheduler()
         scheduleNextTick()
     }
@@ -1104,6 +1171,21 @@ actor ProcessController {
     ) async {
         guard workIsCurrent else { return }
         let identifier = app.bundleIdentifier
+        if rule.action != .limit,
+           let limitPriority = limitPriorityProcesses[identifier],
+           !limitPriority.isEmpty {
+            guard await restoreLimitPulsePriority(
+                for: identifier,
+                processes: limitPriority
+            ) else {
+                await markUnavailable(
+                    identifier,
+                    detail: "Tempra could not restore normal process priority before changing process control."
+                )
+                return
+            }
+            guard workIsCurrent else { return }
+        }
         switch rule.action {
         case .none:
             limitDeadlines.remove(identifier: identifier)
@@ -1227,6 +1309,7 @@ actor ProcessController {
     private func requestTermination(for app: ProcessControlTarget) async -> Bool {
         guard workIsCurrent else { return false }
         let result = await system.terminate(app.processIdentities)
+        guard workIsCurrent else { return false }
         return !result.applied.isEmpty && result.failed.isEmpty
     }
 
@@ -1396,13 +1479,18 @@ actor ProcessController {
         let lowerResult = lowerPriorityProcesses.isEmpty
             ? ProcessOperationResult()
             : await system.lowerPriority(lowerPriorityProcesses)
+
+        guard workIsCurrent else { return false }
         let normalResult = normalPriorityProcesses.isEmpty
             ? ProcessOperationResult()
             : await system.restorePriority(normalPriorityProcesses)
+        guard workIsCurrent else { return false }
 
         loweredByTempra[identifier, default: []].formUnion(lowerResult.applied)
         loweredByTempra[identifier]?.subtract(
-            normalResult.applied.union(normalResult.stale)
+            lowerResult.stale
+                .union(normalResult.applied)
+                .union(normalResult.stale)
         )
         if loweredByTempra[identifier]?.isEmpty == true {
             loweredByTempra.removeValue(forKey: identifier)
@@ -2095,6 +2183,7 @@ actor ProcessController {
     ) async -> ProcessOperationResult {
         guard !processes.isEmpty else { return ProcessOperationResult() }
         let result = await system.resume(processes)
+        guard workIsCurrent else { return result }
         let stillPending = automaticResumeStopOperations.values.reduce(
             into: Set<ProcessIdentity>()
         ) { pending, operationProcesses in
@@ -2432,6 +2521,7 @@ actor ProcessController {
                 )
             }
         )
+        guard workIsCurrent else { return false }
         let unresolved = retryResult.unresolved
         if unresolved.isEmpty {
             resumeRestorationFailureDescriptions.removeValue(forKey: identifier)
@@ -2612,12 +2702,14 @@ actor ProcessController {
             )
             return true
         } catch {
+            guard workIsCurrent else { return false }
             let pending = allStoppedProcesses
             let emergencyResult = await resumeProcesses(
                 pending,
                 identifier: nil,
                 reason: .emergencyRestoration
             )
+            guard workIsCurrent else { return false }
             for trackedIdentifier in Array(stoppedByTempra.keys) {
                 let unresolved = stoppedByTempra[trackedIdentifier, default: []]
                     .intersection(emergencyResult.failed)
@@ -2665,6 +2757,7 @@ actor ProcessController {
             attempts: attempts,
             operation: { await system.restorePriority($0) }
         )
+        guard workIsCurrent else { return false }
         let unresolved = retryResult.unresolved
         if unresolved.isEmpty {
             priorityRestorationFailureDescriptions.removeValue(forKey: identifier)
@@ -2688,12 +2781,16 @@ actor ProcessController {
         return unresolved.isEmpty && workIsCurrent
     }
 
-    private func restoreLowerPriority(for identifier: String, attempts: Int) async -> Bool {
+    private func restoreLowerPriority(
+        for identifier: String,
+        attempts: Int
+    ) async -> Bool {
         let retryResult = await performWithRetries(
             loweredByTempra[identifier, default: []],
             attempts: attempts,
             operation: { await system.restorePriority($0) }
         )
+        guard workIsCurrent else { return false }
         let unresolved = retryResult.unresolved
         if unresolved.isEmpty {
             priorityRestorationFailureDescriptions.removeValue(forKey: identifier)
@@ -2843,10 +2940,12 @@ actor ProcessController {
         ))
     }
 
-    private func finishApplicationCommand() async {
+    private func finishApplicationCommand() async -> Bool {
         await updatePauseWakeMonitoring()
+        guard workIsCurrent else { return false }
         scheduleLimitScheduler()
         scheduleNextTick()
+        return true
     }
 
     private func updatePauseWakeMonitoring() async {

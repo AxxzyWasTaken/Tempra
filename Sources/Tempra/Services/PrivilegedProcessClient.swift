@@ -535,43 +535,37 @@ actor PrivilegedProcessClient {
     ) async throws -> ProcessOperationResult {
         try await flushRecoveryAcknowledgements()
         try validateOperationProcesses(processes)
-        let response = try await send(try operationRequest(
-            action,
-            processes: processes,
-            automaticResumeAfter: automaticResumeAfter
-        ))
-        let originals = Dictionary(uniqueKeysWithValues: processes.map {
-            (PrivilegedProcessIdentity(
-                pid: Int32($0.pid),
-                startTimeMicroseconds: $0.startTimeMicroseconds
-            ), $0)
-        })
-        let applied = Set(response.applied.compactMap { originals[$0] })
-        let stale = Set(response.stale.compactMap { originals[$0] })
-        let failed = Set(response.failed.compactMap { originals[$0] })
-        guard applied.count == response.applied.count,
-              stale.count == response.stale.count,
-              failed.count == response.failed.count,
-              applied.isDisjoint(with: stale),
-              applied.isDisjoint(with: failed),
-              stale.isDisjoint(with: failed),
-              applied.union(stale).union(failed) == processes else {
-            throw PrivilegedProcessClientError.invalidResponse
-        }
-        let result = ProcessOperationResult(applied: applied, stale: stale, failed: failed)
-        let resolved = applied.union(stale)
+        let response = try await send(
+            try operationRequest(
+                action,
+                processes: processes,
+                automaticResumeAfter: automaticResumeAfter
+            ),
+            acceptsOperationErrors: true
+        )
+        let mapped = try Self.mapOperationResponse(
+            response,
+            requested: processes
+        )
+        let result = mapped.result
+        let resolvedWithoutAction = mapped.resolvedWithoutAction
+        let resolved = result.applied.union(result.stale).union(
+            resolvedWithoutAction
+        )
         switch action {
         case .stop:
-            stoppedByActiveSession.formUnion(applied)
-            stoppedByActiveSession.subtract(stale)
+            stoppedByActiveSession.formUnion(result.applied)
+            stoppedByActiveSession.subtract(result.stale.union(resolvedWithoutAction))
         case .resume:
             pendingResumeRecoveryAcknowledgements.formUnion(
                 resolved.subtracting(stoppedByActiveSession)
             )
             stoppedByActiveSession.subtract(resolved)
         case .lowerPriority, .limitPriority:
-            prioritiesChangedByActiveSession.formUnion(applied)
-            prioritiesChangedByActiveSession.subtract(stale)
+            prioritiesChangedByActiveSession.formUnion(result.applied)
+            prioritiesChangedByActiveSession.subtract(
+                result.stale.union(resolvedWithoutAction)
+            )
         case .restorePriority:
             pendingPriorityRecoveryAcknowledgements.formUnion(
                 resolved.subtracting(prioritiesChangedByActiveSession)
@@ -620,6 +614,85 @@ actor PrivilegedProcessClient {
             ))
             pendingPriorityRecoveryAcknowledgements.subtract(acknowledged)
         }
+    }
+
+    static func mapOperationResponse(
+        _ response: PrivilegedProcessResponse,
+        requested: Set<ProcessIdentity>
+    ) throws -> (
+        result: ProcessOperationResult,
+        resolvedWithoutAction: Set<ProcessIdentity>
+    ) {
+        guard requested.count <= PrivilegedProcessProtocol.maximumProcessCount else {
+            throw PrivilegedProcessClientError.invalidResponse
+        }
+
+        var originals: [PrivilegedProcessIdentity: ProcessIdentity] = [:]
+        originals.reserveCapacity(requested.count)
+        for process in requested {
+            let identity = PrivilegedProcessIdentity(
+                pid: Int32(process.pid),
+                startTimeMicroseconds: process.startTimeMicroseconds
+            )
+            guard originals.updateValue(process, forKey: identity) == nil else {
+                throw PrivilegedProcessClientError.invalidResponse
+            }
+        }
+
+        func map(
+            _ identities: [PrivilegedProcessIdentity]
+        ) throws -> Set<ProcessIdentity> {
+            guard identities.count <= PrivilegedProcessProtocol.maximumProcessCount else {
+                throw PrivilegedProcessClientError.invalidResponse
+            }
+            let mapped = Set(identities.compactMap { originals[$0] })
+            guard mapped.count == identities.count else {
+                throw PrivilegedProcessClientError.invalidResponse
+            }
+            return mapped
+        }
+
+        let applied = try map(response.applied)
+        let stale = try map(response.stale)
+        let failed = try map(response.failed)
+        let unchanged = try map(response.unchanged)
+        let returned = applied.union(stale).union(failed).union(unchanged)
+        let operationError =
+            response.errorCode != nil
+            || response.errorMessage != nil
+        guard response.snapshots.isEmpty,
+            response.totalCPUTimeNanoseconds == 0,
+            applied.isDisjoint(with: stale),
+            applied.isDisjoint(with: failed),
+            applied.isDisjoint(with: unchanged),
+            stale.isDisjoint(with: failed),
+            stale.isDisjoint(with: unchanged),
+            failed.isDisjoint(with: unchanged),
+            returned.isSubset(of: requested),
+            (response.errorCode == nil) == (response.errorMessage == nil),
+            response.errorMessage.map({ !$0.isEmpty }) != false
+        else {
+            throw PrivilegedProcessClientError.invalidResponse
+        }
+
+        var completeFailed = failed
+        if operationError {
+            completeFailed.formUnion(requested.subtracting(returned))
+        } else {
+            guard returned == requested else {
+                throw PrivilegedProcessClientError.invalidResponse
+            }
+        }
+
+        return (
+            result: ProcessOperationResult(
+                applied: applied,
+                stale: stale,
+                failed: completeFailed,
+                failureDescription: response.errorMessage
+            ),
+            resolvedWithoutAction: unchanged
+        )
     }
 
     private func operationRequest(
@@ -679,7 +752,8 @@ actor PrivilegedProcessClient {
     }
 
     private func send(
-        _ request: PrivilegedProcessRequest
+        _ request: PrivilegedProcessRequest,
+        acceptsOperationErrors: Bool = false
     ) async throws -> PrivilegedProcessResponse {
         if connection == nil {
             let lifecycle = await registrationLifecycle()
@@ -760,15 +834,21 @@ actor PrivilegedProcessClient {
               response.snapshots.count <= PrivilegedProcessProtocol.maximumProcessCount,
               response.applied.count <= PrivilegedProcessProtocol.maximumProcessCount,
               response.stale.count <= PrivilegedProcessProtocol.maximumProcessCount,
-              response.failed.count <= PrivilegedProcessProtocol.maximumProcessCount else {
+              response.failed.count <= PrivilegedProcessProtocol.maximumProcessCount,
+              response.unchanged.count <= PrivilegedProcessProtocol.maximumProcessCount,
+              (response.errorCode == nil) == (response.errorMessage == nil),
+              response.errorMessage.map({ !$0.isEmpty }) != false else {
             invalidate()
             throw PrivilegedProcessClientError.invalidResponse
         }
         if response.errorCode != nil || response.errorMessage != nil {
-            invalidate()
-            throw PrivilegedProcessClientError.remoteFailure(
-                response.errorMessage ?? "The privileged helper reported an operation failure."
-            )
+            guard acceptsOperationErrors else {
+                invalidate()
+                throw PrivilegedProcessClientError.remoteFailure(
+                    response.errorMessage
+                        ?? "The privileged helper reported an operation failure."
+                )
+            }
         }
         return response
     }

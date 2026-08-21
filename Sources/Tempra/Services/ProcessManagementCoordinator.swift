@@ -236,8 +236,12 @@ final class ProcessManagementCoordinator {
 
     func shutdown() async -> ProcessRestorationResult {
         acceptsControllerResults = false
+        let updateTask = self.updateTask
+        self.updateTask = nil
         updateTask?.cancel()
-        updateTask = nil
+        if let updateTask {
+            await updateTask.value
+        }
         if let pauseActivationEventMonitor {
             NSEvent.removeMonitor(pauseActivationEventMonitor)
             self.pauseActivationEventMonitor = nil

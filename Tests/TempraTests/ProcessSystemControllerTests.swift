@@ -36,6 +36,48 @@ struct ProcessSystemControllerTests {
         #expect(await eventuallyStatus(of: pid, isStopped: true))
     }
 
+    @Test("Local signals use kernel identity, not routing metadata")
+    func localSignalsIgnorePrivilegedRoutingMetadata() async throws {
+        let sleeper = Process()
+        sleeper.executableURL = URL(fileURLWithPath: "/bin/sleep")
+        sleeper.arguments = ["10"]
+        try sleeper.run()
+        let pid = sleeper.processIdentifier
+        defer {
+            _ = kill(pid, SIGCONT)
+            if sleeper.isRunning {
+                sleeper.terminate()
+                sleeper.waitUntilExit()
+            }
+        }
+
+        let current = try #require(
+            LiveProcessSystemController.currentIdentity(for: pid)
+        )
+        let identity = ProcessIdentity(
+            pid: current.pid,
+            startTimeMicroseconds: current.startTimeMicroseconds,
+            requiresPrivilegedControl: true
+        )
+        let controller = LiveProcessSystemController()
+
+        let result = await controller.stop(
+            [identity],
+            automaticResumeAfter: nil
+        )
+
+        #expect(result.applied == [identity])
+        #expect(result.stale.isEmpty)
+        #expect(result.failed.isEmpty)
+        #expect(await eventuallyStatus(of: pid, isStopped: true))
+
+        let restoration = await controller.resume([identity])
+        #expect(restoration.applied == [identity])
+        #expect(restoration.stale.isEmpty)
+        #expect(restoration.failed.isEmpty)
+        #expect(await eventuallyStatus(of: pid, isStopped: false))
+    }
+
     @Test("User-owned restoration does not depend on the process guardian")
     func userOwnedRestorationUsesDirectSignal() async throws {
         let sleeper = Process()
