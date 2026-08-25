@@ -7,11 +7,14 @@ final class MonitoringCoordinator {
     private let service: any MonitoringServicing
     private let inventoryReader = ApplicationInventoryReader()
     private let onSample: SampleHandler
+    private let clock = ContinuousClock()
     private var timer: Timer?
     private var configurationTask: Task<Void, Never>?
     private var samplingTask: Task<Void, Never>?
     private var pendingRequest: MonitoringRequest?
     private var deferredProcessChange: ProcessChangeNotification?
+    private var deferredEventRefreshTask: Task<Void, Never>?
+    private var lastSampleStartedAt: ContinuousClock.Instant?
     private var applicationBaselineGeneration: UInt64?
     private var networkActivityBundleIdentifiers: Set<String> = []
     private var generation: UInt64 = 0
@@ -45,6 +48,8 @@ final class MonitoringCoordinator {
 
         timer?.invalidate()
         timer = nil
+        deferredEventRefreshTask?.cancel()
+        deferredEventRefreshTask = nil
         deferredProcessChange = ProcessChangeNotification.coalescing(
             deferredProcessChange,
             pendingRequest?.processChange
@@ -87,6 +92,21 @@ final class MonitoringCoordinator {
         processChange: ProcessChangeNotification? = nil
     ) {
         guard !isStopped else { return }
+        if let delay = eventRefreshDelay(for: processChange) {
+            // A process table that churns fires events several times a second.
+            // Every one of them costs a full process scan, and with the
+            // interface closed nobody reads the result, so the change waits out
+            // the gap and the rules still see it within a second.
+            deferredProcessChange = ProcessChangeNotification.coalescing(
+                deferredProcessChange,
+                processChange
+            )
+            scheduleDeferredEventRefresh(
+                after: delay,
+                includesEssentialSystemProcesses: includesEssentialSystemProcesses
+            )
+            return
+        }
         enqueue(makeRequest(
             samplesSystemCPU: demand.samplesSystemCPU,
             samplesApplications: true,
@@ -94,6 +114,41 @@ final class MonitoringCoordinator {
             isLatencySensitive: true,
             processChange: processChange
         ))
+    }
+
+    /// How long an event-driven sample waits, or nil to sample now.
+    private func eventRefreshDelay(
+        for processChange: ProcessChangeNotification?
+    ) -> Duration? {
+        // Audio protection has to release a limit before the sound breaks, so an
+        // audio change never waits.
+        guard processChange?.audioActivityChanged != true else { return nil }
+        let interval = demand.eventRefreshInterval
+        guard interval > 0,
+              samplingTask == nil,
+              let lastSampleStartedAt else { return nil }
+        let gap = ProcessControlMath.duration(interval)
+        let elapsed = lastSampleStartedAt.duration(to: clock.now)
+        guard elapsed >= .zero, elapsed < gap else { return nil }
+        return gap - elapsed
+    }
+
+    private func scheduleDeferredEventRefresh(
+        after delay: Duration,
+        includesEssentialSystemProcesses: Bool
+    ) {
+        guard deferredEventRefreshTask == nil else { return }
+        let deferredFrom = lastSampleStartedAt
+        deferredEventRefreshTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: delay)
+            guard let self, !Task.isCancelled, !isStopped else { return }
+            deferredEventRefreshTask = nil
+            // A periodic sample in the meantime already carried the change.
+            guard lastSampleStartedAt == deferredFrom else { return }
+            requestEventRefresh(
+                includesEssentialSystemProcesses: includesEssentialSystemProcesses
+            )
+        }
     }
 
     func invalidateApplicationInventory() {
@@ -107,6 +162,8 @@ final class MonitoringCoordinator {
         timer = nil
         pendingRequest = nil
         deferredProcessChange = nil
+        deferredEventRefreshTask?.cancel()
+        deferredEventRefreshTask = nil
         applicationBaselineGeneration = nil
         samplingTask?.cancel()
         samplingTask = nil
@@ -190,6 +247,7 @@ final class MonitoringCoordinator {
     private func start(_ request: MonitoringRequest) {
         let configurationTask = configurationTask
         let priority: TaskPriority = request.isLatencySensitive ? .userInitiated : .utility
+        lastSampleStartedAt = clock.now
         samplingTask = Task(priority: priority) { [weak self, service, onSample] in
             await configurationTask?.value
             guard !Task.isCancelled else { return }

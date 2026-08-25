@@ -113,8 +113,42 @@ protocol MonitoringServicing: Sendable {
     func shutdown() async
 }
 
+/// Serializes access to the process monitor across the service's own
+/// suspension points, in FIFO order. Kept deliberately boring: it holds at
+/// most a couple of waiters, so a plain queue beats clever bookkeeping.
+private actor MonitoringOperationGate {
+    private var isOccupied = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    /// Runs `body` alone: nothing else touches the monitor until it returns.
+    func withExclusiveAccess<T>(_ body: () async -> T) async -> T {
+        await enter()
+        defer { leave() }
+        return await body()
+    }
+
+    private func enter() async {
+        guard isOccupied else {
+            isOccupied = true
+            return
+        }
+        await withCheckedContinuation { continuation in
+            waiters.append(continuation)
+        }
+    }
+
+    private func leave() {
+        guard waiters.isEmpty else {
+            waiters.removeFirst().resume()
+            return
+        }
+        isOccupied = false
+    }
+}
+
 actor MonitoringService: MonitoringServicing {
     private let processMonitor: ProcessMonitor
+    private let processMonitorGate = MonitoringOperationGate()
     private let powerSourceMonitor: PowerSourceMonitor
     private let systemMetricsMonitor: SystemMetricsMonitor
 
@@ -128,13 +162,24 @@ actor MonitoringService: MonitoringServicing {
         self.systemMetricsMonitor = systemMetricsMonitor
     }
 
+    /// Runs `body` with exclusive access to the process monitor. `sample`
+    /// suspends mid-operation, so without the gate a reentrant call could
+    /// interleave a baseline reset or a process change into a running sample.
+    private func withProcessMonitor<T>(
+        _ body: @escaping (ProcessMonitor) async -> T
+    ) async -> T {
+        await processMonitorGate.withExclusiveAccess { [processMonitor] in
+            await body(processMonitor)
+        }
+    }
+
     func sample(_ request: MonitoringRequest) async -> MonitoringSample {
         let systemCPU = request.samplesSystemCPU ? systemMetricsMonitor.sample() : nil
         let powerSource = request.samplesSystemCPU ? powerSourceMonitor.sample() : nil
-        if let processChange = request.processChange {
-            processMonitor.handleProcessChange(processChange)
-        }
         guard request.samplesApplications, let inventory = request.inventory else {
+            if let processChange = request.processChange {
+                await withProcessMonitor { $0.handleProcessChange(processChange) }
+            }
             return MonitoringSample(
                 generation: request.generation,
                 systemCPU: systemCPU,
@@ -144,26 +189,33 @@ actor MonitoringService: MonitoringServicing {
             )
         }
 
-        let apps = await processMonitor.sample(
-            inventory: inventory,
-            includingEssentialSystemProcesses: request.includesEssentialSystemProcesses,
-            processTableRefreshInterval: request.processTableRefreshInterval,
-            refreshesAudioActivity: request.refreshesAudioActivity
-                || request.processChange?.audioActivityChanged == true,
-            networkActivityBundleIdentifiers: request.networkActivityBundleIdentifiers
-        )
+        let (apps, didRefreshApplications, privilegedAccessError) = await withProcessMonitor {
+            monitor -> ([ManagedApp], Bool, String?) in
+            if let processChange = request.processChange {
+                monitor.handleProcessChange(processChange)
+            }
+            let apps = await monitor.sample(
+                inventory: inventory,
+                includingEssentialSystemProcesses: request.includesEssentialSystemProcesses,
+                processTableRefreshInterval: request.processTableRefreshInterval,
+                refreshesAudioActivity: request.refreshesAudioActivity
+                    || request.processChange?.audioActivityChanged == true,
+                networkActivityBundleIdentifiers: request.networkActivityBundleIdentifiers
+            )
+            return (apps, monitor.didRefreshLastSample, monitor.privilegedAccessError)
+        }
         return MonitoringSample(
             generation: request.generation,
             systemCPU: systemCPU,
             apps: apps,
-            didRefreshApplications: processMonitor.didRefreshLastSample,
+            didRefreshApplications: didRefreshApplications,
             powerSource: powerSource,
-            privilegedAccessError: processMonitor.privilegedAccessError
+            privilegedAccessError: privilegedAccessError
         )
     }
 
-    func resetApplicationBaseline() {
-        processMonitor.resetSamplingBaseline()
+    func resetApplicationBaseline() async {
+        await withProcessMonitor { $0.resetSamplingBaseline() }
     }
 
     func setTemperatureSamplingInterval(_ interval: TimeInterval?) {

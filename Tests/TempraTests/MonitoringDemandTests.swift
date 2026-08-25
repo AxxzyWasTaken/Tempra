@@ -187,12 +187,160 @@ struct MonitoringDemandTests {
         await coordinator.shutdown()
     }
 
+    @Test("Refreshes during a sample coalesce into one pending request")
+    @MainActor
+    func activeSampleCoalescesPendingRefreshes() async throws {
+        let service = ControlledMonitoringService()
+        var receivedSamples: [MonitoringSample] = []
+        let coordinator = MonitoringCoordinator(service: service) { sample in
+            receivedSamples.append(sample)
+        }
+        let identity = ProcessIdentity(
+            pid: 400,
+            startTimeMicroseconds: 4_000_000
+        )
+        let processChange = ProcessChangeNotification(
+            invalidatedMetadata: [identity],
+            processTableChanged: true,
+            audioActivityChanged: false
+        )
+
+        coordinator.configure(
+            demand: .management(samplesSystemCPU: false),
+            refreshImmediately: true,
+            includesEssentialSystemProcesses: false
+        )
+        await service.waitForFirstSample()
+        coordinator.requestEventRefresh(
+            includesEssentialSystemProcesses: false,
+            processChange: .audioActivity
+        )
+        coordinator.requestEventRefresh(
+            includesEssentialSystemProcesses: false,
+            processChange: processChange
+        )
+        await service.releaseFirstSample()
+
+        try await waitForSampleCount(2, samples: { receivedSamples })
+        let requests = await service.recordedRequests()
+        #expect(requests.count == 2)
+        #expect(requests[1].processChange == ProcessChangeNotification(
+            invalidatedMetadata: [identity],
+            processTableChanged: true,
+            audioActivityChanged: true
+        ))
+        await coordinator.shutdown()
+    }
+
+    @Test("Shutdown discards a sample that completes after cancellation")
+    @MainActor
+    func shutdownDiscardsLateSample() async {
+        let service = ControlledMonitoringService()
+        var receivedSamples: [MonitoringSample] = []
+        let coordinator = MonitoringCoordinator(service: service) { sample in
+            receivedSamples.append(sample)
+        }
+
+        coordinator.configure(
+            demand: .management(samplesSystemCPU: false),
+            refreshImmediately: true,
+            includesEssentialSystemProcesses: false
+        )
+        await service.waitForFirstSample()
+        await coordinator.shutdown()
+        #expect(await service.shutdownCallCount() == 1)
+
+        await service.releaseFirstSample()
+        await service.waitForFirstSampleCompletion()
+        for _ in 0..<10 {
+            await Task.yield()
+        }
+        #expect(receivedSamples.isEmpty)
+    }
+
+    @Test("The open interface follows every process event")
+    func openInterfaceFollowsEveryProcessEvent() {
+        #expect(MonitoringDemand.liveUI.eventRefreshInterval == 0)
+        #expect(MonitoringDemand.management(samplesSystemCPU: true)
+            .eventRefreshInterval == 1)
+        #expect(MonitoringDemand.highCPUAlerts(samplesSystemCPU: false)
+            .eventRefreshInterval == 1)
+        #expect(MonitoringDemand.continuousManagement.eventRefreshInterval == 1)
+    }
+
+    @Test("A churning process table costs one paced sample while the menu is closed")
+    @MainActor
+    func closedMenuPacesProcessEventSamples() async throws {
+        let service = RecordingMonitoringService()
+        var receivedSamples: [MonitoringSample] = []
+        let coordinator = MonitoringCoordinator(service: service) { sample in
+            receivedSamples.append(sample)
+        }
+        let firstIdentity = ProcessIdentity(pid: 501, startTimeMicroseconds: 5_000_000)
+        let secondIdentity = ProcessIdentity(pid: 502, startTimeMicroseconds: 5_100_000)
+
+        coordinator.configure(
+            demand: .management(samplesSystemCPU: false),
+            refreshImmediately: true,
+            includesEssentialSystemProcesses: false
+        )
+        try await waitForSampleCount(1, samples: { receivedSamples })
+
+        for identity in [firstIdentity, secondIdentity, firstIdentity] {
+            coordinator.requestEventRefresh(
+                includesEssentialSystemProcesses: false,
+                processChange: ProcessChangeNotification(
+                    invalidatedMetadata: [identity],
+                    processTableChanged: true,
+                    audioActivityChanged: false
+                )
+            )
+        }
+        try await Task.sleep(for: .milliseconds(200))
+        #expect(receivedSamples.count == 1)
+
+        try await waitForSampleCount(2, samples: { receivedSamples }, attempts: 300)
+        let requests = await service.recordedRequests()
+        #expect(requests.count == 2)
+        #expect(requests[1].processChange == ProcessChangeNotification(
+            invalidatedMetadata: [firstIdentity, secondIdentity],
+            processTableChanged: true,
+            audioActivityChanged: false
+        ))
+        await coordinator.shutdown()
+    }
+
+    @Test("An audio change samples without waiting out the gap")
+    @MainActor
+    func audioChangeSamplesImmediately() async throws {
+        let service = RecordingMonitoringService()
+        var receivedSamples: [MonitoringSample] = []
+        let coordinator = MonitoringCoordinator(service: service) { sample in
+            receivedSamples.append(sample)
+        }
+
+        coordinator.configure(
+            demand: .management(samplesSystemCPU: false),
+            refreshImmediately: true,
+            includesEssentialSystemProcesses: false
+        )
+        try await waitForSampleCount(1, samples: { receivedSamples })
+
+        coordinator.requestEventRefresh(
+            includesEssentialSystemProcesses: false,
+            processChange: .audioActivity
+        )
+        try await waitForSampleCount(2, samples: { receivedSamples })
+        await coordinator.shutdown()
+    }
+
     @MainActor
     private func waitForSampleCount(
         _ count: Int,
-        samples: () -> [MonitoringSample]
+        samples: () -> [MonitoringSample],
+        attempts: Int = 100
     ) async throws {
-        for _ in 0..<100 {
+        for _ in 0..<attempts {
             if samples().count >= count { return }
             try await Task.sleep(for: .milliseconds(10))
         }
@@ -201,6 +349,28 @@ struct MonitoringDemandTests {
 }
 
 private struct MonitoringSampleTimeout: Error {}
+
+private actor RecordingMonitoringService: MonitoringServicing {
+    private var requests: [MonitoringRequest] = []
+
+    func sample(_ request: MonitoringRequest) -> MonitoringSample {
+        requests.append(request)
+        return MonitoringSample(
+            generation: request.generation,
+            systemCPU: nil,
+            apps: [],
+            didRefreshApplications: true
+        )
+    }
+
+    func recordedRequests() -> [MonitoringRequest] {
+        requests
+    }
+
+    func resetApplicationBaseline() {}
+    func setTemperatureSamplingInterval(_ interval: TimeInterval?) {}
+    func shutdown() {}
+}
 
 private actor BaselineMonitoringService: MonitoringServicing {
     private var sampleCount = 0
@@ -230,4 +400,67 @@ private actor BaselineMonitoringService: MonitoringServicing {
     func resetApplicationBaseline() {}
     func setTemperatureSamplingInterval(_ interval: TimeInterval?) {}
     func shutdown() {}
+}
+
+private actor ControlledMonitoringService: MonitoringServicing {
+    private var requests: [MonitoringRequest] = []
+    private var firstSampleStarted: CheckedContinuation<Void, Never>?
+    private var firstSampleRelease: CheckedContinuation<Void, Never>?
+    private var firstSampleCompleted = false
+    private var firstSampleCompletion: CheckedContinuation<Void, Never>?
+    private var shutdownCalls = 0
+
+    func sample(_ request: MonitoringRequest) async -> MonitoringSample {
+        requests.append(request)
+        if requests.count == 1 {
+            firstSampleStarted?.resume()
+            firstSampleStarted = nil
+            await withCheckedContinuation { continuation in
+                firstSampleRelease = continuation
+            }
+            firstSampleCompleted = true
+            firstSampleCompletion?.resume()
+            firstSampleCompletion = nil
+        }
+        return MonitoringSample(
+            generation: request.generation,
+            systemCPU: nil,
+            apps: [],
+            didRefreshApplications: true
+        )
+    }
+
+    func waitForFirstSample() async {
+        guard requests.isEmpty else { return }
+        await withCheckedContinuation { continuation in
+            firstSampleStarted = continuation
+        }
+    }
+
+    func releaseFirstSample() {
+        firstSampleRelease?.resume()
+        firstSampleRelease = nil
+    }
+
+    func waitForFirstSampleCompletion() async {
+        guard !firstSampleCompleted else { return }
+        await withCheckedContinuation { continuation in
+            firstSampleCompletion = continuation
+        }
+    }
+
+    func recordedRequests() -> [MonitoringRequest] {
+        requests
+    }
+
+    func shutdownCallCount() -> Int {
+        shutdownCalls
+    }
+
+    func resetApplicationBaseline() {}
+    func setTemperatureSamplingInterval(_ interval: TimeInterval?) {}
+
+    func shutdown() {
+        shutdownCalls += 1
+    }
 }

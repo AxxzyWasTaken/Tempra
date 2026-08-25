@@ -43,6 +43,23 @@ enum MonitoringDemand: Equatable {
         }
     }
 
+    /// The smallest gap between two event-driven samples.
+    ///
+    /// A process table that churns — an app that spawns short-lived children,
+    /// a run of app launches — fires change events several times a second, and
+    /// every sample walks the whole process table. The open interface follows
+    /// them, because the list is on screen. Every other mode paces them: the
+    /// rules only need the change within a second, and the scan is the cost.
+    var eventRefreshInterval: TimeInterval {
+        switch self {
+        case .liveUI:
+            0
+        case .dormant, .menuBar, .management, .highCPUAlerts, .continuous,
+                .continuousManagement:
+            1
+        }
+    }
+
     var refreshesAudioActivity: Bool {
         self == .liveUI
     }
@@ -59,6 +76,20 @@ enum MonitoringDemand: Equatable {
 
     var recordsApplicationMetrics: Bool {
         self == .liveUI || self == .continuous || self == .continuousManagement
+    }
+
+    /// Whether the apps under a rule get history while the interface is closed.
+    ///
+    /// A limit is chosen against what the app draws over a session, so the apps
+    /// carrying rules need history even when nobody is watching. This stays
+    /// narrow: the managed apps only, never the whole process list.
+    var recordsManagedApplicationMetrics: Bool {
+        switch self {
+        case .management, .highCPUAlerts:
+            true
+        case .dormant, .menuBar, .liveUI, .continuous, .continuousManagement:
+            false
+        }
     }
 
     var detectsHighCPU: Bool {
