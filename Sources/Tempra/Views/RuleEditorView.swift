@@ -84,6 +84,13 @@ struct RuleEditorView: View {
         .onChange(of: draft.limitPercent) { _, value in
             draft.limitPercent = CPULimitRange.clamped(value)
         }
+        .onChange(of: draft.gpuLimitWatts) { _, value in
+            guard let value, let gpuCeilingWatts else { return }
+            draft.gpuLimitWatts = GPULimitRange.clamped(value, ceilingWatts: gpuCeilingWatts)
+        }
+        .onChange(of: draft.gpuLimitWatts == nil) { _, _ in
+            draft.repairLimitConfiguration()
+        }
         .task(id: draft) {
             guard draft != original else { return }
             do {
@@ -137,7 +144,7 @@ struct RuleEditorView: View {
                         }
                         Button("Pause") {
                             draft.action = .pause
-                            draft.lowersCPUPriority = false
+                            draft.repairLimitConfiguration()
                         }
 
                         if store.suspensionUntil(for: item.bundleIdentifier) != nil {
@@ -222,7 +229,7 @@ struct RuleEditorView: View {
                 limitToggle
             }
 
-            if draft.action == .limit {
+            if draft.action == .limit, draft.limitsCPU {
                 HStack(spacing: 9) {
                     TempraNumberField(
                         value: $draft.limitPercent,
@@ -267,6 +274,54 @@ struct RuleEditorView: View {
                     .font(TempraTypography.ruleTag)
                     .foregroundStyle(TempraPalette.secondaryText)
                     .padding(.leading, 24)
+
+            }
+
+            if item.canLimitCPU, draft.action != .pause {
+                if let gpuCeilingWatts {
+                    gpuLimitToggle
+                        .padding(.leading, 24)
+
+                    if draft.gpuLimitWatts != nil {
+                        HStack(spacing: 9) {
+                            TempraNumberField(
+                                value: gpuLimitValueBinding,
+                                range: GPULimitRange.allowed(ceilingWatts: gpuCeilingWatts),
+                                width: 52,
+                                suffix: "W",
+                                accented: true
+                            )
+
+                            TempraTickedSlider(
+                                value: gpuLimitValueBinding,
+                                range: GPULimitRange.allowed(ceilingWatts: gpuCeilingWatts),
+                                step: 1
+                            )
+                        }
+                        .padding(.leading, 40)
+
+                        Toggle("Keep this limit on in front", isOn: $draft.limitsGPUWhenInFront)
+                            .toggleStyle(TempraCheckboxToggleStyle())
+                            .controlSize(.small)
+                            .padding(.leading, 40)
+                            .help(
+                                "Tempra pauses the app in short bursts to hold the limit, "
+                                    + "so the app can stutter while you use it."
+                            )
+                    }
+
+                    Text(gpuLimitFootnote(ceilingWatts: gpuCeilingWatts))
+                        .font(TempraTypography.ruleTag)
+                        .foregroundStyle(TempraPalette.secondaryText)
+                        .padding(.leading, 24)
+                        .fixedSize(horizontal: false, vertical: true)
+                } else {
+                    Text("This Mac does not report a GPU power ceiling, so Tempra cannot set a GPU limit here.")
+                        .font(TempraTypography.ruleTag)
+                        .foregroundStyle(TempraPalette.secondaryText)
+                        .padding(.leading, 24)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
         }
     }
@@ -404,9 +459,7 @@ struct RuleEditorView: View {
             get: { draft.action == .pause },
             set: { enabled in
                 draft.action = enabled ? .pause : .none
-                if enabled {
-                    draft.lowersCPUPriority = false
-                }
+                draft.repairLimitConfiguration()
             }
         ))
         .toggleStyle(TempraCheckboxToggleStyle())
@@ -439,13 +492,95 @@ struct RuleEditorView: View {
 
     private var limitToggle: some View {
         Toggle("Slow down this app if it uses more than:", isOn: Binding(
-            get: { draft.action == .limit },
+            get: { draft.action == .limit && draft.limitsCPU },
             set: { enabled in
-                draft.action = enabled ? .limit : .none
+                if enabled {
+                    draft.action = .limit
+                    draft.limitsCPU = true
+                } else if draft.gpuLimitWatts != nil {
+                    // The GPU ceiling stands on its own.
+                    draft.limitsCPU = false
+                } else {
+                    draft.action = .none
+                }
+                draft.repairLimitConfiguration()
             }
         ))
         .toggleStyle(TempraCheckboxToggleStyle())
         .controlSize(.small)
+    }
+
+    private var gpuLimitToggle: some View {
+        Toggle("Limit this app’s GPU power to:", isOn: gpuLimitEnabledBinding)
+            .toggleStyle(TempraCheckboxToggleStyle())
+            .controlSize(.small)
+    }
+
+    /// The most power this Mac's GPU has been allowed to draw. The limit starts
+    /// there, and the user turns it down. Published by the store, so the editor
+    /// updates when the budget settles shortly after launch.
+    private var gpuCeilingWatts: Double? {
+        store.gpuBudgetWatts
+    }
+
+    private var gpuLimitEnabledBinding: Binding<Bool> {
+        Binding(
+            get: { draft.gpuLimitWatts != nil },
+            set: { enabled in
+                if enabled, let gpuCeilingWatts {
+                    if draft.action != .limit {
+                        // A GPU ceiling alone does not start limiting the CPU.
+                        draft.action = .limit
+                        draft.limitsCPU = false
+                    }
+                    draft.gpuLimitWatts = GPULimitRange.clamped(
+                        draft.gpuLimitWatts ?? gpuCeilingWatts,
+                        ceilingWatts: gpuCeilingWatts
+                    )
+                } else {
+                    // Removing the ceiling from a GPU-only rule ends the limit
+                    // action; it must not quietly become a CPU limiter.
+                    if !draft.limitsCPU {
+                        draft.action = .none
+                    }
+                    draft.gpuLimitWatts = nil
+                }
+                draft.repairLimitConfiguration()
+            }
+        )
+    }
+
+    private var gpuLimitValueBinding: Binding<Double> {
+        Binding(
+            get: { draft.gpuLimitWatts ?? gpuCeilingWatts ?? GPULimitRange.minimumWatts },
+            set: { value in
+                guard let gpuCeilingWatts else { return }
+                draft.gpuLimitWatts = GPULimitRange.clamped(
+                    value,
+                    ceilingWatts: gpuCeilingWatts
+                )
+            }
+        )
+    }
+
+    /// States the ceiling in watts, the same unit the GPU column reports, and
+    /// the app's draw right now, because a ceiling above the current draw does
+    /// nothing until the app works the GPU harder.
+    private func gpuLimitFootnote(ceilingWatts: Double) -> String {
+        let ceiling = "This Mac's GPU is allowed up to \(Int(ceilingWatts.rounded())) W."
+        let current = item.isRunning
+            ? " \(item.name) draws \(item.gpuText) right now."
+            : ""
+        guard let watts = draft.gpuLimitWatts else { return ceiling + current }
+        let stutter = draft.limitsGPUWhenInFront
+            ? " The limit stays on in front, so the app can stutter while you use it."
+            : ""
+        let idle = item.isRunning && item.gpuWatts < watts
+            ? " That is under this ceiling, so the limit is idle until the app"
+                + " works the GPU harder."
+            : ""
+        return "\(ceiling)\(current)\(idle) Tempra pauses \(item.name) in bursts"
+            + " whenever it draws more than \(Int(watts)) W.\(stutter)"
     }
 
     private var visibleCPULimitRange: ClosedRange<Double> {

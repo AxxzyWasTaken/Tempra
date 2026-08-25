@@ -2,12 +2,7 @@ import Charts
 import SwiftUI
 
 struct AppCPUHistoryChartData {
-    struct Point: Identifiable, Equatable {
-        let sample: AppCPUHistorySample
-        let segment: Int
-
-        var id: Date { sample.date }
-    }
+    typealias Point = AppHistoryWindow.Point
 
     let startDate: Date
     let endDate: Date
@@ -19,48 +14,19 @@ struct AppCPUHistoryChartData {
         range: CPUHistoryRange,
         endDate: Date
     ) {
-        let resolvedEndDate = endDate
-        let resolvedStartDate = endDate.addingTimeInterval(-range.duration)
-        self.endDate = resolvedEndDate
-        startDate = resolvedStartDate
+        let window = AppHistoryWindow(
+            samples: samples,
+            range: range,
+            endDate: endDate
+        )
+        startDate = window.startDate
+        self.endDate = window.endDate
+        points = window.points
 
-        let filtered = samples
-            .filter {
-                $0.date >= resolvedStartDate && $0.date <= resolvedEndDate
-            }
-            .sorted { $0.date < $1.date }
-        let visibleSamples: [AppCPUHistorySample]
-        if filtered.count > 180 {
-            let step = max(1, (filtered.count + 179) / 180)
-            visibleSamples = filtered.enumerated().compactMap { index, sample in
-                if index.isMultiple(of: step) || index == filtered.count - 1 {
-                    return sample
-                }
-                return nil
-            }
-        } else {
-            visibleSamples = filtered
-        }
-
-        let gapLimit = max(90, range.duration / 120)
-        var segment = 0
-        var previousDate: Date?
-        points = visibleSamples.map { sample in
-            if let previousDate,
-               sample.date.timeIntervalSince(previousDate) > gapLimit {
-                segment += 1
-            }
-            previousDate = sample.date
-            return Point(sample: sample, segment: segment)
-        }
-
-        let peak = visibleSamples.reduce(0.0) { currentPeak, sample in
-            max(
-                currentPeak,
-                sample.cpuPercent,
-                sample.estimatedSavedCPUPercent
-            )
-        }
+        let peak = max(
+            window.peak(of: \.cpuPercent),
+            window.peak(of: \.estimatedSavedCPUPercent)
+        )
         ceiling = max(25, ceil(peak / 25) * 25)
     }
 }

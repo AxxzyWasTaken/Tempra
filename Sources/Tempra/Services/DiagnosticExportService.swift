@@ -68,6 +68,7 @@ struct TempraDiagnosticReport: Codable, Equatable {
             let startTimeMicroseconds: UInt64
             let requiresPrivilegedControl: Bool
             let cpuPercent: Double
+            let gpuPercent: Double
             let isMainProcess: Bool
             let isPlayingAudio: Bool
             let networkActivity: String
@@ -77,6 +78,7 @@ struct TempraDiagnosticReport: Codable, Equatable {
         let bundleIdentifier: String
         let displayName: String
         let cpuPercent: Double
+        let gpuPercent: Double
         let residentMemoryBytes: UInt64?
         let status: String
         let isFrontmost: Bool
@@ -180,6 +182,7 @@ struct TempraDiagnosticReport: Codable, Equatable {
                 bundleIdentifier: diagnosticIdentifier(app.bundleIdentifier),
                 displayName: app.name,
                 cpuPercent: finite(app.cpuPercent),
+                gpuPercent: finite(app.gpuPercent),
                 residentMemoryBytes: app.residentMemoryBytes,
                 status: diagnosticStatus(
                     statuses[app.bundleIdentifier] ?? app.status
@@ -204,6 +207,7 @@ struct TempraDiagnosticReport: Codable, Equatable {
                         requiresPrivilegedControl: sample.identity
                             .requiresPrivilegedControl,
                         cpuPercent: finite(sample.cpuPercent),
+                        gpuPercent: finite(sample.gpuPercent),
                         isMainProcess: sample.isMainProcess,
                         isPlayingAudio: sample.isPlayingAudio,
                         networkActivity: diagnosticNetworkActivity(
@@ -333,6 +337,7 @@ struct TempraDiagnosticReport: Codable, Equatable {
         case .limited(let percent): "limited-\(Int(percent))"
         case .limitedWithProtectedProcesses(let percent):
             "best-effort-limited-\(Int(percent))"
+        case .gpuLimited(let watts): "gpu-limited-\(Int(watts))w"
         case .paused: "paused"
         case .lowerPriority: "lower-priority"
         case .audioProtected: "audio-protected"

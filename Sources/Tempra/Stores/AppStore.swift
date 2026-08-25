@@ -38,6 +38,15 @@ final class AppStore: ObservableObject {
     @Published private(set) var isRequestingPrivilegedControl = false
     @Published var displayItems: [AppDisplayItem] = []
 
+    /// The top of the GPU limit range this Mac offers, in watts.
+    ///
+    /// Derived from the published system snapshot, so views that offer a GPU
+    /// ceiling update when the firmware's budget settles shortly after launch
+    /// instead of reading a mutable global that never notifies.
+    var gpuBudgetWatts: Double? {
+        systemCPU.gpuBudgetWatts
+    }
+
     let managementCoordinator: ProcessManagementCoordinator
     private let launchAtLoginController: any LaunchAtLoginControlling
     private let privilegedHelperManager: PrivilegedHelperManager
@@ -219,9 +228,12 @@ final class AppStore: ObservableObject {
     func save(_ rule: AppRule) {
         var normalized = rule
         normalized.limitPercent = CPULimitRange.clamped(normalized.limitPercent)
-        if normalized.action == .pause {
-            normalized.lowersCPUPriority = false
+        if let gpuLimitWatts = normalized.gpuLimitWatts {
+            normalized.gpuLimitWatts = gpuBudgetWatts.map {
+                GPULimitRange.clamped(gpuLimitWatts, ceilingWatts: $0)
+            } ?? GPULimitRange.clamped(gpuLimitWatts)
         }
+        normalized.repairLimitConfiguration()
         if normalized.applicationURL == nil {
             normalized.applicationURL = apps.first {
                 $0.bundleIdentifier == normalized.bundleIdentifier
@@ -253,7 +265,8 @@ final class AppStore: ObservableObject {
         applicationURL: URL?,
         action: RuleAction,
         limitPercent: Double = 50,
-        delaySeconds: TimeInterval
+        delaySeconds: TimeInterval,
+        gpuLimitWatts: Double? = nil
     ) {
         var rule = rules[bundleIdentifier] ?? AppRule(
             bundleIdentifier: bundleIdentifier,
@@ -263,10 +276,15 @@ final class AppStore: ObservableObject {
         rule.displayName = displayName
         rule.applicationURL = applicationURL ?? rule.applicationURL
         rule.action = action
-        if action == .pause {
-            rule.lowersCPUPriority = false
-        }
         rule.limitPercent = limitPercent
+        if action == .limit {
+            // The CPU ceiling is what this action asks for; a GPU ceiling the
+            // user already set stays.
+            rule.limitsCPU = true
+            if let gpuLimitWatts {
+                rule.gpuLimitWatts = gpuLimitWatts
+            }
+        }
         rule.delaySeconds = delaySeconds
         rule.isEnabled = true
         save(rule)
@@ -289,6 +307,40 @@ final class AppStore: ObservableObject {
         rule.lowersCPUPriority = enabled
         if enabled, rule.action == .pause {
             rule.action = .none
+        }
+        rule.delaySeconds = delaySeconds
+        rule.isEnabled = true
+        save(rule)
+    }
+
+    func setGPULimit(
+        bundleIdentifier: String,
+        displayName: String,
+        applicationURL: URL?,
+        gpuLimitWatts: Double?,
+        limitsGPUWhenInFront: Bool = false,
+        delaySeconds: TimeInterval = 0
+    ) {
+        var rule = rules[bundleIdentifier] ?? AppRule(
+            bundleIdentifier: bundleIdentifier,
+            displayName: displayName,
+            applicationURL: applicationURL
+        )
+        rule.displayName = displayName
+        rule.applicationURL = applicationURL ?? rule.applicationURL
+        if let gpuLimitWatts {
+            // A GPU ceiling on its own does not start limiting the CPU.
+            rule.limitsCPU = rule.action == .limit && rule.limitsCPU
+            rule.action = .limit
+            rule.gpuLimitWatts = gpuLimitWatts  // `save` clamps to the ceiling.
+            rule.limitsGPUWhenInFront = limitsGPUWhenInFront
+        } else {
+            // Removing the ceiling from a GPU-only rule ends the limit action;
+            // it must not quietly become a CPU limiter.
+            if !rule.limitsCPU {
+                rule.action = .none
+            }
+            rule.gpuLimitWatts = nil
         }
         rule.delaySeconds = delaySeconds
         rule.isEnabled = true
@@ -927,11 +979,26 @@ final class AppStore: ObservableObject {
         }
 
         if sample.systemCPU != nil {
-            recordCPUHistorySample(
-                includesApplicationMetrics: demand.recordsApplicationMetrics
-                    && sample.apps != nil
-            )
+            recordCPUHistorySample(applicationMetrics: historyScope(for: demand))
         }
+    }
+
+    /// Which apps this monitoring demand records history for, or nil for none.
+    ///
+    /// The interface records everything worth a slot. With the interface closed
+    /// the managed apps still record, because a limit is chosen against what an
+    /// app draws over a session.
+    private func historyScope(
+        for demand: MonitoringDemand
+    ) -> AppHistoryStore.AppHistoryScope? {
+        guard apps.isEmpty == false else { return nil }
+        if demand.recordsApplicationMetrics {
+            return .broad
+        }
+        if demand.recordsManagedApplicationMetrics, !rules.isEmpty {
+            return .managedOnly
+        }
+        return nil
     }
 
     func shutdown() async -> ProcessRestorationResult {
@@ -1336,8 +1403,16 @@ final class AppStore: ObservableObject {
         rebuildDisplayItems()
     }
 
+    /// The status that stands for a running limit session in the activity list.
+    ///
+    /// A rule that carries only the GPU ceiling never limits CPU percent, so the
+    /// session has to be reported in watts.
     private func activeLimitStatus(for bundleIdentifier: String) -> ManagementStatus {
-        .limited(rules[bundleIdentifier]?.limitPercent ?? CPULimitRange.minimumPercent)
+        let rule = rules[bundleIdentifier]
+        if let watts = rule?.gpuLimitWatts, rule?.limitsCPU == false {
+            return .gpuLimited(watts)
+        }
+        return .limited(rule?.limitPercent ?? CPULimitRange.minimumPercent)
     }
 
     private func recordManagementTransition(
@@ -1396,6 +1471,9 @@ final class AppStore: ObservableObject {
         case .limitedWithProtectedProcesses:
             kind = .limited
             detail = "Limiting as much as possible while responsive processes remain active."
+        case .gpuLimited(let watts):
+            kind = .limited
+            detail = "GPU limited to \(Int(watts)) W."
         case .paused:
             kind = .paused
             detail = "Paused while in the background."
@@ -1438,24 +1516,27 @@ final class AppStore: ObservableObject {
         }
     }
 
-    private func recordCPUHistorySample(includesApplicationMetrics: Bool) {
+    private func recordCPUHistorySample(
+        applicationMetrics scope: AppHistoryStore.AppHistoryScope?
+    ) {
         do {
             if let samples = try historyStore.recordCPUHistory(
                 systemCPU: systemCPU,
-                estimatedSavedSystemPercent: includesApplicationMetrics
+                estimatedSavedSystemPercent: scope == .broad
                     ? estimatedSavedSystemPercent
                     : nil,
                 interventionCount: activeManagementCount
             ) {
                 cpuHistorySamples = samples
             }
-            if includesApplicationMetrics,
+            if let scope,
                let samples = try historyStore.recordAppCPUHistory(
                    apps: apps,
                    estimatedSavedCPUByIdentifier: managementCoordinator
                        .estimatedSavedCPUByIdentifier,
                    prioritizedBundleIdentifiers: Set(rules.keys),
-                   focusedBundleIdentifier: historyFocusBundleIdentifier
+                   focusedBundleIdentifier: historyFocusBundleIdentifier,
+                   scope: scope
                ) {
                 appCPUHistorySamples = samples
                 appCPUHistoryIndicesByIdentifier = Self.appCPUHistoryIndex(samples)

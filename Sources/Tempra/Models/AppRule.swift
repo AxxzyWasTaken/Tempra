@@ -30,6 +30,34 @@ enum CPULimitRange {
     }
 }
 
+/// A GPU ceiling in watts.
+///
+/// A rule travels between Macs, so storage only rejects a value no GPU could
+/// mean. The machine's own ceiling from `GPUPowerCeiling` is the range the
+/// interface offers.
+enum GPULimitRange {
+    static let minimumWatts = 1.0
+    static let maximumWatts = 1000.0
+
+    static var allowed: ClosedRange<Double> {
+        minimumWatts...maximumWatts
+    }
+
+    static func clamped(_ watts: Double) -> Double {
+        min(max(allowed.lowerBound, watts), allowed.upperBound)
+    }
+
+    /// The range offered for a Mac whose GPU ceiling is `ceilingWatts`.
+    static func allowed(ceilingWatts: Double) -> ClosedRange<Double> {
+        minimumWatts...max(minimumWatts, min(maximumWatts, ceilingWatts.rounded()))
+    }
+
+    static func clamped(_ watts: Double, ceilingWatts: Double) -> Double {
+        let range = allowed(ceilingWatts: ceilingWatts)
+        return min(max(range.lowerBound, watts), range.upperBound)
+    }
+}
+
 enum RuleAction: String, Codable, CaseIterable, Identifiable, Sendable {
     case none
     case limit
@@ -102,34 +130,20 @@ enum SystemProcessRulePolicy {
     }
 
     static func normalized(_ rule: AppRule) -> AppRule {
+        var normalized = rule
         if SoundSourceCompatibilityPolicy.isProtected(
             bundleIdentifier: rule.bundleIdentifier,
             applicationURL: rule.applicationURL
-        ) {
-            var normalized = rule
-            normalized.action = .none
-            normalized.lowersCPUPriority = false
-            normalized.hideAfterMinutes = nil
-            normalized.quitAfterMinutes = nil
-            return normalized
-        }
-
-        if isProtected(
+        ) || isProtected(
             bundleIdentifier: rule.bundleIdentifier,
             applicationURL: rule.applicationURL
         ) {
-            var normalized = rule
             normalized.action = .none
             normalized.lowersCPUPriority = false
             normalized.hideAfterMinutes = nil
             normalized.quitAfterMinutes = nil
-            return normalized
         }
-
-        var normalized = rule
-        if normalized.action == .pause {
-            normalized.lowersCPUPriority = false
-        }
+        normalized.repairLimitConfiguration()
         return normalized
     }
 }
@@ -138,8 +152,13 @@ struct AppRule: Codable, Equatable, Identifiable, Sendable {
     var bundleIdentifier: String
     var displayName: String
     var action: RuleAction = .none
+    /// Whether the limit action enforces the CPU ceiling. A rule may carry the
+    /// GPU ceiling alone, and then the CPU percent stays measured, not enforced.
+    var limitsCPU: Bool = true
     var lowersCPUPriority: Bool = false
     var limitPercent: Double = 50
+    var gpuLimitWatts: Double?
+    var limitsGPUWhenInFront: Bool = false
     var delaySeconds: Double = 0
     var protectAudio: Bool = true
     var onlyWhenHidden: Bool = false
@@ -151,12 +170,38 @@ struct AppRule: Codable, Equatable, Identifiable, Sendable {
 
     var id: String { bundleIdentifier }
 
+    /// Restores the invariants the limit fields promise, in one place:
+    ///
+    /// - a pause rule never lowers CPU priority,
+    /// - only a limit rule carries a GPU ceiling,
+    /// - the GPU flags exist only alongside a ceiling, and
+    /// - a limit rule without a GPU ceiling limits the CPU — it has to limit
+    ///   something.
+    ///
+    /// Every mutation path — init, decoding, policy normalization, store edits,
+    /// editor bindings — funnels through this instead of restating the rules.
+    mutating func repairLimitConfiguration() {
+        if action == .pause {
+            lowersCPUPriority = false
+        }
+        if action != .limit {
+            gpuLimitWatts = nil
+        }
+        if gpuLimitWatts == nil {
+            limitsCPU = true
+            limitsGPUWhenInFront = false
+        }
+    }
+
     init(
         bundleIdentifier: String,
         displayName: String,
         action: RuleAction = .none,
+        limitsCPU: Bool = true,
         lowersCPUPriority: Bool = false,
         limitPercent: Double = 50,
+        gpuLimitWatts: Double? = nil,
+        limitsGPUWhenInFront: Bool = false,
         delaySeconds: Double = 0,
         protectAudio: Bool = true,
         onlyWhenHidden: Bool = false,
@@ -169,8 +214,11 @@ struct AppRule: Codable, Equatable, Identifiable, Sendable {
         self.bundleIdentifier = bundleIdentifier
         self.displayName = displayName
         self.action = action
-        self.lowersCPUPriority = action != .pause && lowersCPUPriority
+        self.lowersCPUPriority = lowersCPUPriority
         self.limitPercent = limitPercent
+        self.gpuLimitWatts = gpuLimitWatts
+        self.limitsCPU = limitsCPU
+        self.limitsGPUWhenInFront = limitsGPUWhenInFront
         self.delaySeconds = delaySeconds
         self.protectAudio = protectAudio
         self.onlyWhenHidden = onlyWhenHidden
@@ -179,15 +227,19 @@ struct AppRule: Codable, Equatable, Identifiable, Sendable {
         self.isEnabled = isEnabled
         self.applicationURL = applicationURL
         self.updatedAt = updatedAt
+        repairLimitConfiguration()
     }
 
     private enum CodingKeys: String, CodingKey {
         case bundleIdentifier
         case displayName
         case action
+        case limitsCPU
         case lowersCPUPriority
         case runOnEfficiencyCores
         case limitPercent
+        case gpuLimitWatts
+        case limitsGPUWhenInFront
         case delaySeconds
         case protectAudio
         case onlyWhenHidden
@@ -222,10 +274,16 @@ struct AppRule: Codable, Equatable, Identifiable, Sendable {
             Bool.self,
             forKey: .runOnEfficiencyCores
         ) ?? isLegacyEfficiencyRule
-        if action == .pause {
-            lowersCPUPriority = false
-        }
         limitPercent = try container.decodeIfPresent(Double.self, forKey: .limitPercent) ?? 50
+        gpuLimitWatts = try container.decodeIfPresent(Double.self, forKey: .gpuLimitWatts)
+        // Rules saved before the GPU ceiling existed always limited the CPU;
+        // `repairLimitConfiguration()` below forces that whenever no ceiling
+        // survives decoding.
+        limitsCPU = try container.decodeIfPresent(Bool.self, forKey: .limitsCPU) ?? true
+        limitsGPUWhenInFront = try container.decodeIfPresent(
+            Bool.self,
+            forKey: .limitsGPUWhenInFront
+        ) ?? false
         delaySeconds = try container.decodeIfPresent(Double.self, forKey: .delaySeconds) ?? 0
         protectAudio = try container.decodeIfPresent(Bool.self, forKey: .protectAudio) ?? true
         onlyWhenHidden = try container.decodeIfPresent(Bool.self, forKey: .onlyWhenHidden) ?? false
@@ -234,6 +292,7 @@ struct AppRule: Codable, Equatable, Identifiable, Sendable {
         isEnabled = try container.decodeIfPresent(Bool.self, forKey: .isEnabled) ?? true
         applicationURL = try container.decodeIfPresent(URL.self, forKey: .applicationURL)
         updatedAt = try container.decodeIfPresent(Date.self, forKey: .updatedAt) ?? Date()
+        repairLimitConfiguration()
     }
 
     func encode(to encoder: Encoder) throws {
@@ -241,8 +300,15 @@ struct AppRule: Codable, Equatable, Identifiable, Sendable {
         try container.encode(bundleIdentifier, forKey: .bundleIdentifier)
         try container.encode(displayName, forKey: .displayName)
         try container.encode(action, forKey: .action)
+        if !limitsCPU {
+            try container.encode(limitsCPU, forKey: .limitsCPU)
+        }
         try container.encode(lowersCPUPriority, forKey: .lowersCPUPriority)
         try container.encode(limitPercent, forKey: .limitPercent)
+        try container.encodeIfPresent(gpuLimitWatts, forKey: .gpuLimitWatts)
+        if limitsGPUWhenInFront {
+            try container.encode(limitsGPUWhenInFront, forKey: .limitsGPUWhenInFront)
+        }
         try container.encode(delaySeconds, forKey: .delaySeconds)
         try container.encode(protectAudio, forKey: .protectAudio)
         try container.encode(onlyWhenHidden, forKey: .onlyWhenHidden)
@@ -259,7 +325,14 @@ struct AppRule: Codable, Equatable, Identifiable, Sendable {
         case .none:
             actionSummary = lowersCPUPriority ? "Lower CPU priority" : "Idle actions"
         case .limit:
-            actionSummary = "Limit to \(Int(limitPercent))%"
+            switch (limitsCPU, gpuLimitWatts) {
+            case (true, let watts?):
+                actionSummary = "Limit to \(Int(limitPercent))% · GPU \(Int(watts)) W"
+            case (false, let watts?):
+                actionSummary = "GPU \(Int(watts)) W"
+            default:
+                actionSummary = "Limit to \(Int(limitPercent))%"
+            }
         case .pause:
             actionSummary = "Pause"
         }
@@ -277,7 +350,13 @@ struct AppRule: Codable, Equatable, Identifiable, Sendable {
         case .none:
             break
         case .limit:
-            behaviors.append("limit CPU to \(Int(limitPercent))%")
+            if limitsCPU {
+                behaviors.append("limit CPU to \(Int(limitPercent))%")
+            }
+            if let gpuLimitWatts {
+                let scope = limitsGPUWhenInFront ? ", in front as well" : ""
+                behaviors.append("cap its GPU power at \(Int(gpuLimitWatts)) W\(scope)")
+            }
         case .pause:
             behaviors.append("pause the app")
         }
@@ -310,8 +389,11 @@ struct AppRule: Codable, Equatable, Identifiable, Sendable {
 
     func hasSameLimiterConfiguration(as other: AppRule) -> Bool {
         action == other.action
+            && limitsCPU == other.limitsCPU
             && lowersCPUPriority == other.lowersCPUPriority
             && limitPercent == other.limitPercent
+            && gpuLimitWatts == other.gpuLimitWatts
+            && limitsGPUWhenInFront == other.limitsGPUWhenInFront
             && delaySeconds == other.delaySeconds
             && protectAudio == other.protectAudio
             && onlyWhenHidden == other.onlyWhenHidden

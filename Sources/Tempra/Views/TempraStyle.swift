@@ -156,6 +156,12 @@ enum TempraPalette {
         light: color(0.56, 0.28, 0.66),
         dark: color(0.84, 0.58, 0.92)
     )
+    /// The GPU power series. Teal keeps it apart from the CPU roles above and
+    /// from the purple temperature line.
+    static let gpuPower = adaptive(
+        light: color(0.04, 0.42, 0.45),
+        dark: color(0.38, 0.85, 0.84)
+    )
     static let slowed = adaptive(
         light: color(0.12, 0.50, 0.74),
         dark: color(0.42, 0.76, 0.92)

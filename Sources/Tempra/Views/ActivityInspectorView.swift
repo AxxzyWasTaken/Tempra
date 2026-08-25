@@ -152,6 +152,16 @@ struct ActivityInspectorView: View {
     private var usageSection: some View {
         VStack(alignment: .leading, spacing: 8) {
             metricRow("Current CPU", value: item.cpuText)
+            metricRow(
+                "Current GPU",
+                value: item.gpuText,
+                help: "The power this app and its helper processes draw from the GPU right now. A GPU limit is a ceiling on this number."
+            )
+            metricRow(
+                "GPU share",
+                value: item.gpuShareText,
+                help: "How much of the time this app keeps the GPU busy. An app can hold the GPU busy and still cost little power, because the GPU lowers its clocks for light work."
+            )
             metricRow("1-minute average", value: item.averageCPUText)
             metricRow(
                 "Resident memory",
@@ -182,9 +192,16 @@ struct ActivityInspectorView: View {
                 range: historyRange
             )
 
+            AppGPUPowerChartView(
+                samples: store.appCPUHistory(for: item.bundleIdentifier),
+                range: historyRange,
+                limitWatts: item.rule?.gpuLimitWatts
+            )
+
             HStack(spacing: 12) {
                 chartLegend("CPU used", color: TempraPalette.performance)
                 chartLegend("Est. CPU saved", color: TempraPalette.saved)
+                chartLegend("GPU power", color: TempraPalette.gpuPower)
             }
         }
     }
@@ -217,8 +234,16 @@ struct ActivityInspectorView: View {
 
                 Spacer(minLength: 4)
 
-                Text(String(format: "%.1f%%", sample.cpuPercent))
-                    .font(TempraTypography.metricValue)
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    processMetric(
+                        "CPU",
+                        value: String(format: "%.1f%%", sample.cpuPercent)
+                    )
+                    processMetric(
+                        "GPU",
+                        value: String(format: "%.1f W", sample.gpuWatts)
+                    )
+                }
             }
 
             if reasons.isEmpty {
@@ -246,6 +271,17 @@ struct ActivityInspectorView: View {
             in: RoundedRectangle(cornerRadius: 10, style: .continuous)
         )
         .accessibilityElement(children: .combine)
+    }
+
+    private func processMetric(_ label: String, value: String) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 3) {
+            Text(label)
+                .font(TempraTypography.ruleTag)
+                .foregroundStyle(TempraPalette.secondaryText)
+            Text(value)
+                .font(TempraTypography.metricValue)
+                .foregroundStyle(TempraPalette.primaryText)
+        }
     }
 
     private func chartLegend(_ title: String, color: Color) -> some View {

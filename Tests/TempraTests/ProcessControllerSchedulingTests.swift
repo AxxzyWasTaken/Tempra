@@ -7,6 +7,31 @@ import Testing
 struct ProcessControllerSchedulingTests {
     private let identifier = "example.app"
 
+    private struct StubGPUUsageReader: GPUUsageReading {
+        let counters: [pid_t: UInt64]
+
+        func accumulatedBusyNanoseconds() -> [pid_t: UInt64] {
+            counters
+        }
+
+        func accumulatedBusyNanoseconds(for pids: Set<pid_t>) -> [pid_t: UInt64] {
+            counters.filter { pids.contains($0.key) }
+        }
+    }
+
+    /// A GPU whose every share point costs a known number of watts, so the
+    /// tests can state GPU demand in watts exactly.
+    private struct StubGPUPowerScale: GPUPowerScaling {
+        let wattsPerSharePoint: Double
+
+        func currentScale() -> GPUPowerScale? {
+            GPUPowerScale(
+                totalWatts: wattsPerSharePoint * 100,
+                totalSharePercent: 100
+            )
+        }
+    }
+
     private func target(
         identifier: String? = nil,
         processIdentities: Set<ProcessIdentity> = [],
@@ -14,6 +39,7 @@ struct ProcessControllerSchedulingTests {
         usesApplicationCommands: Bool = true,
         launchedAt: Date? = nil,
         cpuPercent: Double = 50,
+        gpuPercent: Double = 0,
         isFrontmost: Bool = false,
         isHidden: Bool = true,
         isPlayingAudio: Bool = false,
@@ -28,6 +54,7 @@ struct ProcessControllerSchedulingTests {
             usesApplicationCommands: usesApplicationCommands,
             launchedAt: launchedAt,
             cpuPercent: cpuPercent,
+            gpuPercent: gpuPercent,
             isFrontmost: isFrontmost,
             isHidden: isHidden,
             isPlayingAudio: isPlayingAudio,
@@ -3003,15 +3030,15 @@ struct ProcessControllerSchedulingTests {
             previousDutyFactor: 0.02
         ) == 0)
         #expect(abs(ProcessControlMath.requiredDutyFactor(
-            estimatedFullSpeedCPU: 100,
+            estimatedFullSpeedUsage: 100,
             limitPercent: 10
         ) - 0.09) < 0.000_001)
         #expect(abs(ProcessControlMath.requiredDutyFactor(
-            estimatedFullSpeedCPU: 100,
+            estimatedFullSpeedUsage: 100,
             limitPercent: 50
         ) - 0.05) < 0.000_001)
         #expect(abs(ProcessControlMath.requiredDutyFactor(
-            estimatedFullSpeedCPU: 200,
+            estimatedFullSpeedUsage: 200,
             limitPercent: 3
         ) - 0.0985) < 0.000_001)
     }
@@ -3707,6 +3734,312 @@ struct ProcessControllerSchedulingTests {
         #expect(system.stopAttemptCount == stopCountAfterCosmeticSave)
         manualClock.advance(by: .milliseconds(1))
         #expect(await eventually { system.didAttemptToResume(controlledProcess) })
+        await controller.shutdown()
+    }
+
+    @Test("GPU power alone pulses an app whose CPU stays under its limit")
+    func gpuCeilingPulsesACPUIdleApp() async {
+        let manualClock = ManualProcessControlClock()
+        let system = RecordingProcessSystem()
+        let controlled = process(401)
+        let controller = ProcessController(
+            system: system,
+            crashWatchdog: RecordingProcessCrashWatchdog(),
+            frontmostProvider: { nil },
+            clock: manualClock.clock,
+            gpuUsageReader: StubGPUUsageReader(counters: [controlled.pid: 0]),
+            gpuPowerScale: StubGPUPowerScale(wattsPerSharePoint: 0.5)
+        )
+        var rule = limitRule(identifier, limitPercent: 100)
+        // 90% of the GPU costs 45 W at this scale, so a 15 W ceiling is a third.
+        rule.gpuLimitWatts = 15
+
+        _ = await controller.update(
+            targets: [target(
+                processIdentities: [controlled],
+                processSamples: [ManagedProcessSample(
+                    identity: controlled,
+                    cpuPercent: 5,
+                    gpuPercent: 90,
+                    isMainProcess: true
+                )],
+                launchedAt: oldLaunchDate,
+                cpuPercent: 5,
+                gpuPercent: 90
+            )],
+            rules: [identifier: rule],
+            isEnabled: true,
+            revision: 1
+        )
+        #expect(await eventually { manualClock.pendingSleepCount == 2 })
+
+        #expect(system.stopAttemptCount == 0)
+        manualClock.advance(by: .milliseconds(1))
+        #expect(await eventually { system.didAttemptToStop(controlled) })
+
+        // 45 W measured against a 15 W ceiling has to stop two thirds of the
+        // 100 ms control period.
+        let stopDuration = system.stopAutomaticResumeInterval(for: controlled) ?? 0
+        #expect(abs(stopDuration - 0.066_667) < 0.001)
+        await controller.shutdown()
+    }
+
+    @Test("A GPU-only rule leaves a CPU-heavy app at full CPU speed")
+    func gpuOnlyRuleIgnoresCPUPressure() async {
+        let manualClock = ManualProcessControlClock()
+        let system = RecordingProcessSystem()
+        let controlled = process(406)
+        let controller = ProcessController(
+            system: system,
+            crashWatchdog: RecordingProcessCrashWatchdog(),
+            frontmostProvider: { nil },
+            clock: manualClock.clock,
+            gpuUsageReader: StubGPUUsageReader(counters: [controlled.pid: 0]),
+            gpuPowerScale: StubGPUPowerScale(wattsPerSharePoint: 0.5)
+        )
+        var rule = limitRule(identifier, limitPercent: 10)
+        rule.limitsCPU = false
+        rule.gpuLimitWatts = 40
+
+        // 90% CPU is far above the 10% CPU ceiling, and 4 W of GPU is under the
+        // 40 W GPU ceiling, so nothing may stop.
+        _ = await controller.update(
+            targets: [target(
+                processIdentities: [controlled],
+                processSamples: [ManagedProcessSample(
+                    identity: controlled,
+                    cpuPercent: 90,
+                    gpuPercent: 8,
+                    isMainProcess: true
+                )],
+                launchedAt: oldLaunchDate,
+                cpuPercent: 90,
+                gpuPercent: 8
+            )],
+            rules: [identifier: rule],
+            isEnabled: true,
+            revision: 1
+        )
+
+        manualClock.advance(by: .milliseconds(200))
+        #expect(!(await eventually { system.stopAttemptCount > 0 }))
+        await controller.shutdown()
+    }
+
+    @Test("A GPU-only rule reports the watt ceiling as its status")
+    func gpuOnlyRuleReportsGPUStatus() async {
+        let manualClock = ManualProcessControlClock()
+        let system = RecordingProcessSystem()
+        let controlled = process(407)
+        let controller = ProcessController(
+            system: system,
+            crashWatchdog: RecordingProcessCrashWatchdog(),
+            frontmostProvider: { nil },
+            clock: manualClock.clock,
+            gpuUsageReader: StubGPUUsageReader(counters: [controlled.pid: 0]),
+            gpuPowerScale: StubGPUPowerScale(wattsPerSharePoint: 0.5)
+        )
+        var rule = limitRule(identifier, limitPercent: 100)
+        rule.limitsCPU = false
+        rule.gpuLimitWatts = 15
+
+        _ = await controller.update(
+            targets: [target(
+                processIdentities: [controlled],
+                processSamples: [ManagedProcessSample(
+                    identity: controlled,
+                    cpuPercent: 5,
+                    gpuPercent: 90,
+                    isMainProcess: true
+                )],
+                launchedAt: oldLaunchDate,
+                cpuPercent: 5,
+                gpuPercent: 90
+            )],
+            rules: [identifier: rule],
+            isEnabled: true,
+            revision: 1
+        )
+        #expect(await eventually { manualClock.pendingSleepCount == 2 })
+        manualClock.advance(by: .milliseconds(1))
+        #expect(await eventually { system.didAttemptToStop(controlled) })
+        #expect(await controller.currentSnapshot().statuses[identifier] == .gpuLimited(15))
+        await controller.shutdown()
+    }
+
+    @Test("A GPU counter that stands still between pulses keeps the limit")
+    func gpuLimitSurvivesACoarseCounter() async {
+        let manualClock = ManualProcessControlClock()
+        let system = RecordingProcessSystem()
+        let controlled = process(405)
+        // The GPU busy counter advances as command buffers finish, so between
+        // pulses it often reads the same value twice. The limit has to hold.
+        let controller = ProcessController(
+            system: system,
+            crashWatchdog: RecordingProcessCrashWatchdog(),
+            frontmostProvider: { nil },
+            clock: manualClock.clock,
+            gpuUsageReader: StubGPUUsageReader(counters: [controlled.pid: 7_000_000]),
+            gpuPowerScale: StubGPUPowerScale(wattsPerSharePoint: 0.5)
+        )
+        var rule = limitRule(identifier, limitPercent: 100)
+        rule.gpuLimitWatts = 15
+
+        _ = await controller.update(
+            targets: [target(
+                processIdentities: [controlled],
+                processSamples: [ManagedProcessSample(
+                    identity: controlled,
+                    cpuPercent: 5,
+                    gpuPercent: 90,
+                    isMainProcess: true
+                )],
+                launchedAt: oldLaunchDate,
+                cpuPercent: 5,
+                gpuPercent: 90
+            )],
+            rules: [identifier: rule],
+            isEnabled: true,
+            revision: 1
+        )
+        #expect(await eventually { manualClock.pendingSleepCount == 2 })
+        manualClock.advance(by: .milliseconds(1))
+        #expect(await eventually { system.didAttemptToStop(controlled) })
+
+        // Every step keeps the total inside the measurement window, so no cycle
+        // sees a fresh counter. The pulse has to continue on the carried value.
+        for _ in 0..<11 {
+            #expect(await eventually { manualClock.pendingSleepCount >= 1 })
+            manualClock.advance(by: .milliseconds(20))
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(await eventually { system.stopAttemptCount >= 2 })
+        await controller.shutdown()
+    }
+
+    @Test("A rule without a GPU ceiling leaves GPU-heavy work alone")
+    func withoutACeilingGPUWorkIsNotThrottled() async {
+        let manualClock = ManualProcessControlClock()
+        let system = RecordingProcessSystem()
+        let controlled = process(402)
+        let controller = ProcessController(
+            system: system,
+            crashWatchdog: RecordingProcessCrashWatchdog(),
+            frontmostProvider: { nil },
+            clock: manualClock.clock,
+            gpuUsageReader: StubGPUUsageReader(counters: [controlled.pid: 0]),
+            gpuPowerScale: StubGPUPowerScale(wattsPerSharePoint: 0.5)
+        )
+
+        _ = await controller.update(
+            targets: [target(
+                processIdentities: [controlled],
+                processSamples: [ManagedProcessSample(
+                    identity: controlled,
+                    cpuPercent: 5,
+                    gpuPercent: 90,
+                    isMainProcess: true
+                )],
+                launchedAt: oldLaunchDate,
+                cpuPercent: 5,
+                gpuPercent: 90
+            )],
+            rules: [identifier: limitRule(identifier, limitPercent: 100)],
+            isEnabled: true,
+            revision: 1
+        )
+
+        manualClock.advance(by: .milliseconds(200))
+        #expect(!(await eventually { system.stopAttemptCount > 0 }))
+        await controller.shutdown()
+    }
+
+    @Test("A GPU ceiling kept on in front still pulses the app in front")
+    func gpuCeilingHoldsWhileAppIsInFront() async {
+        let manualClock = ManualProcessControlClock()
+        let system = RecordingProcessSystem()
+        let controlled = process(403)
+        let controller = ProcessController(
+            system: system,
+            crashWatchdog: RecordingProcessCrashWatchdog(),
+            frontmostProvider: { identifier },
+            clock: manualClock.clock,
+            gpuUsageReader: StubGPUUsageReader(counters: [controlled.pid: 0]),
+            gpuPowerScale: StubGPUPowerScale(wattsPerSharePoint: 0.5)
+        )
+        var rule = limitRule(identifier, limitPercent: 10)
+        rule.gpuLimitWatts = 15
+        rule.limitsGPUWhenInFront = true
+
+        _ = await controller.update(
+            targets: [target(
+                processIdentities: [controlled],
+                processSamples: [ManagedProcessSample(
+                    identity: controlled,
+                    cpuPercent: 80,
+                    gpuPercent: 90,
+                    isMainProcess: true
+                )],
+                launchedAt: oldLaunchDate,
+                cpuPercent: 80,
+                gpuPercent: 90,
+                isFrontmost: true
+            )],
+            rules: [identifier: rule],
+            isEnabled: true,
+            revision: 1
+        )
+        #expect(await eventually { manualClock.pendingSleepCount == 2 })
+        manualClock.advance(by: .milliseconds(1))
+        #expect(await eventually { system.didAttemptToStop(controlled) })
+
+        // The GPU pass alone sets the pulse: 45 W measured against a 15 W
+        // ceiling stops two thirds of the control period, and the 80% CPU
+        // against the 10% CPU limit contributes nothing while the app is in front.
+        let stopDuration = system.stopAutomaticResumeInterval(for: controlled) ?? 0
+        #expect(abs(stopDuration - 0.066_667) < 0.001)
+        #expect(await controller.currentSnapshot().statuses[identifier] == .gpuLimited(15))
+        await controller.shutdown()
+    }
+
+    @Test("Without the in-front option a limited app in front runs free")
+    func gpuCeilingStopsAtTheForegroundBoundary() async {
+        let manualClock = ManualProcessControlClock()
+        let system = RecordingProcessSystem()
+        let controlled = process(404)
+        let controller = ProcessController(
+            system: system,
+            crashWatchdog: RecordingProcessCrashWatchdog(),
+            frontmostProvider: { identifier },
+            clock: manualClock.clock,
+            gpuUsageReader: StubGPUUsageReader(counters: [controlled.pid: 0]),
+            gpuPowerScale: StubGPUPowerScale(wattsPerSharePoint: 0.5)
+        )
+        var rule = limitRule(identifier, limitPercent: 10)
+        rule.gpuLimitWatts = 15
+
+        _ = await controller.update(
+            targets: [target(
+                processIdentities: [controlled],
+                processSamples: [ManagedProcessSample(
+                    identity: controlled,
+                    cpuPercent: 80,
+                    gpuPercent: 90,
+                    isMainProcess: true
+                )],
+                launchedAt: oldLaunchDate,
+                cpuPercent: 80,
+                gpuPercent: 90,
+                isFrontmost: true
+            )],
+            rules: [identifier: rule],
+            isEnabled: true,
+            revision: 1
+        )
+
+        manualClock.advance(by: .milliseconds(200))
+        #expect(!(await eventually { system.stopAttemptCount > 0 }))
+        #expect(await controller.currentSnapshot().statuses[identifier] == .normal)
         await controller.shutdown()
     }
 

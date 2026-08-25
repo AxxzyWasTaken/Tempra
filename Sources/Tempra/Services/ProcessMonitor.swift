@@ -699,6 +699,7 @@ final class ProcessMonitor {
         var processIdentities: [ProcessIdentity]
         var processSamples: [ManagedProcessSample]
         var cpuPercent: Double
+        var gpuPercent: Double
         var residentMemoryBytes: UInt64?
         let isSystemProcess: Bool
     }
@@ -715,6 +716,9 @@ final class ProcessMonitor {
     private var lastIncludedBackgroundProcesses = false
     private var foregroundApplicationTracker = ForegroundApplicationTracker()
     private let processReader: any ProcessSnapshotReading
+    private let gpuUsageReader: any GPUUsageReading
+    private var gpuSampler = GPUUsageSampler()
+    private let gpuPowerScale: any GPUPowerScaling
     private let currentUserID: uid_t
     private let uptime: () -> TimeInterval
     private let audioProcessIdentifiers: () -> Set<pid_t>
@@ -729,11 +733,13 @@ final class ProcessMonitor {
 
     init(
         processReader: any ProcessSnapshotReading = LiveProcessSnapshotReader(),
+        gpuUsageReader: any GPUUsageReading = LiveGPUUsageReader.shared,
         currentUserID: uid_t = getuid(),
         uptime: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime },
         audioProcessIdentifiers: @escaping () -> Set<pid_t> = {
             AudioOutputProbe.playingProcessIdentifiers()
         },
+        gpuPowerScale: any GPUPowerScaling = LiveGPUPowerScale.shared,
         networkActivity: @escaping @Sendable (ProcessIdentity) -> ProcessNetworkActivity = {
             ProcessNetworkActivityProbe().activity(for: $0)
         },
@@ -749,6 +755,8 @@ final class ProcessMonitor {
         excludedExecutablePaths: Set<String>? = nil
     ) {
         self.processReader = processReader
+        self.gpuUsageReader = gpuUsageReader
+        self.gpuPowerScale = gpuPowerScale
         self.currentUserID = currentUserID
         self.uptime = uptime
         self.audioProcessIdentifiers = audioProcessIdentifiers
@@ -848,12 +856,20 @@ final class ProcessMonitor {
         previousCounters = currentCounters
         hasSamplingBaseline = true
         previousSampleTime = now
+        let gpuByPID = gpuSampler.sample(
+            counters: gpuUsageReader.accumulatedBusyNanoseconds(),
+            at: now
+        )
+        // GPU power is not proportional to busy time, so the share is priced
+        // with the scale measured across the whole GPU.
+        let gpuScale = gpuPowerScale.currentScale()
 
         let bundledApps = bundles.values.compactMap { bundle -> ManagedApp? in
             let pids = assignments[bundle.identifier, default: []].sorted()
             guard !pids.isEmpty else { return nil }
 
             let cpu = pids.reduce(0) { $0 + cpuByPID[$1, default: 0] }
+            let gpu = pids.reduce(0) { $0 + gpuByPID[$1, default: 0] }
             let probesNetworkActivity = networkActivityBundleIdentifiers?.contains(
                 bundle.identifier
             ) != false
@@ -862,6 +878,10 @@ final class ProcessMonitor {
                 return ManagedProcessSample(
                     identity: identity,
                     cpuPercent: cpuByPID[pid, default: 0],
+                    gpuPercent: gpuByPID[pid, default: 0],
+                    gpuWatts: gpuScale?.watts(
+                        forSharePercent: gpuByPID[pid, default: 0]
+                    ) ?? 0,
                     isMainProcess: bundle.mainPIDs.contains(pid),
                     isPlayingAudio: playingAudioProcessIdentifiers.contains(pid),
                     networkActivity: probesNetworkActivity
@@ -888,6 +908,10 @@ final class ProcessMonitor {
                     }
                     .max(),
                 cpuPercent: max(0, cpu),
+                gpuPercent: min(GPUUsageSampler.maximumPercent, max(0, gpu)),
+                gpuWatts: gpuScale?.watts(
+                    forSharePercent: min(GPUUsageSampler.maximumPercent, max(0, gpu))
+                ) ?? 0,
                 residentMemoryBytes: residentMemoryBytes(
                     for: pids,
                     rawByPID: rawByPID
@@ -910,6 +934,8 @@ final class ProcessMonitor {
                 from: rawProcesses,
                 excluding: assignedPIDs,
                 cpuByPID: cpuByPID,
+                gpuByPID: gpuByPID,
+                gpuScale: gpuScale,
                 measuredIdentities: measuredIdentities,
                 networkActivityBundleIdentifiers: networkActivityBundleIdentifiers
             )
@@ -1235,6 +1261,8 @@ final class ProcessMonitor {
         from processes: [RawProcess],
         excluding assignedPIDs: Set<pid_t>,
         cpuByPID: [pid_t: Double],
+        gpuByPID: [pid_t: Double],
+        gpuScale: GPUPowerScale?,
         measuredIdentities: Set<ProcessIdentity>,
         networkActivityBundleIdentifiers: Set<String>?
     ) -> [ManagedApp] {
@@ -1267,6 +1295,10 @@ final class ProcessMonitor {
                     group.processSamples.append(ManagedProcessSample(
                         identity: identity,
                         cpuPercent: cpuByPID[process.pid, default: 0],
+                        gpuPercent: gpuByPID[process.pid, default: 0],
+                        gpuWatts: gpuScale?.watts(
+                            forSharePercent: gpuByPID[process.pid, default: 0]
+                        ) ?? 0,
                         isMainProcess: false,
                         networkActivity: probesNetworkActivity
                             ? networkActivity(identity)
@@ -1275,6 +1307,7 @@ final class ProcessMonitor {
                     ))
                 }
                 group.cpuPercent += cpuByPID[process.pid, default: 0]
+                group.gpuPercent += gpuByPID[process.pid, default: 0]
                 group.residentMemoryBytes = Self.addingResidentMemory(
                     group.residentMemoryBytes,
                     process.residentMemoryBytes
@@ -1294,6 +1327,10 @@ final class ProcessMonitor {
                         [ManagedProcessSample(
                             identity: identity,
                             cpuPercent: cpuByPID[process.pid, default: 0],
+                            gpuPercent: gpuByPID[process.pid, default: 0],
+                            gpuWatts: gpuScale?.watts(
+                                forSharePercent: gpuByPID[process.pid, default: 0]
+                            ) ?? 0,
                             isMainProcess: false,
                             networkActivity: probesNetworkActivity
                                 ? networkActivity(identity)
@@ -1302,6 +1339,7 @@ final class ProcessMonitor {
                         )]
                     } ?? [],
                     cpuPercent: cpuByPID[process.pid, default: 0],
+                    gpuPercent: gpuByPID[process.pid, default: 0],
                     residentMemoryBytes: process.residentMemoryBytes,
                     isSystemProcess: isSystemProcess
                 )
@@ -1322,6 +1360,8 @@ final class ProcessMonitor {
                     ManagedProcessSample(
                         identity: sample.identity,
                         cpuPercent: sample.cpuPercent,
+                        gpuPercent: sample.gpuPercent,
+                        gpuWatts: sample.gpuWatts,
                         isMainProcess: index == 0,
                         isPlayingAudio: sample.isPlayingAudio,
                         networkActivity: sample.networkActivity,
@@ -1341,6 +1381,16 @@ final class ProcessMonitor {
                     )
                 }.min(),
                 cpuPercent: max(0, group.cpuPercent),
+                gpuPercent: min(
+                    GPUUsageSampler.maximumPercent,
+                    max(0, group.gpuPercent)
+                ),
+                gpuWatts: gpuScale?.watts(
+                    forSharePercent: min(
+                        GPUUsageSampler.maximumPercent,
+                        max(0, group.gpuPercent)
+                    )
+                ) ?? 0,
                 residentMemoryBytes: group.residentMemoryBytes,
                 isFrontmost: false,
                 isHidden: true,

@@ -20,6 +20,10 @@ struct ProcessIdentity: Hashable, Sendable {
 struct ManagedProcessSample: Equatable, Sendable {
     let identity: ProcessIdentity
     let cpuPercent: Double
+    let gpuPercent: Double
+    /// GPU power in watts, filled in from the measured share of the GPU and the
+    /// measured power scale. Zero until a limit pass needs it.
+    let gpuWatts: Double
     let isMainProcess: Bool
     let isPlayingAudio: Bool
     let networkActivity: ProcessNetworkActivity
@@ -28,6 +32,8 @@ struct ManagedProcessSample: Equatable, Sendable {
     init(
         identity: ProcessIdentity,
         cpuPercent: Double,
+        gpuPercent: Double = 0,
+        gpuWatts: Double = 0,
         isMainProcess: Bool,
         isPlayingAudio: Bool = false,
         networkActivity: ProcessNetworkActivity = .inactive,
@@ -35,10 +41,26 @@ struct ManagedProcessSample: Equatable, Sendable {
     ) {
         self.identity = identity
         self.cpuPercent = cpuPercent.isFinite ? max(0, cpuPercent) : 0
+        self.gpuPercent = gpuPercent.isFinite ? min(100, max(0, gpuPercent)) : 0
+        self.gpuWatts = gpuWatts.isFinite ? max(0, gpuWatts) : 0
         self.isMainProcess = isMainProcess
         self.isPlayingAudio = isPlayingAudio
         self.networkActivity = networkActivity
         self.hasCPUMeasurement = hasCPUMeasurement
+    }
+
+    /// A copy whose GPU demand is watts, from this sample's measured GPU share.
+    func scalingGPUShareToWatts(with scale: GPUPowerScale) -> ManagedProcessSample {
+        ManagedProcessSample(
+            identity: identity,
+            cpuPercent: cpuPercent,
+            gpuPercent: gpuPercent,
+            gpuWatts: scale.watts(forSharePercent: gpuPercent),
+            isMainProcess: isMainProcess,
+            isPlayingAudio: isPlayingAudio,
+            networkActivity: networkActivity,
+            hasCPUMeasurement: hasCPUMeasurement
+        )
     }
 }
 
@@ -77,6 +99,7 @@ struct ProcessControlTarget: Sendable {
     let usesApplicationCommands: Bool
     let launchedAt: Date?
     let cpuPercent: Double
+    let gpuPercent: Double
     let isFrontmost: Bool
     let isHidden: Bool
     let isPlayingAudio: Bool
@@ -91,6 +114,7 @@ struct ProcessControlTarget: Sendable {
         usesApplicationCommands: Bool = true,
         launchedAt: Date? = nil,
         cpuPercent: Double,
+        gpuPercent: Double = 0,
         isFrontmost: Bool,
         isHidden: Bool,
         isPlayingAudio: Bool,
@@ -109,10 +133,14 @@ struct ProcessControlTarget: Sendable {
             let sampleCPU = sortedIdentities.isEmpty
                 ? 0
                 : max(0, cpuPercent) / Double(sortedIdentities.count)
+            let sampleGPU = sortedIdentities.isEmpty
+                ? 0
+                : max(0, gpuPercent) / Double(sortedIdentities.count)
             self.processSamples = sortedIdentities.enumerated().map { index, identity in
                 ManagedProcessSample(
                     identity: identity,
                     cpuPercent: sampleCPU,
+                    gpuPercent: sampleGPU,
                     isMainProcess: index == 0,
                     isPlayingAudio: isPlayingAudio
                 )
@@ -121,6 +149,7 @@ struct ProcessControlTarget: Sendable {
         self.usesApplicationCommands = usesApplicationCommands
         self.launchedAt = launchedAt
         self.cpuPercent = cpuPercent
+        self.gpuPercent = gpuPercent
         self.isFrontmost = isFrontmost
         self.isHidden = isHidden
         self.isPlayingAudio = isPlayingAudio

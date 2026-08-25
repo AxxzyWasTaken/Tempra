@@ -108,6 +108,63 @@ struct PrivilegedRecoveryTests {
         #expect(report.priorityProcesses.isEmpty)
     }
 
+    @Test("A repeated resume failure remains available for retry")
+    func repeatedResumeFailureRemainsPending() {
+        let process = identity(4_009)
+        var report = PrivilegedRecoveryReport(failedResumes: [process])
+        var signalCount = 0
+
+        let result = report.resolveResumes(
+            [process],
+            identityIsCurrent: { $0 == process },
+            resume: { _ in
+                signalCount += 1
+                return false
+            }
+        )
+
+        #expect(result.applied.isEmpty)
+        #expect(result.stale.isEmpty)
+        #expect(result.failed == [process])
+        #expect(report.failedResumes == [process])
+        #expect(!report.succeeded)
+        #expect(signalCount == 1)
+    }
+
+    @Test("A process identity change after priority restore is stale")
+    func identityChangeAfterPriorityRestoreIsStale() {
+        let process = identity(4_010)
+        let originalPriority = ProcessPriorityPolicyState(niceValue: 3)
+        var report = PrivilegedRecoveryReport(
+            failedPriorities: [process: originalPriority]
+        )
+        var identityCheckCount = 0
+        var restoredPolicy: ProcessPriorityPolicyState?
+
+        let result = report.resolvePriorities(
+            [process],
+            identityIsCurrent: { candidate in
+                #expect(candidate == process)
+                identityCheckCount += 1
+                return identityCheckCount == 1
+            },
+            restore: { candidate, policy in
+                #expect(candidate == process)
+                restoredPolicy = policy
+                return true
+            }
+        )
+
+        #expect(result.applied.isEmpty)
+        #expect(result.stale == [process])
+        #expect(result.failed.isEmpty)
+        #expect(restoredPolicy == originalPriority)
+        #expect(report.stalePriorities == [process])
+        #expect(report.failedPriorities.isEmpty)
+        #expect(report.succeeded)
+        #expect(identityCheckCount == 2)
+    }
+
     private func identity(_ pid: Int32) -> PrivilegedProcessIdentity {
         PrivilegedProcessIdentity(
             pid: pid,

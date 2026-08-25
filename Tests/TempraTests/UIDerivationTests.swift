@@ -401,9 +401,9 @@ struct UIDerivationTests {
         #expect(priorityOnly.actionLabel == "Limited to 10%")
         #expect(activelyLimited.actionLabel == priorityOnly.actionLabel)
         #expect(observingLimit.actionLabel == priorityOnly.actionLabel)
-        #expect(priorityOnly.indicator == .cpuLimit(isActive: false))
-        #expect(activelyLimited.indicator == .cpuLimit(isActive: true))
-        #expect(observingLimit.indicator == .cpuLimit(isActive: true))
+        #expect(priorityOnly.indicator == .resourceLimit(isActive: false))
+        #expect(activelyLimited.indicator == .resourceLimit(isActive: true))
+        #expect(observingLimit.indicator == .resourceLimit(isActive: true))
         #expect(priorityOnly.statusLabel == "Lower CPU priority")
         #expect(activelyLimited.statusLabel == "Limited to 10%")
     }
@@ -467,6 +467,81 @@ struct UIDerivationTests {
         ).first)
 
         #expect(projected.isCPULimitSessionActive)
+    }
+
+    @Test("Display projection carries per-app GPU usage")
+    func gpuUsageProjection() throws {
+        let identifier = "gpu-heavy"
+        let app = ManagedApp(
+            bundleIdentifier: identifier,
+            name: "GPU Heavy",
+            bundleURL: nil,
+            processIdentifiers: [140],
+            cpuPercent: 4,
+            gpuPercent: 42.5,
+            gpuWatts: 9.5,
+            isFrontmost: false,
+            isHidden: true,
+            isPlayingAudio: false,
+            isSystemProcess: false,
+            status: .normal
+        )
+        let projected = try #require(DisplayItemProjection.project(
+            apps: [app],
+            rules: [:],
+            suspensions: [:],
+            isEnabled: true,
+            averageCPUByIdentifier: [:],
+            savedCPUByIdentifier: [:],
+            attentionIdentifiers: [],
+            iconCache: AppIconCache()
+        ).first)
+
+        #expect(projected.gpuPercent == 42.5)
+        #expect(projected.gpuWatts == 9.5)
+        #expect(projected.gpuText == "9.5 W")
+    }
+
+    @Test("A rule for an app that is not running reports no GPU usage")
+    func gpuUsageForStoppedApp() throws {
+        let identifier = "stopped"
+        let projected = try #require(DisplayItemProjection.project(
+            apps: [],
+            rules: [identifier: rule(identifier)],
+            suspensions: [:],
+            isEnabled: true,
+            averageCPUByIdentifier: [:],
+            savedCPUByIdentifier: [:],
+            attentionIdentifiers: [],
+            iconCache: AppIconCache()
+        ).first)
+
+        #expect(projected.gpuWatts == 0)
+        #expect(projected.gpuText == "—")
+    }
+
+    @Test("The GPU column sorts by GPU power in both directions")
+    func gpuSortOrder() {
+        let items = [
+            item(identifier: "light", name: "Light", currentCPU: 90, gpuWatts: 1),
+            item(identifier: "heavy", name: "Heavy", currentCPU: 2, gpuWatts: 80),
+            item(identifier: "middle", name: "Middle", currentCPU: 40, gpuWatts: 30)
+        ]
+        let expectedOrders: [(ProcessSort, [String])] = [
+            (.gpuDescending, ["heavy", "middle", "light"]),
+            (.gpuAscending, ["light", "middle", "heavy"])
+        ]
+
+        for (sort, expectedIdentifiers) in expectedOrders {
+            let lists = MenuBarItemLists(
+                displayItems: items,
+                includesBackgroundAndSystemProcesses: true,
+                scope: .running,
+                processSort: sort,
+                searchText: ""
+            )
+            #expect(lists.processItems.map(\.bundleIdentifier) == expectedIdentifiers)
+        }
     }
 
     @Test("The current application is visible but cannot have a projected rule")
@@ -978,6 +1053,7 @@ struct UIDerivationTests {
         applicationURL: URL? = nil,
         iconOverride: NSImage? = nil,
         currentCPU: Double = 0,
+        gpuWatts: Double = 0,
         averageCPU: Double = 0,
         savedCPU: Double = 0,
         isRunning: Bool = true,
@@ -996,6 +1072,7 @@ struct UIDerivationTests {
             applicationURL: applicationURL,
             iconOverride: iconOverride,
             cpuPercent: currentCPU,
+            gpuWatts: gpuWatts,
             averageCPUPercent: averageCPU,
             estimatedSavedCPUPercent: savedCPU,
             isRunning: isRunning,

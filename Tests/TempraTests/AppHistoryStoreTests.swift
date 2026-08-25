@@ -285,6 +285,100 @@ struct AppHistoryStoreTests {
         }
     }
 
+    @Test("Per-app history keeps the GPU power of each sample")
+    func perAppHistoryKeepsGPUPower() throws {
+        try withDefaults { defaults in
+            let persistence = AppPersistence(defaults: defaults)
+            let store = AppHistoryStore(
+                persistence: persistence,
+                activityEvents: [],
+                cpuHistorySamples: [],
+                now: referenceDate
+            )
+
+            let samples = try #require(try store.recordAppCPUHistory(
+                apps: [managedApp(
+                    identifier: "example.app",
+                    cpuPercent: 12,
+                    gpuWatts: 18.5
+                )],
+                estimatedSavedCPUByIdentifier: [:],
+                prioritizedBundleIdentifiers: [],
+                focusedBundleIdentifier: nil,
+                now: referenceDate
+            ))
+            #expect(samples.last?.gpuWatts == 18.5)
+
+            // The reading has to survive the round trip to storage, because the
+            // strip reads it back after a relaunch.
+            #expect(try persistence.loadAppCPUHistory().last?.gpuWatts == 18.5)
+        }
+    }
+
+    @Test("A GPU-heavy app keeps its history slot while CPU-busy apps compete")
+    func perAppHistoryKeepsGPUHeavyApps() throws {
+        try withDefaults { defaults in
+            let store = AppHistoryStore(
+                persistence: AppPersistence(defaults: defaults),
+                activityEvents: [],
+                cpuHistorySamples: [],
+                now: referenceDate
+            )
+            // 30 apps compete for 24 slots. The renderer is the least busy on
+            // CPU and the only one costing GPU power.
+            var apps = (0..<30).map { index in
+                managedApp(identifier: "example.\(index)", cpuPercent: Double(index) + 1)
+            }
+            apps.append(managedApp(
+                identifier: "example.renderer",
+                cpuPercent: 0.2,
+                gpuWatts: 22
+            ))
+
+            let samples = try #require(try store.recordAppCPUHistory(
+                apps: apps,
+                estimatedSavedCPUByIdentifier: [:],
+                prioritizedBundleIdentifiers: [],
+                focusedBundleIdentifier: nil,
+                now: referenceDate
+            ))
+
+            let identifiers = Set(samples.map(\.bundleIdentifier))
+            #expect(identifiers.contains("example.renderer"))
+            #expect(identifiers.count == 24)
+        }
+    }
+
+    @Test("Closed-interface history records the managed apps only")
+    func managedOnlyScopeRecordsRuledApps() throws {
+        try withDefaults { defaults in
+            let store = AppHistoryStore(
+                persistence: AppPersistence(defaults: defaults),
+                activityEvents: [],
+                cpuHistorySamples: [],
+                now: referenceDate
+            )
+            let apps = [
+                managedApp(identifier: "example.game", cpuPercent: 4, gpuWatts: 26),
+                managedApp(identifier: "example.busy", cpuPercent: 180),
+                managedApp(identifier: "example.idle", cpuPercent: 1)
+            ]
+
+            let samples = try #require(try store.recordAppCPUHistory(
+                apps: apps,
+                estimatedSavedCPUByIdentifier: [:],
+                prioritizedBundleIdentifiers: ["example.game"],
+                focusedBundleIdentifier: "example.idle",
+                scope: .managedOnly,
+                now: referenceDate
+            ))
+
+            // Only the ruled app: not the busiest, not the focused one.
+            #expect(samples.map(\.bundleIdentifier) == ["example.game"])
+            #expect(samples.first?.gpuWatts == 26)
+        }
+    }
+
     @Test("Per-app history uses a bounded sampling cadence")
     func perAppHistoryUsesBoundedCadence() throws {
         try withDefaults { defaults in
@@ -348,7 +442,8 @@ struct AppHistoryStoreTests {
 
     private func managedApp(
         identifier: String,
-        cpuPercent: Double
+        cpuPercent: Double,
+        gpuWatts: Double = 0
     ) -> ManagedApp {
         ManagedApp(
             bundleIdentifier: identifier,
@@ -356,6 +451,7 @@ struct AppHistoryStoreTests {
             bundleURL: nil,
             processIdentifiers: [],
             cpuPercent: cpuPercent,
+            gpuWatts: gpuWatts,
             isFrontmost: false,
             isHidden: true,
             isPlayingAudio: false,

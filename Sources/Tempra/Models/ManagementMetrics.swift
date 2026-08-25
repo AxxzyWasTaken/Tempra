@@ -93,8 +93,58 @@ struct AppCPUHistorySample: Codable, Equatable, Identifiable {
     let date: Date
     let cpuPercent: Double
     let estimatedSavedCPUPercent: Double
+    /// What the app's GPU work cost at this sample, in watts. A GPU ceiling is
+    /// set against this number, so the history is what makes a ceiling choosable.
+    let gpuWatts: Double
 
     var id: Date { date }
+
+    init(
+        bundleIdentifier: String,
+        date: Date,
+        cpuPercent: Double,
+        estimatedSavedCPUPercent: Double,
+        gpuWatts: Double = 0
+    ) {
+        self.bundleIdentifier = bundleIdentifier
+        self.date = date
+        self.cpuPercent = cpuPercent
+        self.estimatedSavedCPUPercent = estimatedSavedCPUPercent
+        self.gpuWatts = gpuWatts
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case bundleIdentifier
+        case date
+        case cpuPercent
+        case estimatedSavedCPUPercent
+        case gpuWatts
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        bundleIdentifier = try container.decode(String.self, forKey: .bundleIdentifier)
+        date = try container.decode(Date.self, forKey: .date)
+        cpuPercent = try container.decode(Double.self, forKey: .cpuPercent)
+        estimatedSavedCPUPercent = try container.decode(
+            Double.self,
+            forKey: .estimatedSavedCPUPercent
+        )
+        // History written before GPU limits carries no power reading.
+        gpuWatts = try container.decodeIfPresent(Double.self, forKey: .gpuWatts) ?? 0
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(bundleIdentifier, forKey: .bundleIdentifier)
+        try container.encode(date, forKey: .date)
+        try container.encode(cpuPercent, forKey: .cpuPercent)
+        try container.encode(estimatedSavedCPUPercent, forKey: .estimatedSavedCPUPercent)
+        // Zero is the common case; leaving it out keeps stored history small.
+        if gpuWatts > 0 {
+            try container.encode(gpuWatts, forKey: .gpuWatts)
+        }
+    }
 }
 
 enum ThermalPressure: String, Codable, Equatable {
@@ -132,6 +182,13 @@ struct SystemCPUSnapshot: Equatable, Sendable {
     var performanceCoreCount: Int = 0
     var efficiencyCoreCount: Int = 0
     var cpuTemperatureCelsius: Double?
+    /// What the whole GPU draws right now, in watts. Nil when the graphics
+    /// driver does not report power.
+    var gpuWatts: Double?
+    /// The highest GPU power budget this Mac has been seen to allow, in watts.
+    /// Nil until the firmware reports one. This is the top of the GPU limit
+    /// range the interface offers.
+    var gpuBudgetWatts: Double?
     var thermalPressure: ThermalPressure = .unknown
 }
 

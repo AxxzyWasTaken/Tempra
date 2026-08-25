@@ -215,6 +215,14 @@ struct AppPersistence {
                 throw invalid("app rules", "bundle identifier \(rule.bundleIdentifier) is duplicated")
             }
             try validateFinite(rule.limitPercent, field: "CPU limit", in: "app rules")
+            // `AppRule.repairLimitConfiguration()` makes flag combinations
+            // unrepresentable, so only the ceiling's range needs checking.
+            if let gpuLimitWatts = rule.gpuLimitWatts {
+                try validateFinite(gpuLimitWatts, field: "GPU limit", in: "app rules")
+                guard GPULimitRange.allowed.contains(gpuLimitWatts) else {
+                    throw invalid("app rules", "a GPU limit is outside its allowed range")
+                }
+            }
             try validateFinite(rule.delaySeconds, field: "delay", in: "app rules")
             guard CPULimitRange.allowed.contains(rule.limitPercent),
                   rule.delaySeconds >= 0,
@@ -353,7 +361,9 @@ struct AppPersistence {
                   sample.cpuPercent.isFinite,
                   sample.cpuPercent >= 0,
                   sample.estimatedSavedCPUPercent.isFinite,
-                  sample.estimatedSavedCPUPercent >= 0 else {
+                  sample.estimatedSavedCPUPercent >= 0,
+                  sample.gpuWatts.isFinite,
+                  sample.gpuWatts >= 0 else {
                 throw invalid(
                     "app CPU history",
                     "a sample is duplicated or contains an invalid measurement"

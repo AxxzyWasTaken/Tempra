@@ -6,6 +6,7 @@ enum ManagementStatus: Equatable, Sendable {
     case waiting
     case limited(Double)
     case limitedWithProtectedProcesses(Double)
+    case gpuLimited(Double)
     case paused
     case lowerPriority
     case audioProtected
@@ -22,6 +23,7 @@ enum ManagementStatus: Equatable, Sendable {
         case .waiting: "Waiting"
         case .limited(let percent): "Limited to \(Int(percent))%"
         case .limitedWithProtectedProcesses: "Best-effort CPU limit"
+        case .gpuLimited(let watts): "GPU limited to \(Int(watts)) W"
         case .paused: "Paused"
         case .lowerPriority: "Lower CPU priority"
         case .audioProtected: "Audio active"
@@ -42,6 +44,7 @@ enum ManagementStatus: Equatable, Sendable {
         case .waiting: "clock.fill"
         case .limited: "gauge.with.dots.needle.33percent"
         case .limitedWithProtectedProcesses: "gauge.with.dots.needle.33percent"
+        case .gpuLimited: "gauge.with.dots.needle.33percent"
         case .paused: "pause.circle.fill"
         case .lowerPriority: "arrow.down.circle.fill"
         case .audioProtected: "speaker.wave.2.fill"
@@ -56,8 +59,8 @@ enum ManagementStatus: Equatable, Sendable {
 
     var isActiveManagement: Bool {
         switch self {
-        case .waiting, .limited, .limitedWithProtectedProcesses, .paused,
-                .lowerPriority, .audioProtected, .networkProtected:
+        case .waiting, .limited, .limitedWithProtectedProcesses, .gpuLimited,
+                .paused, .lowerPriority, .audioProtected, .networkProtected:
             true
         case .normal, .snoozed, .managementPaused, .disabled, .notRunning,
                 .unavailable:
@@ -67,7 +70,8 @@ enum ManagementStatus: Equatable, Sendable {
 
     var isActivelySavingPower: Bool {
         switch self {
-        case .limited, .limitedWithProtectedProcesses, .paused, .lowerPriority:
+        case .limited, .limitedWithProtectedProcesses, .gpuLimited, .paused,
+                .lowerPriority:
             true
         case .normal, .waiting, .audioProtected, .networkProtected, .snoozed,
                 .managementPaused, .disabled, .notRunning, .unavailable:
@@ -79,8 +83,9 @@ enum ManagementStatus: Equatable, Sendable {
         switch self {
         case .limited, .limitedWithProtectedProcesses, .paused:
             true
-        case .normal, .waiting, .lowerPriority, .audioProtected, .networkProtected,
-                .snoozed, .managementPaused, .disabled, .notRunning, .unavailable:
+        case .normal, .waiting, .gpuLimited, .lowerPriority, .audioProtected,
+                .networkProtected, .snoozed, .managementPaused, .disabled,
+                .notRunning, .unavailable:
             false
         }
     }
@@ -95,6 +100,10 @@ struct ManagedApp: Identifiable, Sendable {
     let processSamples: [ManagedProcessSample]
     let launchedAt: Date?
     let cpuPercent: Double
+    let gpuPercent: Double
+    /// The power the app's GPU work costs, priced from the whole GPU. Zero when
+    /// the GPU is too idle to price a share.
+    let gpuWatts: Double
     let residentMemoryBytes: UInt64?
     var isFrontmost: Bool
     var isHidden: Bool
@@ -117,6 +126,8 @@ struct ManagedApp: Identifiable, Sendable {
         processSamples: [ManagedProcessSample]? = nil,
         launchedAt: Date? = nil,
         cpuPercent: Double,
+        gpuPercent: Double = 0,
+        gpuWatts: Double = 0,
         residentMemoryBytes: UInt64? = nil,
         isFrontmost: Bool,
         isHidden: Bool,
@@ -141,10 +152,14 @@ struct ManagedApp: Identifiable, Sendable {
             let sampleCPU = processIdentities.isEmpty
                 ? 0
                 : max(0, cpuPercent) / Double(processIdentities.count)
+            let sampleGPU = processIdentities.isEmpty
+                ? 0
+                : max(0, gpuPercent) / Double(processIdentities.count)
             self.processSamples = processIdentities.enumerated().map { index, identity in
                 ManagedProcessSample(
                     identity: identity,
                     cpuPercent: sampleCPU,
+                    gpuPercent: sampleGPU,
                     isMainProcess: index == 0,
                     isPlayingAudio: isPlayingAudio
                 )
@@ -152,6 +167,8 @@ struct ManagedApp: Identifiable, Sendable {
         }
         self.launchedAt = launchedAt
         self.cpuPercent = cpuPercent
+        self.gpuPercent = gpuPercent
+        self.gpuWatts = max(0, gpuWatts.isFinite ? gpuWatts : 0)
         self.residentMemoryBytes = residentMemoryBytes
         self.isFrontmost = isFrontmost
         self.isHidden = isHidden

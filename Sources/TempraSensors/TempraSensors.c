@@ -2,7 +2,10 @@
 
 #include "TempraSensors.h"
 
+#include <CoreFoundation/CoreFoundation.h>
 #include <IOKit/IOKitLib.h>
+#include <dlfcn.h>
+#include <mach/mach_time.h>
 #include <stdbool.h>
 #include <math.h>
 #include <stdint.h>
@@ -331,6 +334,245 @@ void TempraTemperatureReaderDestroy(TempraTemperatureReader *reader) {
     }
     if (reader->smcConnection != IO_OBJECT_NULL) {
         IOServiceClose(reader->smcConnection);
+    }
+    free(reader);
+}
+
+// MARK: - GPU energy
+
+// The GPU energy counter lives in IOReport, the same source the system power
+// tools read. IOReport is a private library, so every symbol is resolved at
+// runtime: a future macOS that drops or renames one leaves the reader
+// unavailable instead of breaking the process.
+
+typedef struct IOReportSubscription *TempraIOReportSubscriptionRef;
+
+typedef CFMutableDictionaryRef (*TempraIOReportCopyChannelsInGroup)(
+    CFStringRef, CFStringRef, uint64_t, uint64_t, uint64_t
+);
+typedef TempraIOReportSubscriptionRef (*TempraIOReportCreateSubscription)(
+    void *, CFMutableDictionaryRef, CFMutableDictionaryRef *, uint64_t, CFTypeRef
+);
+typedef CFDictionaryRef (*TempraIOReportCreateSamples)(
+    TempraIOReportSubscriptionRef, CFMutableDictionaryRef, CFTypeRef
+);
+typedef CFDictionaryRef (*TempraIOReportCreateSamplesDelta)(
+    CFDictionaryRef, CFDictionaryRef, CFTypeRef
+);
+typedef CFStringRef (*TempraIOReportChannelGetChannelName)(CFDictionaryRef);
+typedef CFStringRef (*TempraIOReportChannelGetUnitLabel)(CFDictionaryRef);
+typedef int64_t (*TempraIOReportSimpleGetIntegerValue)(CFDictionaryRef, int);
+typedef void (*TempraIOReportIterate)(CFDictionaryRef, int (^)(CFDictionaryRef));
+
+typedef struct {
+    TempraIOReportCopyChannelsInGroup copyChannelsInGroup;
+    TempraIOReportCreateSubscription createSubscription;
+    TempraIOReportCreateSamples createSamples;
+    TempraIOReportCreateSamplesDelta createSamplesDelta;
+    TempraIOReportChannelGetChannelName channelName;
+    TempraIOReportChannelGetUnitLabel unitLabel;
+    TempraIOReportSimpleGetIntegerValue integerValue;
+    TempraIOReportIterate iterate;
+} TempraIOReportAPI;
+
+struct TempraGPUEnergyReader {
+    TempraIOReportAPI api;
+    TempraIOReportSubscriptionRef subscription;
+    CFMutableDictionaryRef channels;
+    CFDictionaryRef previousSample;
+    uint64_t previousTimestamp;
+    double timebaseNanoseconds;
+};
+
+static bool TempraLoadIOReport(TempraIOReportAPI *api) {
+    void *library = dlopen("/usr/lib/libIOReport.dylib", RTLD_LAZY);
+    if (library == NULL) {
+        return false;
+    }
+    api->copyChannelsInGroup = (TempraIOReportCopyChannelsInGroup)
+        dlsym(library, "IOReportCopyChannelsInGroup");
+    api->createSubscription = (TempraIOReportCreateSubscription)
+        dlsym(library, "IOReportCreateSubscription");
+    api->createSamples = (TempraIOReportCreateSamples)
+        dlsym(library, "IOReportCreateSamples");
+    api->createSamplesDelta = (TempraIOReportCreateSamplesDelta)
+        dlsym(library, "IOReportCreateSamplesDelta");
+    api->channelName = (TempraIOReportChannelGetChannelName)
+        dlsym(library, "IOReportChannelGetChannelName");
+    api->unitLabel = (TempraIOReportChannelGetUnitLabel)
+        dlsym(library, "IOReportChannelGetUnitLabel");
+    api->integerValue = (TempraIOReportSimpleGetIntegerValue)
+        dlsym(library, "IOReportSimpleGetIntegerValue");
+    api->iterate = (TempraIOReportIterate)dlsym(library, "IOReportIterate");
+    return api->copyChannelsInGroup != NULL
+        && api->createSubscription != NULL
+        && api->createSamples != NULL
+        && api->createSamplesDelta != NULL
+        && api->channelName != NULL
+        && api->integerValue != NULL
+        && api->iterate != NULL;
+}
+
+/// Nanojoules per unit for the channel's declared unit label. Zero rejects a
+/// unit this reader does not understand, so a relabelled counter reads as
+/// unavailable instead of off by a thousand.
+static double TempraEnergyScaleNanojoules(CFStringRef unit) {
+    if (unit == NULL) {
+        return 0;
+    }
+    if (CFStringCompare(unit, CFSTR("nJ"), 0) == kCFCompareEqualTo) {
+        return 1;
+    }
+    if (CFStringCompare(unit, CFSTR("uJ"), 0) == kCFCompareEqualTo) {
+        return 1e3;
+    }
+    if (CFStringCompare(unit, CFSTR("mJ"), 0) == kCFCompareEqualTo) {
+        return 1e6;
+    }
+    if (CFStringCompare(unit, CFSTR("J"), 0) == kCFCompareEqualTo) {
+        return 1e9;
+    }
+    return 0;
+}
+
+TempraGPUEnergyReaderStatus TempraGPUEnergyReaderCreate(
+    TempraGPUEnergyReader **outReader
+) {
+    if (outReader == NULL) {
+        return TEMPRA_GPU_ENERGY_READER_INVALID_ARGUMENT;
+    }
+    *outReader = NULL;
+
+    TempraIOReportAPI api;
+    memset(&api, 0, sizeof(api));
+    if (!TempraLoadIOReport(&api)) {
+        return TEMPRA_GPU_ENERGY_READER_UNAVAILABLE;
+    }
+
+    CFMutableDictionaryRef group = api.copyChannelsInGroup(
+        CFSTR("Energy Model"), NULL, 0, 0, 0
+    );
+    if (group == NULL) {
+        return TEMPRA_GPU_ENERGY_READER_UNAVAILABLE;
+    }
+
+    CFMutableDictionaryRef subscribed = NULL;
+    TempraIOReportSubscriptionRef subscription = api.createSubscription(
+        NULL, group, &subscribed, 0, NULL
+    );
+    CFRelease(group);
+    if (subscription == NULL || subscribed == NULL) {
+        if (subscribed != NULL) {
+            CFRelease(subscribed);
+        }
+        return TEMPRA_GPU_ENERGY_READER_UNAVAILABLE;
+    }
+
+    TempraGPUEnergyReader *reader = calloc(1, sizeof(TempraGPUEnergyReader));
+    if (reader == NULL) {
+        CFRelease(subscribed);
+        return TEMPRA_GPU_ENERGY_READER_ALLOCATION_FAILED;
+    }
+
+    mach_timebase_info_data_t timebase;
+    if (mach_timebase_info(&timebase) != KERN_SUCCESS || timebase.denom == 0) {
+        free(reader);
+        CFRelease(subscribed);
+        return TEMPRA_GPU_ENERGY_READER_UNAVAILABLE;
+    }
+
+    reader->api = api;
+    reader->subscription = subscription;
+    reader->channels = subscribed;
+    reader->previousSample = NULL;
+    reader->previousTimestamp = 0;
+    reader->timebaseNanoseconds = (double)timebase.numer / (double)timebase.denom;
+    *outReader = reader;
+    return TEMPRA_GPU_ENERGY_READER_OK;
+}
+
+TempraGPUEnergyReaderStatus TempraGPUEnergyReaderSample(
+    TempraGPUEnergyReader *reader,
+    double *watts
+) {
+    if (reader == NULL || watts == NULL) {
+        return TEMPRA_GPU_ENERGY_READER_INVALID_ARGUMENT;
+    }
+
+    CFDictionaryRef sample = reader->api.createSamples(
+        reader->subscription, reader->channels, NULL
+    );
+    if (sample == NULL) {
+        return TEMPRA_GPU_ENERGY_READER_READ_FAILED;
+    }
+    uint64_t timestamp = mach_absolute_time();
+
+    if (reader->previousSample == NULL) {
+        reader->previousSample = sample;
+        reader->previousTimestamp = timestamp;
+        return TEMPRA_GPU_ENERGY_READER_NEEDS_BASELINE;
+    }
+
+    CFDictionaryRef delta = reader->api.createSamplesDelta(
+        reader->previousSample, sample, NULL
+    );
+    if (delta == NULL) {
+        CFRelease(sample);
+        return TEMPRA_GPU_ENERGY_READER_READ_FAILED;
+    }
+
+    __block double nanojoules = 0;
+    __block bool foundChannel = false;
+    TempraIOReportAPI api = reader->api;
+    api.iterate(delta, ^int(CFDictionaryRef channel) {
+        CFStringRef name = api.channelName(channel);
+        if (name == NULL) {
+            return 0;
+        }
+        // Every GPU rail the model reports: one channel on a single-die SoC,
+        // several on the larger ones.
+        if (CFStringFind(name, CFSTR("GPU"), 0).location == kCFNotFound) {
+            return 0;
+        }
+        double scale = api.unitLabel != NULL
+            ? TempraEnergyScaleNanojoules(api.unitLabel(channel))
+            : 1;
+        if (scale <= 0) {
+            return 0;
+        }
+        int64_t value = api.integerValue(channel, 0);
+        if (value <= 0) {
+            return 0;
+        }
+        foundChannel = true;
+        nanojoules += (double)value * scale;
+        return 0;
+    });
+    CFRelease(delta);
+
+    double elapsedNanoseconds =
+        (double)(timestamp - reader->previousTimestamp) * reader->timebaseNanoseconds;
+    CFRelease(reader->previousSample);
+    reader->previousSample = sample;
+    reader->previousTimestamp = timestamp;
+
+    if (!foundChannel || elapsedNanoseconds <= 0) {
+        return TEMPRA_GPU_ENERGY_READER_READ_FAILED;
+    }
+    // Nanojoules over nanoseconds is watts.
+    *watts = nanojoules / elapsedNanoseconds;
+    return TEMPRA_GPU_ENERGY_READER_OK;
+}
+
+void TempraGPUEnergyReaderDestroy(TempraGPUEnergyReader *reader) {
+    if (reader == NULL) {
+        return;
+    }
+    if (reader->previousSample != NULL) {
+        CFRelease(reader->previousSample);
+    }
+    if (reader->channels != NULL) {
+        CFRelease(reader->channels);
     }
     free(reader);
 }

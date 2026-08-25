@@ -13,8 +13,15 @@ final class SystemMetricsMonitor {
     private let performanceCoreCount: Int
     private let efficiencyCoreCount: Int
     private let temperatureMonitor = CPUTemperatureMonitor()
+    private let gpuPowerReader: any GPUPowerReading
+    private let gpuPowerBudget: GPUPowerBudget
 
-    init() {
+    init(
+        gpuPowerReader: any GPUPowerReading = LiveGPUPowerReader.shared,
+        gpuPowerBudget: GPUPowerBudget = .shared
+    ) {
+        self.gpuPowerReader = gpuPowerReader
+        self.gpuPowerBudget = gpuPowerBudget
         performanceCoreCount = Self.sysctlInteger("hw.perflevel0.logicalcpu")
             ?? ProcessInfo.processInfo.activeProcessorCount
         efficiencyCoreCount = Self.sysctlInteger("hw.perflevel1.logicalcpu") ?? 0
@@ -29,6 +36,8 @@ final class SystemMetricsMonitor {
                 performanceCoreCount: min(performanceCoreCount, current.count),
                 efficiencyCoreCount: min(efficiencyCoreCount, current.count),
                 cpuTemperatureCelsius: temperatureMonitor.currentTemperatureCelsius,
+                gpuWatts: gpuPowerReader.currentWatts(),
+                gpuBudgetWatts: gpuPowerBudget.refresh(),
                 thermalPressure: Self.currentThermalPressure
             )
         }
@@ -58,6 +67,8 @@ final class SystemMetricsMonitor {
             performanceCoreCount: performanceCount,
             efficiencyCoreCount: efficiencyCount,
             cpuTemperatureCelsius: temperatureMonitor.currentTemperatureCelsius,
+            gpuWatts: gpuPowerReader.currentWatts(),
+            gpuBudgetWatts: gpuPowerBudget.refresh(),
             thermalPressure: Self.currentThermalPressure
         )
     }

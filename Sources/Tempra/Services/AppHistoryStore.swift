@@ -102,11 +102,20 @@ final class AppHistoryStore {
         try persistence.saveCPUHistory(cpuHistorySamples)
     }
 
+    /// How much of the process list one history sample covers.
+    enum AppHistoryScope {
+        /// Every app worth a slot: focused, managed, GPU-costly, then CPU order.
+        case broad
+        /// Only the apps under a rule, for sampling while the interface is closed.
+        case managedOnly
+    }
+
     func recordAppCPUHistory(
         apps: [ManagedApp],
         estimatedSavedCPUByIdentifier: [String: Double],
         prioritizedBundleIdentifiers: Set<String>,
         focusedBundleIdentifier: String?,
+        scope: AppHistoryScope = .broad,
         now: Date = Date()
     ) throws -> [AppCPUHistorySample]? {
         if let lastAppCPUHistorySampleDate {
@@ -129,14 +138,24 @@ final class AppHistoryStore {
             selectedIdentifiers.append(identifier)
         }
 
-        if let focusedBundleIdentifier {
+        if let focusedBundleIdentifier, scope == .broad {
             include(focusedBundleIdentifier)
         }
         for identifier in prioritizedBundleIdentifiers.sorted() {
             include(identifier)
         }
-        for app in apps.sorted(by: Self.appHistoryOrder) {
-            include(app.bundleIdentifier)
+        if scope == .broad {
+            // An app can cost GPU power while its CPU sits idle: a game, a
+            // renderer, a video encoder. Those are exactly the apps a GPU
+            // ceiling is set for, so they claim a slot before the CPU order
+            // fills the rest.
+            for app in apps.filter({ $0.gpuWatts > Self.gpuHistoryThresholdWatts })
+                .sorted(by: Self.gpuHistoryOrder) {
+                include(app.bundleIdentifier)
+            }
+            for app in apps.sorted(by: Self.appHistoryOrder) {
+                include(app.bundleIdentifier)
+            }
         }
 
         let newSamples = selectedIdentifiers.compactMap { identifier -> AppCPUHistorySample? in
@@ -150,7 +169,8 @@ final class AppHistoryStore {
                 bundleIdentifier: identifier,
                 date: now,
                 cpuPercent: cpuPercent,
-                estimatedSavedCPUPercent: savedCPUPercent
+                estimatedSavedCPUPercent: savedCPUPercent,
+                gpuWatts: app.gpuWatts.isFinite ? max(0, app.gpuWatts) : 0
             )
         }
         guard !newSamples.isEmpty else {
@@ -229,6 +249,17 @@ final class AppHistoryStore {
     private static func appHistoryOrder(_ lhs: ManagedApp, _ rhs: ManagedApp) -> Bool {
         if lhs.cpuPercent != rhs.cpuPercent {
             return lhs.cpuPercent > rhs.cpuPercent
+        }
+        return lhs.bundleIdentifier < rhs.bundleIdentifier
+    }
+
+    /// Below this an app is drawing the GPU's floor power, not doing work worth
+    /// a history slot.
+    private static let gpuHistoryThresholdWatts: Double = 0.25
+
+    private static func gpuHistoryOrder(_ lhs: ManagedApp, _ rhs: ManagedApp) -> Bool {
+        if lhs.gpuWatts != rhs.gpuWatts {
+            return lhs.gpuWatts > rhs.gpuWatts
         }
         return lhs.bundleIdentifier < rhs.bundleIdentifier
     }

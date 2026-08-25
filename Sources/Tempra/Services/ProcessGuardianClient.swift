@@ -152,6 +152,20 @@ enum ProcessGuardianClientError: LocalizedError, Sendable {
             detail
         }
     }
+
+    /// Whether the guardian could not be reached at all, as opposed to
+    /// answering with a refusal. Those are the failures a fresh registration
+    /// can repair.
+    var isUnreachableGuardian: Bool {
+        switch self {
+        case .connectionFailed, .timedOut, .serviceNotEnabled:
+            true
+        case .serviceRequiresApproval, .guardianMissing, .invalidCodeSignature,
+             .registrationFailed, .invalidRequest, .invalidResponse,
+             .revisionExhausted, .remoteFailure:
+            false
+        }
+    }
 }
 
 private final class ProcessGuardianReplyGate: @unchecked Sendable {
@@ -389,6 +403,12 @@ private final class ProcessGuardianLifecycle {
     private var loadedRegisteredIdentity = false
     private var pendingPreparation:
         (id: UUID, task: Task<ProcessGuardianPreparation, any Error>)?
+    private var pendingRefresh: (id: UUID, task: Task<Void, any Error>)?
+    private var lastForcedRefresh: ContinuousClock.Instant?
+    /// One forced registration per minute: enough to recover after an update,
+    /// rare enough that a genuinely broken guardian is not re-registered on
+    /// every limiter cycle.
+    private static let forcedRefreshInterval: Duration = .seconds(60)
 
     func prepareForRequest() async throws -> ProcessGuardianPreparation {
         if let pendingPreparation {
@@ -407,6 +427,58 @@ private final class ProcessGuardianLifecycle {
             clearPreparation(preparationID)
             throw error
         }
+    }
+
+    /// Registers the guardian again after the app finds it unreachable.
+    ///
+    /// Replacing the app bundle leaves the approved login item in place while
+    /// launchd drops the job, so the service reports `enabled` and every Mach
+    /// lookup still fails. Registering again restores the job. The refresh is
+    /// rate limited because a broken guardian would otherwise re-register on
+    /// every control cycle.
+    func refreshRegistration() async throws {
+        if let pendingRefresh {
+            return try await pendingRefresh.task.value
+        }
+        if let lastForcedRefresh,
+           lastForcedRefresh.duration(to: .now) < Self.forcedRefreshInterval {
+            throw ProcessGuardianClientError.serviceNotEnabled
+        }
+        let refreshID = UUID()
+        let task = Task { @MainActor [self] in
+            try await performForcedRefresh()
+        }
+        pendingRefresh = (refreshID, task)
+        do {
+            try await task.value
+            clearRefresh(refreshID)
+        } catch {
+            clearRefresh(refreshID)
+            throw error
+        }
+    }
+
+    private func performForcedRefresh() async throws {
+        lastForcedRefresh = .now
+        switch service.status {
+        case .enabled, .notRegistered, .notFound:
+            break
+        case .requiresApproval:
+            throw ProcessGuardianClientError.serviceRequiresApproval
+        @unknown default:
+            throw ProcessGuardianClientError.serviceNotEnabled
+        }
+        let identity = try await resolvedCurrentIdentity()
+        if service.status == .enabled {
+            try? await service.unregister()
+        }
+        try await register(identity)
+        _ = try validatePreparation(didRefresh: true)
+    }
+
+    private func clearRefresh(_ id: UUID) {
+        guard pendingRefresh?.id == id else { return }
+        pendingRefresh = nil
     }
 
     private func performPreparation() async throws -> ProcessGuardianPreparation {
@@ -729,9 +801,24 @@ actor ProcessGuardianClient: ProcessGuardianControlling {
         if preparation.didRefresh {
             invalidate()
         }
-        let connection = try await activeConnection()
-        try await handshakeIfNeeded(connection)
-        return connection
+        do {
+            let connection = try await activeConnection()
+            try await handshakeIfNeeded(connection)
+            return connection
+        } catch let error as ProcessGuardianClientError {
+            // An approved guardian that cannot be reached usually means launchd
+            // lost the job while the login item record survived, which is what
+            // replacing the app bundle does. Register it again and try once more.
+            guard !preparation.didRefresh, error.isUnreachableGuardian else {
+                throw error
+            }
+            invalidate()
+            try await ProcessGuardianLifecycle.shared.refreshRegistration()
+            invalidate()
+            let connection = try await activeConnection()
+            try await handshakeIfNeeded(connection)
+            return connection
+        }
     }
 
     private func sendRequest(
