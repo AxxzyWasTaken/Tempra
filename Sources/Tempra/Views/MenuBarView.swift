@@ -14,8 +14,6 @@ enum ProcessSort: String, CaseIterable, Hashable, Identifiable {
     case averageAscending = "Lowest 1m Average"
     case currentDescending = "Highest Current CPU"
     case currentAscending = "Lowest Current CPU"
-    case gpuDescending = "Highest Current GPU"
-    case gpuAscending = "Lowest Current GPU"
     case name = "Name"
 
     var id: String { rawValue }
@@ -102,14 +100,6 @@ struct MenuBarItemLists {
             if lhs.cpuPercent != rhs.cpuPercent {
                 return lhs.cpuPercent < rhs.cpuPercent
             }
-        case .gpuDescending:
-            if lhs.gpuWatts != rhs.gpuWatts {
-                return lhs.gpuWatts > rhs.gpuWatts
-            }
-        case .gpuAscending:
-            if lhs.gpuWatts != rhs.gpuWatts {
-                return lhs.gpuWatts < rhs.gpuWatts
-            }
         case .name:
             break
         }
@@ -139,7 +129,7 @@ struct MenuBarItemLists {
         switch item.status {
         case .paused:
             return 0
-        case .limited, .limitedWithProtectedProcesses, .gpuLimited:
+        case .limited, .limitedWithProtectedProcesses:
             return 1
         case .lowerPriority:
             return 2
@@ -660,17 +650,6 @@ struct MenuBarView: View {
                         + "equals one logical CPU."
                 )
                 metricChip(
-                    "GPU Power",
-                    value: gpuPowerText(displayedCPU.gpuWatts),
-                    color: TempraPalette.accent,
-                    icon: "cpu.fill"
-                )
-                .help(
-                    "What the whole GPU draws right now. A GPU limit caps an "
-                        + "app's share of this number, so it only acts while the "
-                        + "GPU actually costs power."
-                )
-                metricChip(
                     "Temperature",
                     value: temperatureText(displayedCPU.cpuTemperatureCelsius),
                     color: TempraPalette.thermal,
@@ -839,6 +818,7 @@ struct MenuBarView: View {
             .help("Sort processes")
 
             Spacer(minLength: 4)
+
             sortColumn(
                 "CPU %",
                 width: TempraLayout.currentCPUColumnWidth,
@@ -850,22 +830,6 @@ struct MenuBarView: View {
             }
 
             sortColumn(
-                "GPU W",
-                width: TempraLayout.currentCPUColumnWidth,
-                isSelected: isGPUSort
-            ) {
-                presentation.processSort = presentation.processSort == .gpuDescending
-                    ? .gpuAscending
-                    : .gpuDescending
-            }
-            .help(
-                "The power each app's GPU work costs right now. This is not the "
-                    + "same as GPU busy time: light work at low clocks can keep "
-                    + "the GPU busy for a fraction of a watt. A GPU limit caps "
-                    + "this number."
-            )
-
-            sortColumn(
                 "AVG %",
                 width: TempraLayout.averageCPUColumnWidth,
                 isSelected: isAverageSort
@@ -874,6 +838,7 @@ struct MenuBarView: View {
                     ? .averageAscending
                     : .averageDescending
             }
+
         }
         .padding(.horizontal, TempraLayout.processRowHorizontalInset)
         .foregroundStyle(TempraPalette.secondaryText)
@@ -1128,21 +1093,6 @@ struct MenuBarView: View {
                         requiresLowerPriority: item.rule?.lowersCPUPriority == true
                     )
                 }
-                if let quickGPULimitWatts {
-                    Button("Limit GPU to \(Int(quickGPULimitWatts)) W") {
-                        store.setGPULimit(
-                            bundleIdentifier: item.bundleIdentifier,
-                            displayName: item.name,
-                            applicationURL: item.applicationURL,
-                            gpuLimitWatts: quickGPULimitWatts,
-                            delaySeconds: 0
-                        )
-                        requestPrivilegedControlIfNeeded(
-                            for: item,
-                            requiresLowerPriority: item.rule?.lowersCPUPriority == true
-                        )
-                    }
-                }
             }
 
             Button(item.rule?.lowersCPUPriority == true
@@ -1345,8 +1295,6 @@ struct MenuBarView: View {
             return switch presentation.processSort {
             case .averageDescending, .currentDescending: "Highest CPU"
             case .averageAscending, .currentAscending: "Lowest CPU"
-            case .gpuDescending: "Highest GPU"
-            case .gpuAscending: "Lowest GPU"
             case .name: "Processes"
             }
         }
@@ -1360,11 +1308,6 @@ struct MenuBarView: View {
     private var isAverageSort: Bool {
         presentation.processSort == .averageDescending
             || presentation.processSort == .averageAscending
-    }
-
-    private var isGPUSort: Bool {
-        presentation.processSort == .gpuDescending
-            || presentation.processSort == .gpuAscending
     }
 
     private func badge(for scope: MenuScope) -> String {
@@ -1405,21 +1348,9 @@ struct MenuBarView: View {
         String(format: "%.1f%%", value)
     }
 
-    /// The one-click GPU ceiling: half of the power this Mac's GPU is allowed.
-    private var quickGPULimitWatts: Double? {
-        store.gpuBudgetWatts.map { ($0 / 2).rounded() }
-    }
-
     private func temperatureText(_ value: Double?) -> String {
         guard let value else { return "—" }
         return String(format: "%.1f°", value)
-    }
-
-    private func gpuPowerText(_ value: Double?) -> String {
-        guard let value else { return "—" }
-        return value < 10
-            ? String(format: "%.1f W", value)
-            : String(format: "%.0f W", value)
     }
 
     private var displayedCPU: SystemCPUSnapshot {

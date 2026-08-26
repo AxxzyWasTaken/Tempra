@@ -475,6 +475,21 @@ final class PrivilegedRecoveryCoordinator {
     var report = PrivilegedRecoveryReport()
 }
 
+enum PrivilegedRequestPartition {
+    /// Identities in an operation request that this helper neither owns nor
+    /// recovered. The helper has no state to undo for them — a previous helper
+    /// session's safety process already restored them, or they were never
+    /// changed — so they resolve without action instead of failing the
+    /// identities the helper can still restore.
+    static func unactionable(
+        requested: Set<PrivilegedProcessIdentity>,
+        owned: Set<PrivilegedProcessIdentity>,
+        recovered: Set<PrivilegedProcessIdentity>
+    ) -> Set<PrivilegedProcessIdentity> {
+        requested.subtracting(owned).subtracting(recovered)
+    }
+}
+
 private final class PrivilegedProcessSession: NSObject, PrivilegedProcessXPCProtocol {
     private let queue: DispatchQueue
     private let recoveryCoordinator: PrivilegedRecoveryCoordinator
@@ -684,12 +699,6 @@ private final class PrivilegedProcessSession: NSObject, PrivilegedProcessXPCProt
         }
         let requested = Set(identities)
         let recovered = requested.intersection(recoveryCoordinator.report.resumeProcesses)
-        guard requested.subtracting(stopped).isSubset(of: recovered) else {
-            return failure(
-                .invalidRequest,
-                "Tempra can resume only processes that this helper stopped or recovered."
-            )
-        }
 
         let recoveredResult = recoveryCoordinator.report.resolveResumes(
             recovered,
@@ -703,6 +712,14 @@ private final class PrivilegedProcessSession: NSObject, PrivilegedProcessXPCProt
             stale: recoveredResult.stale,
             failed: recoveredResult.failed
         )
+        // Processes this helper neither stopped nor recovered need no signal:
+        // report them as unchanged so one unknown identity cannot fail the
+        // resumes this helper can still perform.
+        result.unchanged.formUnion(PrivilegedRequestPartition.unactionable(
+            requested: requested,
+            owned: stopped,
+            recovered: recovered
+        ))
 
         let ownedProcesses = Array(requested.intersection(stopped))
         let ownedResult = apply(ownedProcesses) { kill($0, SIGCONT) }
@@ -915,12 +932,6 @@ private final class PrivilegedProcessSession: NSObject, PrivilegedProcessXPCProt
         }
         let requested = Set(identities)
         let recovered = requested.intersection(recoveryCoordinator.report.priorityProcesses)
-        guard requested.subtracting(originalPriorities.keys).isSubset(of: recovered) else {
-            return failure(
-                .invalidRequest,
-                "Tempra can restore only priorities that this helper changed or recovered."
-            )
-        }
 
         let recoveredResult = recoveryCoordinator.report.resolvePriorities(
             recovered,
@@ -941,6 +952,14 @@ private final class PrivilegedProcessSession: NSObject, PrivilegedProcessXPCProt
             stale: recoveredResult.stale,
             failed: recoveredResult.failed
         )
+        // Priorities this helper neither changed nor recovered need no
+        // mutation: report them as unchanged so one unknown identity cannot
+        // fail the restores this helper can still perform.
+        result.unchanged.formUnion(PrivilegedRequestPartition.unactionable(
+            requested: requested,
+            owned: Set(originalPriorities.keys),
+            recovered: recovered
+        ))
 
         for process in requested.intersection(originalPriorities.keys) {
             guard Self.currentIdentity(for: process.pid) == process else {
@@ -1061,7 +1080,7 @@ private final class PrivilegedProcessSession: NSObject, PrivilegedProcessXPCProt
                     OperationResult(
                         applied: result.applied,
                         stale: result.stale,
-                        unchanged: result.failed
+                        unchanged: result.unchanged.union(result.failed)
                     ))
             }
             return response(

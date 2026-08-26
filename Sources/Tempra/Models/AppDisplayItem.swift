@@ -8,10 +8,6 @@ struct AppDisplayItem: Identifiable {
     let applicationURL: URL?
     let iconOverride: NSImage?
     let cpuPercent: Double
-    let gpuPercent: Double
-    /// What the app's GPU work costs in power. The GPU limit is a watt ceiling,
-    /// so the interface reports the same unit.
-    let gpuWatts: Double
     let averageCPUPercent: Double
     let estimatedSavedCPUPercent: Double
     let residentMemoryBytes: UInt64?
@@ -41,8 +37,6 @@ struct AppDisplayItem: Identifiable {
         applicationURL: URL?,
         iconOverride: NSImage? = nil,
         cpuPercent: Double,
-        gpuPercent: Double = 0,
-        gpuWatts: Double = 0,
         averageCPUPercent: Double,
         estimatedSavedCPUPercent: Double,
         residentMemoryBytes: UInt64? = nil,
@@ -72,8 +66,6 @@ struct AppDisplayItem: Identifiable {
         self.applicationURL = applicationURL
         self.iconOverride = iconOverride
         self.cpuPercent = cpuPercent
-        self.gpuPercent = gpuPercent
-        self.gpuWatts = gpuWatts
         self.averageCPUPercent = averageCPUPercent
         self.estimatedSavedCPUPercent = estimatedSavedCPUPercent
         self.residentMemoryBytes = residentMemoryBytes
@@ -121,18 +113,6 @@ struct AppDisplayItem: Identifiable {
     var cpuText: String {
         guard isRunning else { return "—" }
         return cpuPercent < 0.05 ? "0%" : String(format: "%.1f%%", cpuPercent)
-    }
-
-    var gpuText: String {
-        guard isRunning else { return "—" }
-        return gpuWatts < 0.05 ? "0 W" : String(format: "%.1f W", gpuWatts)
-    }
-
-    /// How much of the time the app keeps the GPU busy, which is not the same as
-    /// what that work costs in power.
-    var gpuShareText: String {
-        guard isRunning else { return "—" }
-        return gpuPercent < 0.05 ? "0%" : String(format: "%.1f%%", gpuPercent)
     }
 
     var averageCPUText: String {

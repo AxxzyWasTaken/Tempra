@@ -39,8 +39,6 @@ enum DisplayItemProjection {
                 name: app.name,
                 applicationURL: app.bundleURL,
                 cpuPercent: app.cpuPercent,
-                gpuPercent: app.gpuPercent,
-                gpuWatts: app.gpuWatts,
                 averageCPUPercent: averageCPUByIdentifier[app.bundleIdentifier] ?? 0,
                 estimatedSavedCPUPercent: savedCPUByIdentifier[app.bundleIdentifier] ?? 0,
                 residentMemoryBytes: app.residentMemoryBytes,

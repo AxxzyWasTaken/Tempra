@@ -175,7 +175,6 @@ final class ProcessManagementCoordinator {
                     && !BackgroundProcessPolicy.isBackgroundIdentifier($0.bundleIdentifier),
                 launchedAt: $0.launchedAt,
                 cpuPercent: $0.cpuPercent,
-                gpuPercent: $0.gpuPercent,
                 isFrontmost: $0.isFrontmost,
                 isHidden: $0.isHidden,
                 isPlayingAudio: $0.isPlayingAudio,

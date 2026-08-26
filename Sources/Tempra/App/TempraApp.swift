@@ -95,17 +95,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let processList = failure.processIdentifiers.map(String.init).joined(separator: ", ")
             return "\(failure.bundleIdentifier) (processes: \(processList))"
         }.joined(separator: "\n")
-        alert.informativeText = "Tempra could not restore every managed process. "
-            + "It will remain open so no application is silently left paused.\n\n"
+        alert.informativeText = "Tempra could not restore every managed process.\n\n"
             + details
+            + "\n\nIf you quit anyway, Tempra's safety processes restore the remaining "
+            + "managed processes as soon as Tempra exits."
         alert.addButton(withTitle: "Retry Restoration")
+        let quitAnywayButton = alert.addButton(withTitle: "Quit Anyway")
+        quitAnywayButton.hasDestructiveAction = true
         alert.addButton(withTitle: "Cancel Quit")
-        return alert.runModal() == .alertFirstButtonReturn ? .retry : .cancel
+        switch alert.runModal() {
+        case .alertFirstButtonReturn:
+            return .retry
+        case .alertSecondButtonReturn:
+            return .quitAnyway
+        default:
+            return .cancel
+        }
     }
 }
 
 enum TerminationFailureAction: Sendable {
     case retry
+    case quitAnyway
     case cancel
 }
 
@@ -150,7 +161,14 @@ final class ApplicationTerminationCoordinator {
         while true {
             let result = await shutdown()
             if result.succeeded { return true }
-            if presentFailure(result) == .cancel { return false }
+            switch presentFailure(result) {
+            case .retry:
+                continue
+            case .quitAnyway:
+                return true
+            case .cancel:
+                return false
+            }
         }
     }
 }

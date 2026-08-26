@@ -21,8 +21,8 @@ struct ProcessLimitTargetSelectorTests {
         #expect(selection.alwaysRunningProcesses == [
             main.identity, network.identity, storage.identity, media.identity
         ])
-        #expect(abs(selection.alwaysRunningDemand - 3.8) < 0.000_001)
-        #expect(abs(selection.controlledLimit - 5.2) < 0.000_001)
+        #expect(abs(selection.alwaysRunningCPUPercent - 3.8) < 0.000_001)
+        #expect(abs(selection.controlledLimitPercent - 5.2) < 0.000_001)
         #expect(selection.targetIsReachable)
         #expect(selection.protectionReasons[main.identity] == [.mainProcessLifeline])
         #expect(selection.protectionReasons[network.identity] == [.networkActivity])
@@ -42,7 +42,7 @@ struct ProcessLimitTargetSelectorTests {
 
         #expect(selection.controlledProcesses == [renderer.identity, worker.identity])
         #expect(selection.alwaysRunningProcesses == [main.identity, network.identity])
-        #expect(selection.controlledLimit == 6)
+        #expect(selection.controlledLimitPercent == 6)
     }
 
     @Test("A new helper remains protected until it has a CPU measurement")
@@ -121,7 +121,7 @@ struct ProcessLimitTargetSelectorTests {
         )
 
         #expect(selection.controlledProcesses == [worker.identity])
-        #expect(selection.controlledLimit == 10)
+        #expect(selection.controlledLimitPercent == 10)
         #expect(selection.targetIsReachable)
     }
 
@@ -152,7 +152,7 @@ struct ProcessLimitTargetSelectorTests {
         )
 
         #expect(selection.controlledProcesses == [worker.identity])
-        #expect(selection.controlledLimit == 8)
+        #expect(selection.controlledLimitPercent == 8)
     }
 
     @Test("A CPU-heavy main process is selected instead of an idle helper")

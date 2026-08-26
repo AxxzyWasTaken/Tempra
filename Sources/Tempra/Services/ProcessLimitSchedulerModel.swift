@@ -7,33 +7,12 @@ enum ProcessLimitSchedulerModel {
         case stopped
     }
 
-    /// Which ceilings the running cycle enforces.
-    ///
-    /// Every rule action stops at the foreground boundary. A GPU ceiling the
-    /// user asked to keep on is the one exception, and in front only the GPU
-    /// pass may duty cycle the app: the CPU limit stays measured, not enforced.
-    enum Scope: Sendable {
-        case cpuAndGPU
-        case gpuOnly
-
-        var enforcesCPU: Bool {
-            self == .cpuAndGPU
-        }
-    }
-
     struct Runtime: Sendable {
         var lastCPUNanoseconds: UInt64
-        var lastGPUNanoseconds: UInt64 = 0
         var lastAccountingAt: ContinuousClock.Instant
-        /// When the GPU busy counter was last read. GPU busy time advances in
-        /// coarse steps, as command buffers complete, so the GPU pass measures
-        /// over its own longer window instead of every pulse.
-        var lastGPUAccountingAt: ContinuousClock.Instant
         var runStartedAt: ContinuousClock.Instant?
         var estimatedFullSpeedCPU: Double
-        var estimatedFullSpeedGPUWatts: Double = 0
         var lastMeasuredCPUPercent: Double?
-        var lastMeasuredGPUWatts: Double?
         var dutyFactor: TimeInterval
         var hasActivatedLimit: Bool
         var scheduledStopDuration: TimeInterval
@@ -41,74 +20,6 @@ enum ProcessLimitSchedulerModel {
         var generation: UInt64
         var phase: Phase
         var processIdentities: Set<ProcessIdentity>
-        var scope: Scope = .cpuAndGPU
-    }
-
-    /// The GPU half of one limit accounting pass.
-    ///
-    /// Pure math over values the controller reads — the busy-counter delta, the
-    /// power scale, the previous runtime — so the pricing, full-speed estimate,
-    /// and duty factor are testable without an actor or a registry.
-    enum GPUAccounting {
-        /// A measurement window that has closed: the busy counter advanced by
-        /// `busyDeltaNanoseconds` over `duration`, priced with `scale`.
-        struct ClosedWindow {
-            let busyDeltaNanoseconds: UInt64
-            let duration: TimeInterval
-            let scale: GPUPowerScale
-        }
-
-        /// Average GPU power of the controlled subset, in watts.
-        ///
-        /// A closed window is priced directly. While the window is still open
-        /// the previous measurement carries over — the counter stands still
-        /// during a pulse, so re-pricing a partial window would understate —
-        /// and the first pass falls back to the selection's estimate.
-        static func measuredWatts(
-            closedWindow: ClosedWindow?,
-            carriedWatts: Double?,
-            selectionWatts: Double?
-        ) -> Double {
-            let watts: Double
-            if let closedWindow {
-                watts = closedWindow.scale.watts(
-                    forSharePercent: GPUUsageSampler.percent(
-                        busyNanoseconds: closedWindow.busyDeltaNanoseconds,
-                        elapsed: closedWindow.duration
-                    )
-                )
-            } else {
-                watts = carriedWatts ?? selectionWatts ?? 0
-            }
-            return max(0, watts.isFinite ? watts : 0)
-        }
-
-        /// What full speed would cost: the most the subset has been seen to
-        /// draw, never below the ceiling itself or a working floor. Zero when
-        /// the rule carries no ceiling.
-        static func estimatedFullSpeedWatts(
-            limitWatts: Double?,
-            measuredWatts: Double,
-            previousEstimate: Double?
-        ) -> Double {
-            limitWatts.map { max(previousEstimate ?? 0, measuredWatts, $0, 0.1) } ?? 0
-        }
-
-        static func exceedsLimit(measuredWatts: Double, limitWatts: Double?) -> Bool {
-            limitWatts.map { measuredWatts > $0 } ?? false
-        }
-
-        static func dutyFactor(
-            hasActivatedLimit: Bool,
-            limitWatts: Double?,
-            estimatedFullSpeedWatts: Double
-        ) -> TimeInterval {
-            guard hasActivatedLimit, let limitWatts else { return 0 }
-            return ProcessControlMath.requiredDutyFactor(
-                estimatedFullSpeedUsage: estimatedFullSpeedWatts,
-                limitPercent: limitWatts
-            )
-        }
     }
 
     enum DeadlineKind: Sendable {

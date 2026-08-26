@@ -175,17 +175,13 @@ enum ProcessControlMath {
         return factor
     }
 
-    /// Stop time per `limitPeriod` needed to hold `limitPercent`.
-    ///
-    /// The ratio is unit-agnostic: pass CPU percent with a CPU limit, or GPU
-    /// percent with a GPU limit.
     static func requiredDutyFactor(
-        estimatedFullSpeedUsage: Double,
+        estimatedFullSpeedCPU: Double,
         limitPercent: Double
     ) -> TimeInterval {
         let normalizedLimit = normalizedCPUPercent(limitPercent)
         let demand = max(
-            normalizedCPUPercent(estimatedFullSpeedUsage),
+            normalizedCPUPercent(estimatedFullSpeedCPU),
             normalizedLimit
         )
         guard demand > 0, normalizedLimit < demand else { return 0 }

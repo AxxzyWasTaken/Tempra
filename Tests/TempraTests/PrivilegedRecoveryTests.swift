@@ -172,3 +172,42 @@ struct PrivilegedRecoveryTests {
         )
     }
 }
+
+@Suite("Privileged request partition")
+struct PrivilegedRequestPartitionTests {
+    @Test("Identities the helper neither owns nor recovered resolve without action")
+    func unknownIdentitiesAreUnactionable() {
+        let owned = identity(5_001)
+        let recovered = identity(5_002)
+        let unknown = identity(5_003)
+
+        let unactionable = PrivilegedRequestPartition.unactionable(
+            requested: [owned, recovered, unknown],
+            owned: [owned],
+            recovered: [recovered]
+        )
+
+        #expect(unactionable == [unknown])
+    }
+
+    @Test("A request covered entirely by helper state has nothing unactionable")
+    func coveredRequestHasNoUnactionableIdentities() {
+        let owned = identity(5_004)
+        let recovered = identity(5_005)
+
+        let unactionable = PrivilegedRequestPartition.unactionable(
+            requested: [owned, recovered],
+            owned: [owned],
+            recovered: [recovered]
+        )
+
+        #expect(unactionable.isEmpty)
+    }
+
+    private func identity(_ pid: Int32) -> PrivilegedProcessIdentity {
+        PrivilegedProcessIdentity(
+            pid: pid,
+            startTimeMicroseconds: UInt64(pid) * 1_000
+        )
+    }
+}

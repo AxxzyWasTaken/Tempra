@@ -44,6 +44,45 @@ struct ApplicationTerminationTests {
         #expect(shutdownAttempts == 1)
     }
 
+    @Test("Quit Anyway ends the application without successful restoration")
+    func quitAnywayTerminates() async {
+        let coordinator = ApplicationTerminationCoordinator()
+        var shutdownAttempts = 0
+
+        let shouldTerminate = await coordinator.resolve(
+            shutdown: {
+                shutdownAttempts += 1
+                return failureResult
+            },
+            presentFailure: { _ in .quitAnyway }
+        )
+
+        #expect(shouldTerminate)
+        #expect(shutdownAttempts == 1)
+    }
+
+    @Test("Retry followed by Quit Anyway attempts another restoration first")
+    func retryThenQuitAnyway() async {
+        let coordinator = ApplicationTerminationCoordinator()
+        var shutdownAttempts = 0
+        var presentedFailures = 0
+
+        let shouldTerminate = await coordinator.resolve(
+            shutdown: {
+                shutdownAttempts += 1
+                return failureResult
+            },
+            presentFailure: { _ in
+                presentedFailures += 1
+                return presentedFailures == 1 ? .retry : .quitAnyway
+            }
+        )
+
+        #expect(shouldTerminate)
+        #expect(shutdownAttempts == 2)
+        #expect(presentedFailures == 2)
+    }
+
     private var failureResult: ProcessRestorationResult {
         ProcessRestorationResult(failures: [ProcessRestorationFailure(
             bundleIdentifier: "example.app",

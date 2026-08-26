@@ -8,7 +8,7 @@ private struct TempraDotAppearance {
 struct ManagedProcessPresentation: Equatable {
     enum Indicator: Equatable {
         case runtimeStatus
-        case resourceLimit(isActive: Bool)
+        case cpuLimit(isActive: Bool)
     }
 
     let actionLabel: String
@@ -21,20 +21,17 @@ struct ManagedProcessPresentation: Equatable {
         switch item.status {
         case .limited(let percent):
             actionLabel = Self.limitLabel(percent)
-            indicator = .resourceLimit(isActive: true)
+            indicator = .cpuLimit(isActive: true)
         case .limitedWithProtectedProcesses(let percent):
             actionLabel = "Best effort · \(Int(percent))%"
-            indicator = .resourceLimit(isActive: true)
-        case .gpuLimited(let watts):
-            actionLabel = "GPU \(Int(watts)) W"
-            indicator = .resourceLimit(isActive: true)
+            indicator = .cpuLimit(isActive: true)
         case .paused:
             actionLabel = "Paused"
             indicator = .runtimeStatus
         case .lowerPriority:
             if let rule = item.rule, rule.isEnabled, rule.action == .limit {
                 actionLabel = Self.limitLabel(rule.limitPercent)
-                indicator = .resourceLimit(isActive: false)
+                indicator = .cpuLimit(isActive: false)
             } else {
                 actionLabel = "Lower CPU priority"
                 indicator = .runtimeStatus
@@ -51,7 +48,7 @@ struct ManagedProcessPresentation: Equatable {
             } else {
                 actionLabel = "CPU limit active"
             }
-            indicator = .resourceLimit(isActive: true)
+            indicator = .cpuLimit(isActive: true)
         }
     }
 
@@ -76,7 +73,7 @@ private func dotAppearance(
             color: TempraPalette.waiting,
             fill: highlightsFrontmostWaiting && item.isFrontmost ? .full : .half
         )
-    case .limited, .limitedWithProtectedProcesses, .gpuLimited:
+    case .limited, .limitedWithProtectedProcesses:
         return TempraDotAppearance(color: TempraPalette.slowed, fill: .full)
     case .paused:
         return TempraDotAppearance(color: TempraPalette.stopped, fill: .full)
@@ -142,11 +139,9 @@ struct ProcessRowView: View {
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
 
-                metricValue(item.cpuPercent)
+                cpuValue(item.cpuPercent)
                     .frame(width: TempraLayout.currentCPUColumnWidth, alignment: .trailing)
-                metricValue(item.gpuWatts)
-                    .frame(width: TempraLayout.currentCPUColumnWidth, alignment: .trailing)
-                metricValue(item.averageCPUPercent)
+                cpuValue(item.averageCPUPercent)
                     .frame(width: TempraLayout.averageCPUColumnWidth, alignment: .trailing)
             }
             .padding(.horizontal, TempraLayout.processRowHorizontalInset)
@@ -179,7 +174,7 @@ struct ProcessRowView: View {
         }
     }
 
-    private func metricValue(_ value: Double) -> some View {
+    private func cpuValue(_ value: Double) -> some View {
         Text(item.isRunning ? String(format: "%.1f", value) : "—")
             .font(TempraTypography.processValue)
             .foregroundStyle(item.isAttention ? TempraPalette.waiting : TempraPalette.primaryText)
@@ -208,8 +203,7 @@ struct ProcessRowView: View {
         if isSystemProcess {
             return "Protected system process · monitor only"
         }
-        return "\(item.stateText) · Current \(item.cpuText) · Current GPU \(item.gpuText)"
-            + " · 1-minute average \(item.averageCPUText)"
+        return "\(item.stateText) · Current \(item.cpuText) · 1-minute average \(item.averageCPUText)"
     }
 
 
@@ -289,7 +283,7 @@ struct ManagedProcessRowView: View {
         switch presentation.indicator {
         case .runtimeStatus:
             dotAppearance(for: item)
-        case .resourceLimit(let isActive):
+        case .cpuLimit(let isActive):
             TempraDotAppearance(
                 color: TempraPalette.slowed,
                 fill: isActive ? .full : .half

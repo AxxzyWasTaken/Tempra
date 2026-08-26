@@ -194,36 +194,6 @@ struct ProcessMonitorTests {
         #expect(monitor.cachedMetadataCount == 1)
     }
 
-    @Test("The monitor reports GPU work in watts")
-    func gpuUsageArrivesInWatts() async throws {
-        let identity = ProcessIdentity(pid: 100, startTimeMicroseconds: 2_000_000)
-        let reader = StubProcessSnapshotReader(
-            snapshots: [100: snapshot(identity)],
-            paths: [100: appExecutable("Example")]
-        )
-        let clock = StubUptime(value: 10)
-        let gpuReader = StubGPUCounterReader(counters: [100: 0])
-        let monitor = makeMonitor(
-            reader: reader,
-            clock: clock,
-            gpuUsageReader: gpuReader,
-            // 0.25 W for every point of GPU share.
-            gpuPowerScale: StubPowerScale(wattsPerSharePoint: 0.25)
-        )
-        let inventory = inventory(app("Example", pid: 100))
-
-        // The first sample only sets the counter baseline.
-        _ = await monitor.sample(inventory: inventory)
-        gpuReader.counters[100] = 400_000_000
-        clock.value = 11
-        let busy = try #require(await monitor.sample(inventory: inventory).first)
-
-        // 400 ms of GPU work in one second is 40% of the GPU, which costs 10 W.
-        #expect(abs(busy.gpuPercent - 40) < 0.000_001)
-        #expect(abs(busy.gpuWatts - 10) < 0.000_001)
-        #expect(abs((busy.processSamples.first?.gpuWatts ?? 0) - 10) < 0.000_001)
-    }
-
     @Test("The current application stays in the monitored application list")
     func currentApplicationIsIncluded() async throws {
         let identity = ProcessIdentity(pid: 100, startTimeMicroseconds: 2_000_000)
@@ -1095,74 +1065,18 @@ struct ProcessMonitorTests {
         #expect(!monitor.didRefreshLastSample)
     }
 
-    @Test("Monitoring service serializes overlapping process samples")
-    func monitoringServiceSerializesOverlappingProcessSamples() async throws {
-        let identity = ProcessIdentity(pid: 200, startTimeMicroseconds: 2_000_000)
-        let privilegedReader = BlockingPrivilegedSnapshotReader(
-            snapshots: [200: snapshot(identity)]
-        )
-        let monitor = ProcessMonitor(
-            processReader: StubProcessSnapshotReader(snapshots: [:], paths: [:]),
-            currentUserID: 501,
-            uptime: { 1 },
-            audioProcessIdentifiers: { [] },
-            windowSnapshot: { nil },
-            processTableReader: {
-                (
-                    entries: [ProcessTableEntry(
-                        pid: 200,
-                        parentPID: 1,
-                        userID: 0,
-                        cpuPercent: 0,
-                        command: "/usr/bin/example-helper"
-                    )],
-                    samplerPID: 999
-                )
-            },
-            privilegedSnapshotReader: { processIdentifiers in
-                await privilegedReader.read(processIdentifiers)
-            }
-        )
-        let service = MonitoringService(processMonitor: monitor)
-        let sampleRequest = request(
-            inventory: inventory(),
-            includesEssentialSystemProcesses: true,
-            processChange: nil
-        )
-
-        let firstSample = Task {
-            await service.sample(sampleRequest)
-        }
-        await privilegedReader.waitForFirstCall()
-        let secondSample = Task {
-            await service.sample(sampleRequest)
-        }
-        try await Task.sleep(for: .milliseconds(50))
-        await privilegedReader.releaseFirstCall()
-
-        _ = await firstSample.value
-        _ = await secondSample.value
-        let metrics = await privilegedReader.metrics()
-        #expect(metrics.callCount == 2)
-        #expect(metrics.maximumActiveCallCount == 1)
-    }
-
     private func makeMonitor(
         reader: StubProcessSnapshotReader,
         clock: StubUptime,
         audioPIDs: Set<pid_t> = [],
         networkStates: [ProcessIdentity: ProcessNetworkActivity] = [:],
-        windowVisibilitySnapshot: WindowVisibilitySnapshot? = nil,
-        gpuUsageReader: (any GPUUsageReading)? = nil,
-        gpuPowerScale: (any GPUPowerScaling)? = nil
+        windowVisibilitySnapshot: WindowVisibilitySnapshot? = nil
     ) -> ProcessMonitor {
         ProcessMonitor(
             processReader: reader,
-            gpuUsageReader: gpuUsageReader ?? LiveGPUUsageReader(),
             currentUserID: 501,
             uptime: { clock.value },
             audioProcessIdentifiers: { audioPIDs },
-            gpuPowerScale: gpuPowerScale ?? LiveGPUPowerScale.shared,
             networkActivity: { networkStates[$0] ?? .inactive },
             windowSnapshot: { windowVisibilitySnapshot }
         )
@@ -1170,7 +1084,6 @@ struct ProcessMonitorTests {
 
     private func request(
         inventory: ApplicationInventory,
-        includesEssentialSystemProcesses: Bool = false,
         processChange: ProcessChangeNotification?
     ) -> MonitoringRequest {
         MonitoringRequest(
@@ -1178,7 +1091,7 @@ struct ProcessMonitorTests {
             inventory: inventory,
             samplesSystemCPU: false,
             samplesApplications: true,
-            includesEssentialSystemProcesses: includesEssentialSystemProcesses,
+            includesEssentialSystemProcesses: false,
             processChange: processChange
         )
     }
@@ -1269,58 +1182,6 @@ private final class StubUptime {
     }
 }
 
-/// A GPU busy counter the test controls directly.
-private final class StubGPUCounterReader: GPUUsageReading, @unchecked Sendable {
-    private let lock = NSLock()
-    private var storage: [pid_t: UInt64]
-
-    init(counters: [pid_t: UInt64]) {
-        storage = counters
-    }
-
-    var counters: [pid_t: UInt64] {
-        get {
-            lock.lock()
-            defer { lock.unlock() }
-            return storage
-        }
-        set {
-            lock.lock()
-            storage = newValue
-            lock.unlock()
-        }
-    }
-
-    subscript(pid: pid_t) -> UInt64? {
-        get { counters[pid] }
-        set {
-            var updated = counters
-            updated[pid] = newValue
-            counters = updated
-        }
-    }
-
-    func accumulatedBusyNanoseconds() -> [pid_t: UInt64] {
-        counters
-    }
-
-    func accumulatedBusyNanoseconds(for pids: Set<pid_t>) -> [pid_t: UInt64] {
-        counters.filter { pids.contains($0.key) }
-    }
-}
-
-/// A GPU whose every point of share costs a known number of watts.
-private struct StubPowerScale: GPUPowerScaling {
-    let wattsPerSharePoint: Double
-
-    func currentScale() -> GPUPowerScale? {
-        GPUPowerScale(
-            totalWatts: wattsPerSharePoint * 100,
-            totalSharePercent: 100
-        )
-    }
-}
-
 private final class StubAudioProcessProbe {
     private(set) var readCount = 0
     var processIdentifiers: Set<pid_t> = []
@@ -1346,59 +1207,5 @@ private final class RecordingNetworkActivityProbe: @unchecked Sendable {
         identities.insert(identity)
         lock.unlock()
         return .active
-    }
-}
-
-private actor BlockingPrivilegedSnapshotReader {
-    private let snapshots: [pid_t: ProcessKernelSnapshot]
-    private var callCount = 0
-    private var activeCallCount = 0
-    private var maximumActiveCallCount = 0
-    private var firstCallStarted: CheckedContinuation<Void, Never>?
-    private var firstCallRelease: CheckedContinuation<Void, Never>?
-
-    init(snapshots: [pid_t: ProcessKernelSnapshot]) {
-        self.snapshots = snapshots
-    }
-
-    func read(
-        _ processIdentifiers: [pid_t]
-    ) async -> [pid_t: ProcessKernelSnapshot] {
-        callCount += 1
-        activeCallCount += 1
-        maximumActiveCallCount = max(maximumActiveCallCount, activeCallCount)
-        if callCount == 1 {
-            firstCallStarted?.resume()
-            firstCallStarted = nil
-            await withCheckedContinuation { continuation in
-                firstCallRelease = continuation
-            }
-        }
-        activeCallCount -= 1
-        var selectedSnapshots: [pid_t: ProcessKernelSnapshot] = [:]
-        selectedSnapshots.reserveCapacity(processIdentifiers.count)
-        for processIdentifier in processIdentifiers {
-            selectedSnapshots[processIdentifier] = snapshots[processIdentifier]
-        }
-        return selectedSnapshots
-    }
-
-    func waitForFirstCall() async {
-        guard callCount == 0 else { return }
-        await withCheckedContinuation { continuation in
-            firstCallStarted = continuation
-        }
-    }
-
-    func releaseFirstCall() {
-        firstCallRelease?.resume()
-        firstCallRelease = nil
-    }
-
-    func metrics() -> (
-        callCount: Int,
-        maximumActiveCallCount: Int
-    ) {
-        (callCount, maximumActiveCallCount)
     }
 }

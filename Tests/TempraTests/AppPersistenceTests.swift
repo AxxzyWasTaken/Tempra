@@ -459,51 +459,6 @@ struct AppPersistenceTests {
         }
     }
 
-    @Test("An impossible GPU ceiling is rejected before it is stored")
-    func invalidGPUCeilingIsRejected() throws {
-        try withDefaults { defaults in
-            let persistence = AppPersistence(defaults: defaults)
-            let validRule = AppRule(
-                bundleIdentifier: "example.app",
-                displayName: "Example",
-                action: .limit,
-                limitPercent: 50,
-                gpuLimitWatts: 30
-            )
-            try persistence.saveRules([validRule.bundleIdentifier: validRule])
-
-            for watts in [0.0, 0.5, 1_200.0, Double.infinity] {
-                var invalidRule = validRule
-                invalidRule.gpuLimitWatts = watts
-                #expect(throws: AppPersistenceError.self) {
-                    try persistence.saveRules([invalidRule.bundleIdentifier: invalidRule])
-                }
-            }
-
-            // Flag combinations that used to need rejection are now repaired at
-            // every construction and decoding boundary: a rule keeping a GPU
-            // limit in front without one, or limiting neither resource, heals
-            // back to a plain CPU limit rather than corrupting storage.
-            var inFrontWithoutCeiling = validRule
-            inFrontWithoutCeiling.gpuLimitWatts = nil
-            inFrontWithoutCeiling.limitsGPUWhenInFront = true
-            try persistence.saveRules([
-                inFrontWithoutCeiling.bundleIdentifier: inFrontWithoutCeiling
-            ])
-            let repairedInFront = try #require(persistence.loadRules()["example.app"])
-            #expect(repairedInFront.gpuLimitWatts == nil)
-            #expect(repairedInFront.limitsGPUWhenInFront == false)
-            #expect(repairedInFront.limitsCPU)
-
-            var limitsNothing = validRule
-            limitsNothing.gpuLimitWatts = nil
-            limitsNothing.limitsCPU = false
-            try persistence.saveRules([limitsNothing.bundleIdentifier: limitsNothing])
-            let repairedLimit = try #require(persistence.loadRules()["example.app"])
-            #expect(repairedLimit.limitsCPU)
-        }
-    }
-
     @Test("A failed replacement leaves the last saved rules unchanged")
     func failedSavePreservesRules() throws {
         try withDefaults { defaults in

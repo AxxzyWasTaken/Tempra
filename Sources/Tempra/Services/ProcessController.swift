@@ -58,8 +58,6 @@ actor ProcessController {
     @TaskLocal private static var reconciliationContext: ProcessReconciliationContext?
 
     private typealias LimitPhase = ProcessLimitSchedulerModel.Phase
-    private typealias LimitScope = ProcessLimitSchedulerModel.Scope
-    private typealias GPUAccounting = ProcessLimitSchedulerModel.GPUAccounting
     private typealias LimitRuntime = ProcessLimitSchedulerModel.Runtime
     private typealias LimitDeadline = ProcessLimitSchedulerModel.Deadline
     private typealias LimitDeadlineQueue = ProcessLimitSchedulerModel.DeadlineQueue
@@ -73,27 +71,6 @@ actor ProcessController {
     private struct CriticalFileActivityCacheEntry: Sendable {
         let activity: ProcessCriticalFileActivity
         let expiresAt: ContinuousClock.Instant
-    }
-
-    private struct LimitControlSet {
-        let cpu: ProcessLimitSelection
-        let gpu: ProcessLimitSelection?
-        let controlledProcesses: Set<ProcessIdentity>
-        let scope: LimitScope
-        var gpuScale: GPUPowerScale?  = nil
-
-        /// The GPU ceiling in watts that applies to the controlled subset, or
-        /// nil when the rule carries no ceiling, the GPU pass selected nothing,
-        /// or no measured power scale is available yet.
-        var gpuLimitWatts: Double? {
-            guard let gpu, !gpu.controlledProcesses.isEmpty else { return nil }
-            return gpu.controlledLimit
-        }
-
-        /// Measured GPU power of the processes the GPU pass selected, in watts.
-        var gpuUsageWatts: Double? {
-            gpu?.controlledDemand
-        }
     }
 
     private struct AutomaticResumeChange: Sendable {
@@ -123,7 +100,6 @@ actor ProcessController {
     private let minimumRunDuration: TimeInterval
     private let clock: ProcessControlClock
     private let signalTelemetry: ProcessControlSignalTelemetry
-    private let gpuUsageReader: any GPUUsageReading
     private let failureRetryInterval: TimeInterval = 1
     private let criticalFileActivityProbeInterval: TimeInterval = 2
     private let networkSensitivityReleaseDelay: TimeInterval = 5
@@ -134,18 +110,8 @@ actor ProcessController {
     private let restorationAttempts = 3
     private let visibilityRecheckInterval: TimeInterval = 1
     static let launchGracePeriod: TimeInterval = 60
-    /// How long the GPU pass waits between reads of the GPU busy counter.
-    ///
-    /// The counter advances as command buffers finish, so a shorter window
-    /// measures scheduling noise instead of GPU work, and every read walks the
-    /// graphics registry. A quarter second holds both costs down and still
-    /// corrects the duty cycle several times per second of GPU work.
-    static let gpuMeasurementWindow: TimeInterval = 0.25
 
     private var eventHandler: EventHandler?
-    /// Prices one point of GPU share in watts. The GPU limit is a power ceiling,
-    /// and GPU power is not proportional to busy time, so the scale is measured.
-    private let gpuPowerScale: any GPUPowerScaling
     private var groups: [String: ProcessControlTarget] = [:]
     private var rules: [String: AppRule] = [:]
     private var backgroundSince: [String: Date] = [:]
@@ -157,7 +123,6 @@ actor ProcessController {
     private var priorityRestorationFailureDescriptions: [String: String] = [:]
     private var limitRuntimes: [String: LimitRuntime] = [:]
     private var limitSelections: [String: ProcessLimitSelection] = [:]
-    private var gpuLimitSelections: [String: ProcessLimitSelection] = [:]
     private var pausedBaselineCPU: [String: Double] = [:]
     private var pauseActivationProbeUntil: [String: Date] = [:]
     private var foregroundActivationProtectionUntil: [String: ContinuousClock.Instant] = [:]
@@ -267,9 +232,7 @@ actor ProcessController {
         controlInterval: TimeInterval = 0.5,
         minimumRunDuration: TimeInterval = 0.005,
         clock: ProcessControlClock = .continuous,
-        signalTelemetry: ProcessControlSignalTelemetry = ProcessControlSignalTelemetry(),
-        gpuUsageReader: any GPUUsageReading = LiveGPUUsageReader.shared,
-        gpuPowerScale: any GPUPowerScaling = LiveGPUPowerScale.shared
+        signalTelemetry: ProcessControlSignalTelemetry = ProcessControlSignalTelemetry()
     ) {
         self.system = system
         self.crashWatchdog = crashWatchdog
@@ -283,8 +246,6 @@ actor ProcessController {
         self.minimumRunDuration = minimumRunDuration
         self.clock = clock
         self.signalTelemetry = signalTelemetry
-        self.gpuUsageReader = gpuUsageReader
-        self.gpuPowerScale = gpuPowerScale
     }
 
     func setEventHandler(_ handler: @escaping EventHandler) {
@@ -948,32 +909,20 @@ actor ProcessController {
         return activity
     }
 
-    /// Selects the processes to duty cycle for one resource.
-    ///
-    /// The GPU pass reasons in watts, so its samples arrive scaled from GPU
-    /// share into watts and `limitPercent` carries the rule's watt ceiling.
     private func selectLimitTargets(
         for app: ProcessControlTarget,
-        limitPercent: Double,
-        demand: ProcessLimitDemand = .cpu,
-        gpuScale: GPUPowerScale? = nil
+        limitPercent: Double
     ) -> ProcessLimitSelection {
-        let previousSelection = demand == .cpu
-            ? limitSelections[app.bundleIdentifier]
-            : gpuLimitSelections[app.bundleIdentifier]
-        let previousControlledProcesses = previousSelection?.controlledProcesses ?? []
+        let previousControlledProcesses = limitSelections[app.bundleIdentifier]?
+            .controlledProcesses ?? []
         let sensitiveProcesses = latencySensitiveProcesses(for: app)
         let criticalProcesses = downloadProtectedProcesses[
             app.bundleIdentifier,
             default: []
         ]
-        let samples = gpuScale.map { scale in
-            app.processSamples.map { $0.scalingGPUShareToWatts(with: scale) }
-        } ?? app.processSamples
         let offlineSelection = ProcessLimitTargetSelector.select(
-            samples: samples,
+            samples: app.processSamples,
             limitPercent: limitPercent,
-            demand: demand,
             previousControlledProcesses: previousControlledProcesses,
             latencySensitiveProcesses: sensitiveProcesses,
             criticalActivityProcesses: criticalProcesses,
@@ -983,70 +932,13 @@ actor ProcessController {
             return offlineSelection
         }
         return ProcessLimitTargetSelector.select(
-            samples: samples,
+            samples: app.processSamples,
             limitPercent: limitPercent,
-            demand: demand,
             previousControlledProcesses: previousControlledProcesses,
             latencySensitiveProcesses: sensitiveProcesses,
             criticalActivityProcesses: criticalProcesses,
             protectsAudio: rules[app.bundleIdentifier]?.protectAudio == true
         )
-    }
-
-    /// Selects the processes to duty cycle for the CPU limit and, when the rule
-    /// carries a GPU ceiling, for the GPU limit as well.
-    ///
-    /// The CPU pass reasons in CPU percent and the GPU pass in watts, so each
-    /// keeps the limit for its own controlled subset. The control set is their
-    /// union: a process that only shows up in the GPU pass still has to stop,
-    /// and a wider union throttles more than either pass alone rather than less.
-    private func limitControlSet(
-        for app: ProcessControlTarget,
-        limitPercent: Double,
-        scope: LimitScope
-    ) -> LimitControlSet {
-        let identifier = app.bundleIdentifier
-        let cpuSelection: ProcessLimitSelection
-        if scope.enforcesCPU {
-            cpuSelection = selectLimitTargets(for: app, limitPercent: limitPercent)
-            limitSelections[identifier] = cpuSelection
-        } else {
-            cpuSelection = .empty
-        }
-        // Without a ceiling there is no GPU pass, and without a measured power
-        // scale there is nothing to compare a ceiling against yet.
-        guard let gpuLimitWatts = rules[identifier]?.gpuLimitWatts,
-              let gpuScale = gpuPowerScale.currentScale() else {
-            gpuLimitSelections.removeValue(forKey: identifier)
-            return LimitControlSet(
-                cpu: cpuSelection,
-                gpu: nil,
-                controlledProcesses: cpuSelection.controlledProcesses,
-                scope: scope
-            )
-        }
-        let gpuSelection = selectLimitTargets(
-            for: app,
-            limitPercent: gpuLimitWatts,
-            demand: .gpu,
-            gpuScale: gpuScale
-        )
-        gpuLimitSelections[identifier] = gpuSelection
-        return LimitControlSet(
-            cpu: cpuSelection,
-            gpu: gpuSelection,
-            controlledProcesses: cpuSelection.controlledProcesses
-                .union(gpuSelection.controlledProcesses),
-            scope: scope,
-            gpuScale: gpuScale
-        )
-    }
-
-    /// Whether this rule keeps its GPU ceiling in force while the app is in front.
-    private func limitsGPUInFront(_ rule: AppRule) -> Bool {
-        rule.action == .limit
-            && rule.limitsGPUWhenInFront
-            && rule.gpuLimitWatts != nil
     }
 
     private func tick(trigger: ProcessControlTickTrigger) async {
@@ -1086,15 +978,6 @@ actor ProcessController {
             let appIsFrontmost = await isFrontmost(app)
             guard workIsCurrent else { return }
             if appIsFrontmost {
-                if await maintainForegroundGPULimit(
-                    rule: rule,
-                    app: app,
-                    advancesLimitCycle: trigger == .cadence
-                ) {
-                    guard workIsCurrent else { return }
-                    continue
-                }
-                guard workIsCurrent else { return }
                 let restored = await restore(
                     identifier: identifier,
                     resetDelay: true,
@@ -1376,69 +1259,12 @@ actor ProcessController {
                 }
             }
             guard workIsCurrent else { return }
-            await advanceLimitCycle(
-                for: app,
-                limitPercent: rule.limitPercent,
-                scope: limitScope(for: rule),
-                advancesLimitCycle: advancesLimitCycle
-            )
+            if advancesLimitCycle || limitRuntimes[identifier] == nil {
+                await runLimitCycle(for: app, limitPercent: rule.limitPercent)
+            } else {
+                await maintainLimitCycle(for: app, limitPercent: rule.limitPercent)
+            }
         }
-    }
-
-    /// Which ceilings a rule enforces while the app is in the background.
-    ///
-    /// A rule may carry the GPU ceiling alone. Then the CPU percent is still
-    /// measured and shown, but only GPU power duty cycles the app.
-    private func limitScope(for rule: AppRule) -> LimitScope {
-        rule.limitsCPU ? .cpuAndGPU : .gpuOnly
-    }
-
-    /// Starts a fresh limit cycle or maintains the running one — the single
-    /// place that choice is made.
-    private func advanceLimitCycle(
-        for app: ProcessControlTarget,
-        limitPercent: Double,
-        scope: LimitScope,
-        advancesLimitCycle: Bool
-    ) async {
-        if advancesLimitCycle || limitRuntimes[app.bundleIdentifier] == nil {
-            await runLimitCycle(for: app, limitPercent: limitPercent, scope: scope)
-        } else {
-            await maintainLimitCycle(for: app, limitPercent: limitPercent, scope: scope)
-        }
-    }
-
-    /// Keeps a GPU ceiling in force while the app is in front.
-    ///
-    /// Returns false when the rule does not ask for that, and the caller then
-    /// restores the app as usual. In front the app keeps normal CPU priority and
-    /// its full CPU speed; only GPU pressure duty cycles it.
-    private func maintainForegroundGPULimit(
-        rule: AppRule,
-        app: ProcessControlTarget,
-        advancesLimitCycle: Bool
-    ) async -> Bool {
-        guard limitsGPUInFront(rule), !app.processIdentities.isEmpty else { return false }
-        let identifier = app.bundleIdentifier
-        pausedBaselineCPU.removeValue(forKey: identifier)
-        guard await restoreLowerPriority(
-            for: identifier,
-            attempts: restorationAttempts
-        ) else {
-            await markUnavailable(
-                identifier,
-                detail: "Tempra could not restore normal process priority for the app in front."
-            )
-            return true
-        }
-        guard workIsCurrent else { return true }
-        await advanceLimitCycle(
-            for: app,
-            limitPercent: rule.limitPercent,
-            scope: .gpuOnly,
-            advancesLimitCycle: advancesLimitCycle
-        )
-        return true
     }
 
     private func applyIdleActions(
@@ -1688,8 +1514,7 @@ actor ProcessController {
 
     private func runLimitCycle(
         for app: ProcessControlTarget,
-        limitPercent requestedLimitPercent: Double,
-        scope: LimitScope
+        limitPercent requestedLimitPercent: Double
     ) async {
         guard workIsCurrent else { return }
         let identifier = app.bundleIdentifier
@@ -1776,19 +1601,18 @@ actor ProcessController {
             }
             earlyStopResult = result
         }
-        let controlSet = limitControlSet(
+        let selection = selectLimitTargets(
             for: app,
-            limitPercent: requestedLimitPercent,
-            scope: scope
+            limitPercent: requestedLimitPercent
         )
-        let selection = controlSet.cpu
-        let controlledProcesses = controlSet.controlledProcesses
+        limitSelections[identifier] = selection
+        let controlledProcesses = selection.controlledProcesses
         await signalTelemetry.recordMeasurement(ProcessLimitMeasurement(
             date: Date(),
             bundleIdentifier: identifier,
             kind: .observation,
             requestedLimitPercent: requestedLimitPercent,
-            measuredCPUPercent: selection.controlledDemand,
+            measuredCPUPercent: selection.controlledCPUPercent,
             cpuDeltaNanoseconds: nil,
             wallDuration: nil,
             deadlineLateness: nil,
@@ -1831,55 +1655,31 @@ actor ProcessController {
             return
         }
 
-        let limitPercent = selection.controlledLimit
+        let limitPercent = selection.controlledLimitPercent
         let now = clock.now()
         guard let nowCPU = await readCPUTime(
             for: controlledProcesses,
             identifier: identifier
         ) else { return }
-        let gpuLimitWatts = controlSet.gpuLimitWatts
-        // Reading GPU busy time walks the graphics registry, and the counter
-        // itself only advances as command buffers finish. So the GPU pass reads
-        // once per measurement window, never once per pulse.
-        let existingGPUWindow = limitRuntimes[identifier].map {
-            ProcessControlMath.timeInterval($0.lastGPUAccountingAt.duration(to: now))
-        }
-        let measuresGPUNow = gpuLimitWatts != nil
-            && (existingGPUWindow ?? .infinity) >= Self.gpuMeasurementWindow
-        let nowGPU = measuresGPUNow ? readGPUTime(for: controlledProcesses) : 0
 
         if limitRuntimes[identifier] == nil {
             let initialUsage = ProcessControlMath.normalizedCPUPercent(
-                selection.controlledDemand
+                selection.controlledCPUPercent
             )
-            let initialGPUWatts = max(0, controlSet.gpuUsageWatts ?? 0)
-            let startsAboveLimit = (scope.enforcesCPU && initialUsage > limitPercent)
-                || GPUAccounting.exceedsLimit(
-                    measuredWatts: initialGPUWatts,
-                    limitWatts: gpuLimitWatts
-                )
+            let startsAboveLimit = initialUsage > limitPercent
             let runtime = LimitRuntime(
                 lastCPUNanoseconds: nowCPU,
-                lastGPUNanoseconds: nowGPU,
                 lastAccountingAt: now,
-                lastGPUAccountingAt: now,
                 runStartedAt: nil,
                 estimatedFullSpeedCPU: max(initialUsage, limitPercent, 1),
-                estimatedFullSpeedGPUWatts: GPUAccounting.estimatedFullSpeedWatts(
-                    limitWatts: gpuLimitWatts,
-                    measuredWatts: initialGPUWatts,
-                    previousEstimate: nil
-                ),
                 lastMeasuredCPUPercent: initialUsage,
-                lastMeasuredGPUWatts: initialGPUWatts,
                 dutyFactor: 0,
                 hasActivatedLimit: startsAboveLimit,
                 scheduledStopDuration: 0,
                 stoppedAt: nil,
                 generation: 1,
                 phase: startsAboveLimit ? .running : .observing,
-                processIdentities: controlledProcesses,
-                scope: scope
+                processIdentities: controlledProcesses
             )
             limitRuntimes[identifier] = runtime
             scheduleLimitObservation(
@@ -1961,7 +1761,7 @@ actor ProcessController {
         let measuredCPU: Double
         if let existingRuntime, existingRuntime.runStartedAt == nil {
             measuredCPU = existingRuntime.lastMeasuredCPUPercent
-                ?? selection.controlledDemand
+                ?? selection.controlledCPUPercent
         } else if let existingRuntime {
             let elapsed = max(
                 0,
@@ -1974,45 +1774,18 @@ actor ProcessController {
                     / (elapsed * 1_000_000_000)
                     * 100
             } else {
-                measuredCPU = selection.controlledDemand
+                measuredCPU = selection.controlledCPUPercent
             }
         } else {
-            measuredCPU = selection.controlledDemand
+            measuredCPU = selection.controlledCPUPercent
         }
         let usage = ProcessControlMath.normalizedCPUPercent(measuredCPU)
-        // The GPU pass prices the share the controlled processes kept the GPU
-        // busy over the measurement window. While a pulse stops the app the
-        // counter stands still, so the window covers stop and run together and
-        // reports the average power the limit is meant to hold.
-        let closedGPUWindow: GPUAccounting.ClosedWindow?
-        if measuresGPUNow,
-           let existingRuntime,
-           let scale = controlSet.gpuScale,
-           let window = existingGPUWindow,
-           window > 0,
-           nowGPU >= existingRuntime.lastGPUNanoseconds {
-            closedGPUWindow = GPUAccounting.ClosedWindow(
-                busyDeltaNanoseconds: nowGPU - existingRuntime.lastGPUNanoseconds,
-                duration: window,
-                scale: scale
-            )
-        } else {
-            closedGPUWindow = nil
-        }
-        let gpuUsage = GPUAccounting.measuredWatts(
-            closedWindow: closedGPUWindow,
-            carriedWatts: gpuLimitWatts != nil
-                ? existingRuntime?.lastMeasuredGPUWatts
-                : nil,
-            selectionWatts: controlSet.gpuUsageWatts
-        )
         let previousDutyFactor = existingRuntime?.dutyFactor ?? 0
         let controlPeriod = ProcessControlMath.controlPeriod(
             usage: usage,
             previousDutyFactor: previousDutyFactor
         )
-        let startsAboveLimit = (scope.enforcesCPU && usage > limitPercent)
-            || GPUAccounting.exceedsLimit(measuredWatts: gpuUsage, limitWatts: gpuLimitWatts)
+        let startsAboveLimit = usage > limitPercent
         let hasActivatedLimit = existingRuntime?.hasActivatedLimit == true
             || startsAboveLimit
         let estimatedFullSpeedCPU = max(
@@ -2021,28 +1794,16 @@ actor ProcessController {
             limitPercent,
             1
         )
-        let estimatedFullSpeedGPU = GPUAccounting.estimatedFullSpeedWatts(
-            limitWatts: gpuLimitWatts,
-            measuredWatts: gpuUsage,
-            previousEstimate: existingRuntime?.estimatedFullSpeedGPUWatts
-        )
-        let cpuDutyFactor = hasActivatedLimit && scope.enforcesCPU
+        let dutyFactor = hasActivatedLimit
             ? ProcessControlMath.requiredDutyFactor(
-                estimatedFullSpeedUsage: estimatedFullSpeedCPU,
+                estimatedFullSpeedCPU: estimatedFullSpeedCPU,
                 limitPercent: limitPercent
             )
             : 0
-        let gpuDutyFactor = GPUAccounting.dutyFactor(
-            hasActivatedLimit: hasActivatedLimit,
-            limitWatts: gpuLimitWatts,
-            estimatedFullSpeedWatts: estimatedFullSpeedGPU
-        )
-        let dutyFactor = max(cpuDutyFactor, gpuDutyFactor)
 
         var runtime = existingRuntime ?? LimitRuntime(
             lastCPUNanoseconds: nowCPU,
             lastAccountingAt: now,
-            lastGPUAccountingAt: now,
             runStartedAt: now,
             estimatedFullSpeedCPU: max(usage, limitPercent, 1),
             lastMeasuredCPUPercent: usage,
@@ -2059,12 +1820,6 @@ actor ProcessController {
         runtime.runStartedAt = now
         runtime.estimatedFullSpeedCPU = estimatedFullSpeedCPU
         runtime.lastMeasuredCPUPercent = usage
-        if measuresGPUNow {
-            runtime.lastGPUNanoseconds = nowGPU
-            runtime.lastGPUAccountingAt = now
-        }
-        runtime.estimatedFullSpeedGPUWatts = estimatedFullSpeedGPU
-        runtime.lastMeasuredGPUWatts = gpuUsage
         runtime.dutyFactor = dutyFactor
         runtime.hasActivatedLimit = hasActivatedLimit
         runtime.scheduledStopDuration = dutyFactor
@@ -2072,7 +1827,6 @@ actor ProcessController {
         runtime.generation = ProcessControlMath.nextGeneration(after: runtime.generation)
         runtime.phase = hasActivatedLimit ? .running : .observing
         runtime.processIdentities = controlledProcesses
-        runtime.scope = scope
         let generation = runtime.generation
         limitRuntimes[identifier] = runtime
         limitDeadlines.remove(identifier: identifier)
@@ -2345,12 +2099,12 @@ actor ProcessController {
             return false
         }
 
-        let revisedControlSet = limitControlSet(
+        let revisedSelection = selectLimitTargets(
             for: app,
-            limitPercent: requestedLimitPercent,
-            scope: limitRuntimes[identifier]?.scope ?? .cpuAndGPU
+            limitPercent: requestedLimitPercent
         )
-        if revisedControlSet.controlledProcesses != processes {
+        limitSelections[identifier] = revisedSelection
+        if revisedSelection.controlledProcesses != processes {
             if !activeDownloadProcesses.isEmpty {
                 await recordPreventedStop(
                     activeDownloadProcesses,
@@ -2360,11 +2114,7 @@ actor ProcessController {
             }
             limitDeadlines.remove(identifier: identifier)
             limitRuntimes.removeValue(forKey: identifier)
-            await runLimitCycle(
-                for: app,
-                limitPercent: requestedLimitPercent,
-                scope: revisedControlSet.scope
-            )
+            await runLimitCycle(for: app, limitPercent: requestedLimitPercent)
             return false
         }
         return true
@@ -2499,34 +2249,25 @@ actor ProcessController {
 
     private func maintainLimitCycle(
         for app: ProcessControlTarget,
-        limitPercent requestedLimitPercent: Double,
-        scope: LimitScope
+        limitPercent requestedLimitPercent: Double
     ) async {
         guard workIsCurrent else { return }
         let identifier = app.bundleIdentifier
-        let controlSet = limitControlSet(
+        let selection = selectLimitTargets(
             for: app,
-            limitPercent: requestedLimitPercent,
-            scope: scope
+            limitPercent: requestedLimitPercent
         )
+        limitSelections[identifier] = selection
         guard let runtime = limitRuntimes[identifier] else {
-            await runLimitCycle(
-                for: app,
-                limitPercent: requestedLimitPercent,
-                scope: scope
-            )
+            await runLimitCycle(for: app, limitPercent: requestedLimitPercent)
             return
         }
 
-        if runtime.processIdentities != controlSet.controlledProcesses {
+        if runtime.processIdentities != selection.controlledProcesses {
             limitPulseArbiter.release(identifier: identifier)
             limitDeadlines.remove(identifier: identifier)
             limitRuntimes.removeValue(forKey: identifier)
-            await runLimitCycle(
-                for: app,
-                limitPercent: requestedLimitPercent,
-                scope: scope
-            )
+            await runLimitCycle(for: app, limitPercent: requestedLimitPercent)
             return
         }
 
@@ -2559,11 +2300,7 @@ actor ProcessController {
               rules[identifier]?.action == .limit else {
             return
         }
-        await runLimitCycle(
-            for: currentApp,
-            limitPercent: limitPercent,
-            scope: runtime.scope
-        )
+        await runLimitCycle(for: currentApp, limitPercent: limitPercent)
     }
 
     private func limitControlIsCurrent(
@@ -3145,21 +2882,6 @@ actor ProcessController {
         }
     }
 
-    /// Accumulated GPU busy nanoseconds of the controlled processes.
-    ///
-    /// The registry read is scoped to these processes, so it stays cheap enough
-    /// to run at every pulse boundary. A process without a GPU client simply
-    /// contributes nothing.
-    private func readGPUTime(for processes: Set<ProcessIdentity>) -> UInt64 {
-        guard !processes.isEmpty else { return 0 }
-        let counters = gpuUsageReader.accumulatedBusyNanoseconds(
-            for: Set(processes.map(\.pid))
-        )
-        return counters.values.reduce(0) {
-            $0.addingReportingOverflow($1).partialValue
-        }
-    }
-
     private func setStatus(_ status: ManagementStatus, for identifier: String) async {
         guard workIsCurrent else { return }
         let previous = statuses[identifier] ?? .normal
@@ -3178,14 +2900,7 @@ actor ProcessController {
         for identifier: String,
         fallback: Double
     ) -> ManagementStatus {
-        let rule = rules[identifier]
-        // A rule that carries only the GPU ceiling never limits CPU percent, so
-        // reporting one would be wrong even before a cycle exists.
-        if let watts = rule?.gpuLimitWatts,
-           rule?.limitsCPU == false || limitRuntimes[identifier]?.scope == .gpuOnly {
-            return .gpuLimited(watts)
-        }
-        let requestedLimit = rule?.limitPercent ?? fallback
+        let requestedLimit = rules[identifier]?.limitPercent ?? fallback
         if limitSelections[identifier]?.targetIsReachable == false {
             return .limitedWithProtectedProcesses(requestedLimit)
         }
@@ -3200,7 +2915,6 @@ actor ProcessController {
             return limitStatus(for: identifier, fallback: fallback)
         }
         if rules[identifier]?.usesLowerCPUPriority == true,
-           limitRuntimes[identifier]?.scope != .gpuOnly,
            loweredByTempra[identifier]?.isEmpty == false {
             return .lowerPriority
         }
@@ -3369,14 +3083,6 @@ actor ProcessController {
         let appIsFrontmost = await isFrontmost(app)
         guard workIsCurrent else { return }
         if appIsFrontmost {
-            if await maintainForegroundGPULimit(
-                rule: rule,
-                app: app,
-                advancesLimitCycle: true
-            ) {
-                return
-            }
-            guard workIsCurrent else { return }
             if await restore(
                 identifier: deadline.identifier,
                 resetDelay: true,
@@ -3393,11 +3099,7 @@ actor ProcessController {
             return
         }
 
-        await runLimitCycle(
-            for: app,
-            limitPercent: rule.limitPercent,
-            scope: limitScope(for: rule)
-        )
+        await runLimitCycle(for: app, limitPercent: rule.limitPercent)
     }
 
     private func scheduleNextTick(now: Date = Date()) {
@@ -3410,15 +3112,9 @@ actor ProcessController {
         }
 
         for (identifier, rule) in rules where rule.hasBehavior {
-            guard let app = groups[identifier] else { continue }
-            if app.isFrontmost || app.isProtectedByForegroundOverlay {
-                // A GPU ceiling the user keeps on in front still needs the limit
-                // cadence. Every other action waits for the app to leave front.
-                if app.isFrontmost,
-                   !app.isProtectedByForegroundOverlay,
-                   limitsGPUInFront(rule) {
-                    include(visibilityRecheckInterval)
-                }
+            guard let app = groups[identifier],
+                  !app.isFrontmost,
+                  !app.isProtectedByForegroundOverlay else {
                 continue
             }
             if statuses[identifier] == .unavailable {
@@ -3543,7 +3239,7 @@ actor ProcessController {
         }
         let expectedControlledCPU = min(
             runtime.estimatedFullSpeedCPU,
-            selection.controlledLimit
+            selection.controlledLimitPercent
         )
         return max(0, runtime.estimatedFullSpeedCPU - expectedControlledCPU)
     }

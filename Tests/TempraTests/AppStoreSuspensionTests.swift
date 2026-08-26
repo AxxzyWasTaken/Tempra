@@ -373,6 +373,88 @@ struct AppStoreSuspensionTests {
         }
     }
 
+    @Test("A failed sleep restoration retries automatically after the wake grace")
+    func wakeRetriesFailedLifecycleRestoration() async throws {
+        try await withDefaults { defaults in
+            let identifier = "example.wakeretry"
+            let persistence = AppPersistence(defaults: defaults)
+            try persistence.saveRules([identifier: AppRule(
+                bundleIdentifier: identifier,
+                displayName: "Example",
+                action: .pause
+            )])
+            let clock = ManualSuspensionExpirationClock(now: Date())
+            let processSystem = LifecycleRetryProcessSystem()
+            let identity = ProcessIdentity(
+                pid: getpid(),
+                startTimeMicroseconds: 1_000_000
+            )
+            let coordinator = ProcessManagementCoordinator(
+                controller: ProcessController(
+                    system: processSystem,
+                    crashWatchdog: SuspensionTestProcessCrashWatchdog(),
+                    frontmostProvider: { nil },
+                    windowSnapshotProvider: {
+                        WindowVisibilitySnapshot(windowsFrontToBack: [], screenBounds: [])
+                    }
+                ),
+                processWatcher: ManagedProcessWatcher(
+                    audioMonitor: SuspensionTestAudioMonitor()
+                )
+            )
+            let store = try AppStore(
+                persistence: persistence,
+                managementCoordinator: coordinator,
+                monitoringService: SuspensionTestMonitoringService(),
+                launchAtLoginController: SuspensionTestLaunchAtLoginController(),
+                startsMonitoring: false,
+                suspensionClock: clock.clock,
+                persistenceErrorHandler: { _ in }
+            )
+            store.applyMonitoringSample(
+                MonitoringSample(
+                    generation: 1,
+                    systemCPU: nil,
+                    apps: [ManagedApp(
+                        bundleIdentifier: identifier,
+                        name: "Example",
+                        bundleURL: nil,
+                        processIdentifiers: [identity.pid],
+                        processIdentities: [identity],
+                        processSamples: [ManagedProcessSample(
+                            identity: identity,
+                            cpuPercent: 50,
+                            isMainProcess: true
+                        )],
+                        launchedAt: Date().addingTimeInterval(-120),
+                        cpuPercent: 50,
+                        isFrontmost: false,
+                        isHidden: true,
+                        isPlayingAudio: false,
+                        isSystemProcess: false,
+                        windowVisibility: .hiddenOrMinimized,
+                        status: .normal
+                    )],
+                    didRefreshApplications: true
+                ),
+                demand: .dormant
+            )
+            #expect(await eventually { processSystem.stopCount >= 1 })
+
+            processSystem.failResumes(3)
+            await store.suspendManagement(for: .systemSleep)
+            #expect(store.lifecycleRestorationFailure != nil)
+
+            store.resumeManagement(after: .systemSleep)
+            #expect(await eventually { clock.pendingSleepCount == 1 })
+
+            clock.advance(by: 5)
+            #expect(await eventually { store.lifecycleRestorationFailure == nil })
+
+            _ = await store.shutdown()
+        }
+    }
+
     private func eventually(
         _ condition: @escaping @MainActor @Sendable () -> Bool
     ) async -> Bool {
@@ -483,6 +565,79 @@ private actor SuspensionTestAudioMonitor: AudioActivityMonitoring {
     ) {}
 
     func stop(revision: UInt64) {}
+}
+
+private final class LifecycleRetryProcessSystem: ProcessSystemControlling, @unchecked Sendable {
+    private let lock = NSLock()
+    private var stopAttempts = 0
+    private var resumeFailuresRemaining = 0
+
+    var stopCount: Int {
+        withLock { stopAttempts }
+    }
+
+    func failResumes(_ count: Int) {
+        withLock { resumeFailuresRemaining = max(0, count) }
+    }
+
+    func totalCPUTime(for processes: Set<ProcessIdentity>) async throws -> UInt64 {
+        0
+    }
+
+    func networkActivity(for process: ProcessIdentity) async -> ProcessNetworkActivity {
+        .inactive
+    }
+
+    func criticalFileActivity(
+        for process: ProcessIdentity
+    ) async -> ProcessCriticalFileActivity {
+        .inactive
+    }
+
+    func stop(
+        _ processes: Set<ProcessIdentity>,
+        automaticResumeAfter: TimeInterval?
+    ) async -> ProcessOperationResult {
+        withLock {
+            stopAttempts += 1
+            return ProcessOperationResult(applied: processes)
+        }
+    }
+
+    func resume(_ processes: Set<ProcessIdentity>) async -> ProcessOperationResult {
+        withLock {
+            if resumeFailuresRemaining > 0 {
+                resumeFailuresRemaining -= 1
+                return ProcessOperationResult(
+                    failed: processes,
+                    failureDescription: "The process resume request failed."
+                )
+            }
+            return ProcessOperationResult(applied: processes)
+        }
+    }
+
+    func lowerPriority(_ processes: Set<ProcessIdentity>) async -> ProcessOperationResult {
+        ProcessOperationResult(applied: processes)
+    }
+
+    func restorePriority(_ processes: Set<ProcessIdentity>) async -> ProcessOperationResult {
+        ProcessOperationResult(applied: processes)
+    }
+
+    func applyLimitPriority(_ processes: Set<ProcessIdentity>) async -> ProcessOperationResult {
+        ProcessOperationResult(applied: processes)
+    }
+
+    func terminate(_ processes: Set<ProcessIdentity>) async -> ProcessOperationResult {
+        ProcessOperationResult(applied: processes)
+    }
+
+    private func withLock<Result>(_ operation: () -> Result) -> Result {
+        lock.lock()
+        defer { lock.unlock() }
+        return operation()
+    }
 }
 
 private actor SuspensionTestProcessCrashWatchdog:
