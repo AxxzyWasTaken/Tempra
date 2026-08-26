@@ -522,7 +522,8 @@ struct ProcessAssignmentResolver {
 
     static func assignments(
         processes: [Process],
-        bundles: [Bundle]
+        bundles: [Bundle],
+        responsibleProcessIdentifier: (pid_t) -> pid_t? = { _ in nil }
     ) -> [String: [pid_t]] {
         var mainPIDMap: [pid_t: String] = [:]
         for bundle in bundles {
@@ -537,6 +538,10 @@ struct ProcessAssignmentResolver {
             processes: processes,
             mainPIDMap: mainPIDMap
         )
+        var pathByPID: [pid_t: String] = [:]
+        for process in processes where !process.path.isEmpty {
+            pathByPID[process.pid] = process.path
+        }
         var result: [String: [pid_t]] = [:]
 
         for process in processes {
@@ -546,6 +551,16 @@ struct ProcessAssignmentResolver {
             }
             if identifier == nil {
                 identifier = ancestryResolver.identifier(forParent: process.parentPID)
+            }
+            // Helpers such as WebKit XPC services are spawned by launchd, so
+            // neither their path nor their ancestry reaches the app. The
+            // process macOS holds responsible for them does.
+            if identifier == nil,
+               let responsible = responsibleProcessIdentifier(process.pid) {
+                identifier = mainPIDMap[responsible]
+                if identifier == nil, let responsiblePath = pathByPID[responsible] {
+                    identifier = pathIndex.longestPrefixIdentifier(for: responsiblePath)
+                }
             }
             if let identifier, bundleIdentifiers.contains(identifier) {
                 result[identifier, default: []].append(process.pid)
@@ -718,6 +733,7 @@ final class ProcessMonitor {
     private let currentUserID: uid_t
     private let uptime: () -> TimeInterval
     private let audioProcessIdentifiers: () -> Set<pid_t>
+    private let responsibleProcessIdentifier: (pid_t) -> pid_t?
     private let networkActivity: @Sendable (ProcessIdentity) -> ProcessNetworkActivity
     private let windowSnapshot: () -> WindowVisibilitySnapshot?
     private let processTableReader: ProcessTableReader
@@ -733,6 +749,9 @@ final class ProcessMonitor {
         uptime: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime },
         audioProcessIdentifiers: @escaping () -> Set<pid_t> = {
             AudioOutputProbe.playingProcessIdentifiers()
+        },
+        responsibleProcessIdentifier: @escaping (pid_t) -> pid_t? = {
+            ProcessResponsibilityResolver.responsibleProcessIdentifier(for: $0)
         },
         networkActivity: @escaping @Sendable (ProcessIdentity) -> ProcessNetworkActivity = {
             ProcessNetworkActivityProbe().activity(for: $0)
@@ -752,6 +771,7 @@ final class ProcessMonitor {
         self.currentUserID = currentUserID
         self.uptime = uptime
         self.audioProcessIdentifiers = audioProcessIdentifiers
+        self.responsibleProcessIdentifier = responsibleProcessIdentifier
         self.networkActivity = networkActivity
         self.windowSnapshot = windowSnapshot
         self.processTableReader = processTableReader
@@ -1394,7 +1414,8 @@ final class ProcessMonitor {
                     path: $0.url.path,
                     mainPIDs: $0.mainPIDs
                 )
-            }
+            },
+            responsibleProcessIdentifier: responsibleProcessIdentifier
         )
     }
 

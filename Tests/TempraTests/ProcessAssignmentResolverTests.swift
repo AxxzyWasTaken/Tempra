@@ -51,6 +51,78 @@ struct ProcessAssignmentResolverTests {
         })
     }
 
+    @Test("A launchd-spawned helper is assigned through its responsible process")
+    func responsibleProcessAssignsLaunchdHelper() {
+        let processes = [
+            process(10, parent: 1, path: hostExecutable),
+            process(
+                90,
+                parent: 1,
+                path: "/System/Library/Frameworks/WebKit.framework/Helper"
+            ),
+        ]
+
+        let assignments = normalized(ProcessAssignmentResolver.assignments(
+            processes: processes,
+            bundles: fixtureBundles(),
+            responsibleProcessIdentifier: { $0 == 90 ? 10 : nil }
+        ))
+
+        #expect(assignments[hostIdentifier] == [10, 90])
+    }
+
+    @Test("A helper responsible for a non-main bundle process assigns by its path")
+    func responsibleProcessResolvesThroughBundlePath() {
+        let processes = [
+            process(10, parent: 1, path: hostExecutable),
+            process(12, parent: 10, path: hostPath + "/Contents/MacOS/Renderer"),
+            process(90, parent: 1, path: "/usr/libexec/media-helper"),
+        ]
+
+        let assignments = normalized(ProcessAssignmentResolver.assignments(
+            processes: processes,
+            bundles: fixtureBundles(),
+            responsibleProcessIdentifier: { $0 == 90 ? 12 : nil }
+        ))
+
+        #expect(assignments[hostIdentifier] == [10, 12, 90])
+    }
+
+    @Test("A helper responsible for an unmanaged process stays unassigned")
+    func unrelatedResponsibleProcessRemainsUnassigned() {
+        let processes = [
+            process(10, parent: 1, path: hostExecutable),
+            process(90, parent: 1, path: "/usr/libexec/media-helper"),
+        ]
+
+        let assignments = normalized(ProcessAssignmentResolver.assignments(
+            processes: processes,
+            bundles: fixtureBundles(),
+            responsibleProcessIdentifier: { $0 == 90 ? 999 : nil }
+        ))
+
+        #expect(assignments[hostIdentifier] == [10])
+        #expect(!assignments.values.contains { $0.contains(90) })
+    }
+
+    @Test("Direct assignment wins before the responsibility fallback")
+    func directAssignmentPrecedesResponsibility() {
+        let processes = [
+            process(10, parent: 1, path: hostExecutable),
+            process(20, parent: 1, path: nestedExecutable),
+            process(30, parent: 10, path: ""),
+        ]
+
+        let assignments = normalized(ProcessAssignmentResolver.assignments(
+            processes: processes,
+            bundles: fixtureBundles(),
+            responsibleProcessIdentifier: { _ in 20 }
+        ))
+
+        #expect(assignments[hostIdentifier] == [10, 30])
+        #expect(assignments[nestedIdentifier] == [20])
+    }
+
     @Test("Arbitrary process order matches the previous assignment algorithm")
     func arbitraryOrderMatchesLegacy() {
         let bundles = fixtureBundles()
