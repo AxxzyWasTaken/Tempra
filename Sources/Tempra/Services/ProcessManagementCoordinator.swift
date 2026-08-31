@@ -273,7 +273,7 @@ final class ProcessManagementCoordinator {
         if snapshot.revision == revision {
             apply(snapshot)
         }
-        return await controller.currentRestorationResult()
+        return await controller.restorationResult()
     }
 
     func resumeAfterSystemTransition() async {

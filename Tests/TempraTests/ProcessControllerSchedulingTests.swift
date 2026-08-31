@@ -805,10 +805,10 @@ struct ProcessControllerSchedulingTests {
         processSystem.failResume(for: controlledProcess, attempts: 3)
 
         _ = await controller.suspendForSystemTransition()
-        #expect(!(await controller.currentRestorationResult()).succeeded)
+        #expect(!(await controller.restorationResult()).succeeded)
 
         _ = await controller.suspendForSystemTransition()
-        #expect((await controller.currentRestorationResult()).succeeded)
+        #expect((await controller.restorationResult()).succeeded)
         #expect(processSystem.resumeAttemptCount(for: controlledProcess) == 4)
         await controller.shutdown()
     }
@@ -845,7 +845,7 @@ struct ProcessControllerSchedulingTests {
 
         _ = await controller.suspendForSystemTransition()
         let failure = try #require(
-            (await controller.currentRestorationResult()).failures.first
+            (await controller.restorationResult()).failures.first
         )
 
         #expect(
@@ -896,7 +896,7 @@ struct ProcessControllerSchedulingTests {
 
         processSystem.clearOperationHistory()
         let suspended = await controller.suspendForSystemTransition()
-        let restoration = await controller.currentRestorationResult()
+        let restoration = await controller.restorationResult()
 
         #expect(restoration.succeeded)
         #expect(suspended.statuses[identifier] == nil)
@@ -1641,7 +1641,7 @@ struct ProcessControllerSchedulingTests {
             revision: 2
         )
 
-        #expect((await controller.currentRestorationResult()).succeeded)
+        #expect((await controller.restorationResult()).succeeded)
         let restoration = await controller.shutdown()
         #expect(restoration.succeeded)
     }
@@ -2883,7 +2883,7 @@ struct ProcessControllerSchedulingTests {
         let shutdown = await shutdownTask.value
         #expect(shutdown.succeeded)
         #expect((await controller.currentSnapshot()).statuses[identifier] == nil)
-        #expect((await controller.currentRestorationResult()).succeeded)
+        #expect((await controller.restorationResult()).succeeded)
     }
 
     @Test("Activation blocks new limit pulses until a fresh background sample arrives")

@@ -734,10 +734,6 @@ actor ProcessController {
         snapshot()
     }
 
-    func currentRestorationResult() -> ProcessRestorationResult {
-        restorationResult()
-    }
-
     func recentSignalEvents() async -> [ProcessControlSignalEvent] {
         await signalTelemetry.snapshot()
     }
@@ -2736,7 +2732,7 @@ actor ProcessController {
         }
     }
 
-    private func restorationResult() -> ProcessRestorationResult {
+    func restorationResult() -> ProcessRestorationResult {
         ProcessRestorationState.result(
             stoppedByIdentifier: stoppedByTempra,
             backgroundedByIdentifier: loweredByTempra,
