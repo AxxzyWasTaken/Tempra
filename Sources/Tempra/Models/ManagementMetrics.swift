@@ -71,21 +71,6 @@ struct CPUHistorySample: Codable, Equatable, Identifiable {
         ) ?? .unknown
         interventionCount = try container.decode(Int.self, forKey: .interventionCount)
     }
-
-    func encode(to encoder: Encoder) throws {
-        var container = encoder.container(keyedBy: CodingKeys.self)
-        try container.encode(date, forKey: .date)
-        try container.encode(systemCPUPercent, forKey: .systemCPUPercent)
-        try container.encode(performanceCPUPercent, forKey: .performanceCPUPercent)
-        try container.encode(efficiencyCPUPercent, forKey: .efficiencyCPUPercent)
-        try container.encode(estimatedSavedCPUPercent, forKey: .estimatedSavedCPUPercent)
-        if !hasEstimatedSavedCPUMeasurement {
-            try container.encode(false, forKey: .hasEstimatedSavedCPUMeasurement)
-        }
-        try container.encodeIfPresent(cpuTemperatureCelsius, forKey: .cpuTemperatureCelsius)
-        try container.encode(thermalPressure, forKey: .thermalPressure)
-        try container.encode(interventionCount, forKey: .interventionCount)
-    }
 }
 
 struct AppCPUHistorySample: Codable, Equatable, Identifiable {
