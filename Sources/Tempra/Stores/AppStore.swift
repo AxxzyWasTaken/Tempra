@@ -219,9 +219,6 @@ final class AppStore: ObservableObject {
     func save(_ rule: AppRule) {
         var normalized = rule
         normalized.limitPercent = CPULimitRange.clamped(normalized.limitPercent)
-        if normalized.action == .pause {
-            normalized.lowersCPUPriority = false
-        }
         if normalized.applicationURL == nil {
             normalized.applicationURL = apps.first {
                 $0.bundleIdentifier == normalized.bundleIdentifier
@@ -263,9 +260,6 @@ final class AppStore: ObservableObject {
         rule.displayName = displayName
         rule.applicationURL = applicationURL ?? rule.applicationURL
         rule.action = action
-        if action == .pause {
-            rule.lowersCPUPriority = false
-        }
         rule.limitPercent = limitPercent
         rule.delaySeconds = delaySeconds
         rule.isEnabled = true
