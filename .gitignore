@@ -3,5 +3,6 @@ dist/
 .DS_Store
 *.xcuserstate
 .freebuff/
+.hermes/
 outputs/
 design-qa*
