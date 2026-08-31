@@ -34,22 +34,16 @@ enum ProcessResponsibilityResolver {
 
 enum AudioOutputProbe {
     static func activity(
-        for processIdentifiers: Set<pid_t>
-    ) -> ProcessAudioActivity {
-        activity(
-            for: processIdentifiers,
-            responsibleProcessIdentifier:
-                ProcessResponsibilityResolver.responsibleProcessIdentifier
-        )
-    }
-
-    static func activity(
         for processIdentifiers: Set<pid_t>,
-        responsibleProcessIdentifier: (pid_t) -> pid_t?
+        responsibleProcessIdentifier: (pid_t) -> pid_t? =
+            ProcessResponsibilityResolver.responsibleProcessIdentifier(for:)
     ) -> ProcessAudioActivity {
         guard !processIdentifiers.isEmpty else { return .inactive }
         var hadReadFailure = false
 
+        // The direct lookup answers the common case without enumerating every
+        // audio process, and it is the only place a per-process read failure
+        // is observable.
         for processIdentifier in processIdentifiers.sorted() {
             let processObject = LiveAudioActivityBackend.processObjectResult(
                 for: processIdentifier
@@ -72,52 +66,26 @@ enum AudioOutputProbe {
         // Audio can come from helpers outside the app's own process set, such
         // as launchd-spawned XPC services. Attribute every playing process to
         // its responsible process and match again.
-        var playing: Set<pid_t> = []
-        for processObject in processObjects()
-        where isProducingOutput(processObject: processObject) {
-            guard let playingIdentifier = processIdentifier(for: processObject) else {
-                continue
-            }
-            playing.insert(playingIdentifier)
-        }
-        if playingProcessesMatch(
-            playingProcessIdentifiers: playing,
-            watchedProcessIdentifiers: processIdentifiers,
+        let playing = playingProcessIdentifiers(
             responsibleProcessIdentifier: responsibleProcessIdentifier
-        ) {
+        )
+        if !processIdentifiers.isDisjoint(with: playing) {
             return .active
         }
 
         return hadReadFailure ? .unknown : .inactive
     }
 
-    static func playingProcessesMatch(
-        playingProcessIdentifiers: Set<pid_t>,
-        watchedProcessIdentifiers: Set<pid_t>,
-        responsibleProcessIdentifier: (pid_t) -> pid_t?
-    ) -> Bool {
-        playingProcessIdentifiers.contains { playingIdentifier in
-            watchedProcessIdentifiers.contains(playingIdentifier)
-                || responsibleProcessIdentifier(playingIdentifier).map(
-                    watchedProcessIdentifiers.contains
-                ) == true
-        }
-    }
-
-    static func playingProcessIdentifiers() -> Set<pid_t> {
-        playingProcessIdentifiers(
-            responsibleProcessIdentifier:
-                ProcessResponsibilityResolver.responsibleProcessIdentifier
-        )
-    }
-
     static func playingProcessIdentifiers(
-        responsibleProcessIdentifier: (pid_t) -> pid_t?
+        responsibleProcessIdentifier: (pid_t) -> pid_t? =
+            ProcessResponsibilityResolver.responsibleProcessIdentifier(for:)
     ) -> Set<pid_t> {
         var playing: Set<pid_t> = []
-        for processObject in processObjects()
-        where isProducingOutput(processObject: processObject) {
-            guard let playingIdentifier = processIdentifier(for: processObject) else {
+        for processObject in processObjects() {
+            let output = runningOutputState(processObject: processObject)
+            guard output.status == noErr,
+                  output.isRunning,
+                  let playingIdentifier = processIdentifier(for: processObject) else {
                 continue
             }
             playing.insert(playingIdentifier)
@@ -188,11 +156,6 @@ enum AudioOutputProbe {
             &processIdentifier
         )
         return status == noErr && processIdentifier > 0 ? processIdentifier : nil
-    }
-
-    private static func isProducingOutput(processObject: AudioObjectID) -> Bool {
-        let output = runningOutputState(processObject: processObject)
-        return output.status == noErr && output.isRunning
     }
 
     private static func runningOutputState(

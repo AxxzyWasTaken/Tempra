@@ -4,42 +4,6 @@ import Testing
 
 @Suite("Audio output attribution")
 struct AudioOutputProbeTests {
-    @Test("A playing process that is directly watched matches")
-    func directMatch() {
-        #expect(AudioOutputProbe.playingProcessesMatch(
-            playingProcessIdentifiers: [42],
-            watchedProcessIdentifiers: [42, 43],
-            responsibleProcessIdentifier: { _ in nil }
-        ))
-    }
-
-    @Test("A playing helper matches through its responsible process")
-    func responsibleProcessMatch() {
-        #expect(AudioOutputProbe.playingProcessesMatch(
-            playingProcessIdentifiers: [99],
-            watchedProcessIdentifiers: [42, 43],
-            responsibleProcessIdentifier: { $0 == 99 ? 42 : nil }
-        ))
-    }
-
-    @Test("A playing helper responsible for an unwatched app does not match")
-    func unrelatedResponsibleProcessDoesNotMatch() {
-        #expect(!AudioOutputProbe.playingProcessesMatch(
-            playingProcessIdentifiers: [99],
-            watchedProcessIdentifiers: [42, 43],
-            responsibleProcessIdentifier: { $0 == 99 ? 7 : nil }
-        ))
-    }
-
-    @Test("No playing processes never match")
-    func emptyPlayingSetDoesNotMatch() {
-        #expect(!AudioOutputProbe.playingProcessesMatch(
-            playingProcessIdentifiers: [],
-            watchedProcessIdentifiers: [42],
-            responsibleProcessIdentifier: { _ in 42 }
-        ))
-    }
-
     @Test("Playing pids are expanded with their responsible processes")
     func expansionAddsResponsibleProcesses() {
         let expanded = AudioOutputProbe.expandingResponsibleProcesses(
@@ -56,6 +20,27 @@ struct AudioOutputProbeTests {
             responsibleProcessIdentifier: { _ in nil }
         )
         #expect(expanded == [10])
+    }
+
+    @Test("Expansion matches a watched app only through its own helpers")
+    func expansionMatchesOnlyTheResponsibleApp() {
+        let watched: Set<pid_t> = [42, 43]
+
+        // A helper macOS holds the watched app responsible for.
+        #expect(!watched.isDisjoint(with: AudioOutputProbe.expandingResponsibleProcesses(
+            [99],
+            responsibleProcessIdentifier: { $0 == 99 ? 42 : nil }
+        )))
+        // A helper belonging to some other app.
+        #expect(watched.isDisjoint(with: AudioOutputProbe.expandingResponsibleProcesses(
+            [99],
+            responsibleProcessIdentifier: { $0 == 99 ? 7 : nil }
+        )))
+        // Nothing is playing.
+        #expect(watched.isDisjoint(with: AudioOutputProbe.expandingResponsibleProcesses(
+            [],
+            responsibleProcessIdentifier: { _ in 42 }
+        )))
     }
 
     @Test("The live responsibility resolver never maps a process to itself")
