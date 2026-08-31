@@ -47,7 +47,7 @@ actor ProcessCrashWatchdog: ProcessCrashWatchdogControlling {
     typealias HelperURLProvider = @Sendable () -> URL?
 
     private static let automaticResumeAcknowledgementTimeout: Duration = .seconds(1)
-    private let guardian: (any ProcessGuardianControlling)?
+    private let guardian: ProcessGuardianClient?
     private let helperURLProvider: HelperURLProvider?
     private let logger = Logger(
         subsystem: Bundle.main.bundleIdentifier ?? "io.github.temperapp.Temper",
@@ -64,7 +64,7 @@ actor ProcessCrashWatchdog: ProcessCrashWatchdogControlling {
     nonisolated let controlsLimitPulseCadence: Bool
 
     init(
-        guardian: any ProcessGuardianControlling = ProcessGuardianClient.shared
+        guardian: ProcessGuardianClient = ProcessGuardianClient.shared
     ) {
         self.guardian = guardian
         helperURLProvider = nil

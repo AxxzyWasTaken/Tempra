@@ -4,25 +4,6 @@ import OSLog
 import ServiceManagement
 import TempraSafety
 
-protocol ProcessGuardianControlling: Sendable {
-    func prepare(_ processes: Set<ProcessIdentity>) async throws
-    func armAutomaticResume(
-        _ intervalsByProcess: [ProcessIdentity: TimeInterval]
-    ) async throws
-    func synchronizeAutomaticResume(
-        _ intervalsByProcess: [ProcessIdentity: TimeInterval]
-    ) async throws
-    func synchronize(_ processes: Set<ProcessIdentity>) async throws
-    func stop(
-        _ processes: Set<ProcessIdentity>,
-        automaticResumeAfter: TimeInterval?
-    ) async -> ProcessOperationResult
-    func resume(_ processes: Set<ProcessIdentity>) async -> ProcessOperationResult
-    func disarm() async throws
-    func renewLeaseIfConnected() async throws
-    func invalidate() async
-}
-
 struct ProcessGuardianProtectionState: Equatable, Sendable {
     private(set) var guardianInstanceID: UUID?
     private(set) var protectedProcesses: Set<ProcessIdentity> = []
@@ -592,7 +573,7 @@ private final class ProcessGuardianLifecycle {
     }
 }
 
-actor ProcessGuardianClient: ProcessGuardianControlling {
+actor ProcessGuardianClient {
     static let shared = ProcessGuardianClient()
 
     private let sessionID = UUID()
@@ -1182,14 +1163,14 @@ actor ProcessGuardianClient: ProcessGuardianControlling {
 
 @MainActor
 final class ProcessGuardianLeaseHeartbeat {
-    private let client: any ProcessGuardianControlling
+    private let client: ProcessGuardianClient
     private let logger = Logger(
         subsystem: ProcessGuardianProtocol.applicationIdentifier,
         category: "ProcessGuardianLease"
     )
     private var task: Task<Void, Never>?
 
-    init(client: any ProcessGuardianControlling = ProcessGuardianClient.shared) {
+    init(client: ProcessGuardianClient = ProcessGuardianClient.shared) {
         self.client = client
     }
 
