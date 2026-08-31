@@ -2,3 +2,6 @@
 dist/
 .DS_Store
 *.xcuserstate
+.freebuff/
+outputs/
+design-qa*
