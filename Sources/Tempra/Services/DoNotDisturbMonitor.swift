@@ -6,11 +6,10 @@ final class DoNotDisturbMonitor {
 
     private static let preferencesDomain = "com.apple.notificationcenterui"
     private let valueProvider: ValueProvider
-    private let cacheInterval: TimeInterval
+    private let cacheInterval: TimeInterval = 5
     private var cachedState: (date: Date, isEnabled: Bool)?
 
     init(
-        cacheInterval: TimeInterval = 5,
         valueProvider: @escaping ValueProvider = { key in
             CFPreferencesCopyAppValue(
                 key as CFString,
@@ -18,7 +17,6 @@ final class DoNotDisturbMonitor {
             )
         }
     ) {
-        self.cacheInterval = max(0, cacheInterval)
         self.valueProvider = valueProvider
     }
 
