@@ -3,6 +3,7 @@ import Testing
 @testable import Tempra
 
 @Suite("App preferences")
+@MainActor
 struct AppPreferencesTests {
     @Test("High CPU notification defaults match the sustained detector")
     func highCPUNotificationDefaults() throws {
@@ -63,9 +64,9 @@ struct AppPreferencesTests {
         preferences.hasPresentedPrivilegedAccessOnboarding = true
         preferences.managementPauseUntil = Date(timeIntervalSince1970: 10_000)
 
-        try AppPreferencesStorage.save(preferences, to: defaults, key: "preferences")
-        let loaded = try AppPreferencesStorage.load(from: defaults, key: "preferences")
-        let restored = try #require(loaded)
+        let persistence = AppPersistence(defaults: defaults)
+        try persistence.savePreferences(preferences)
+        let restored = try persistence.loadPreferences()
 
         #expect(restored == preferences)
         #expect(restored.activeProfile == profile)
@@ -76,13 +77,14 @@ struct AppPreferencesTests {
         let suiteName = "TempraTests.\(UUID().uuidString)"
         let defaults = try #require(UserDefaults(suiteName: suiteName))
         defer { defaults.removePersistentDomain(forName: suiteName) }
+        let persistence = AppPersistence(defaults: defaults)
         var preferences = AppPreferences()
         preferences.highCPUThreshold = .infinity
 
         #expect(throws: AppPersistenceError.self) {
-            try AppPreferencesStorage.save(preferences, to: defaults, key: "preferences")
+            try persistence.savePreferences(preferences)
         }
-        #expect(defaults.object(forKey: "preferences") == nil)
+        #expect(defaults.object(forKey: "temper.preferences.v1") == nil)
     }
 
     @Test("Continuous monitoring migrates to off")
