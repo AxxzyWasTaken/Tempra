@@ -20,6 +20,66 @@ enum ProcessLimitSchedulerModel {
         var generation: UInt64
         var phase: Phase
         var processIdentities: Set<ProcessIdentity>
+
+        /// One control step: measures the CPU drawn since the last accounting
+        /// point and derives the next duty factor, or seeds a runtime from the
+        /// sampled usage when there is none. Pure; the caller decides what to
+        /// do with the result.
+        static func advancing(
+            _ existing: Runtime?,
+            to now: ContinuousClock.Instant,
+            cpuNanoseconds nowCPU: UInt64,
+            sampledCPUPercent: Double,
+            limitPercent: Double,
+            processIdentities: Set<ProcessIdentity>
+        ) -> Runtime {
+            let measuredCPU: Double
+            if let existing, existing.runStartedAt == nil {
+                measuredCPU = existing.lastMeasuredCPUPercent ?? sampledCPUPercent
+            } else if let existing {
+                let elapsed = max(
+                    0,
+                    ProcessControlMath.timeInterval(existing.lastAccountingAt.duration(to: now))
+                )
+                if elapsed > 0, nowCPU >= existing.lastCPUNanoseconds {
+                    measuredCPU = Double(nowCPU - existing.lastCPUNanoseconds)
+                        / (elapsed * 1_000_000_000)
+                        * 100
+                } else {
+                    measuredCPU = sampledCPUPercent
+                }
+            } else {
+                measuredCPU = sampledCPUPercent
+            }
+            let usage = ProcessControlMath.normalizedCPUPercent(measuredCPU)
+            let hasActivatedLimit = existing?.hasActivatedLimit == true || usage > limitPercent
+            let estimatedFullSpeedCPU = max(
+                existing?.estimatedFullSpeedCPU ?? 0,
+                usage,
+                limitPercent,
+                1
+            )
+            let dutyFactor = hasActivatedLimit
+                ? ProcessControlMath.requiredDutyFactor(
+                    estimatedFullSpeedCPU: estimatedFullSpeedCPU,
+                    limitPercent: limitPercent
+                )
+                : 0
+            return Runtime(
+                lastCPUNanoseconds: nowCPU,
+                lastAccountingAt: now,
+                runStartedAt: now,
+                estimatedFullSpeedCPU: estimatedFullSpeedCPU,
+                lastMeasuredCPUPercent: usage,
+                dutyFactor: dutyFactor,
+                hasActivatedLimit: hasActivatedLimit,
+                scheduledStopDuration: dutyFactor,
+                stoppedAt: nil,
+                generation: ProcessControlMath.nextGeneration(after: existing?.generation ?? 0),
+                phase: hasActivatedLimit ? .running : .observing,
+                processIdentities: processIdentities
+            )
+        }
     }
 
     struct Deadline: Sendable {

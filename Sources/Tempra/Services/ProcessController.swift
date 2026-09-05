@@ -17,7 +17,7 @@ private final class ProcessControlSerialExecutor: SerialExecutor {
     }
 }
 
-private final class ProcessControlWakeRegistration: @unchecked Sendable {
+final class ProcessControlWakeRegistration: @unchecked Sendable {
     private let lock = NSLock()
     private var wake: ProcessControlScheduledWake?
     private var isCancelled = false
@@ -56,11 +56,11 @@ actor ProcessController {
 
     @TaskLocal private static var reconciliationContext: ProcessReconciliationContext?
 
-    private typealias LimitPhase = ProcessLimitSchedulerModel.Phase
-    private typealias LimitRuntime = ProcessLimitSchedulerModel.Runtime
-    private typealias LimitDeadline = ProcessLimitSchedulerModel.Deadline
-    private typealias LimitDeadlineQueue = ProcessLimitSchedulerModel.DeadlineQueue
-    private typealias LimitPulseArbiter = ProcessLimitSchedulerModel.PulseArbiter
+    typealias LimitPhase = ProcessLimitSchedulerModel.Phase
+    typealias LimitRuntime = ProcessLimitSchedulerModel.Runtime
+    typealias LimitDeadline = ProcessLimitSchedulerModel.Deadline
+    typealias LimitDeadlineQueue = ProcessLimitSchedulerModel.DeadlineQueue
+    typealias LimitPulseArbiter = ProcessLimitSchedulerModel.PulseArbiter
 
     nonisolated private let serialExecutor = ProcessControlSerialExecutor()
     nonisolated var unownedExecutor: UnownedSerialExecutor {
@@ -72,7 +72,7 @@ actor ProcessController {
         let expiresAt: ContinuousClock.Instant
     }
 
-    private struct AutomaticResumeChange: Sendable {
+    struct AutomaticResumeChange: Sendable {
         let previousIntervals: [ProcessIdentity: TimeInterval]
         let addedProcesses: Set<ProcessIdentity>
 
@@ -87,8 +87,8 @@ actor ProcessController {
         let failureDescription: String?
     }
 
-    private let system: any ProcessSystemControlling
-    private let crashWatchdog: any ProcessCrashWatchdogControlling
+    let system: any ProcessSystemControlling
+    let crashWatchdog: any ProcessCrashWatchdogControlling
     private let frontmostProvider: FrontmostProvider
     private let activateApplication: ApplicationAction
     private let hideApplication: ApplicationAction
@@ -96,8 +96,8 @@ actor ProcessController {
     private let relaunchApplication: AsyncApplicationAction
     private let controlInterval: TimeInterval
     private let minimumRunDuration: TimeInterval
-    private let clock: ProcessControlClock
-    private let signalTelemetry: ProcessControlSignalTelemetry
+    let clock: ProcessControlClock
+    let signalTelemetry: ProcessControlSignalTelemetry
     private let failureRetryInterval: TimeInterval = 1
     private let criticalFileActivityProbeInterval: TimeInterval = 2
     private let networkSensitivityReleaseDelay: TimeInterval = 5
@@ -105,33 +105,33 @@ actor ProcessController {
     private let userActivationProbeDuration: TimeInterval = 0.4
     private let foregroundActivationProtectionDuration: TimeInterval = 1
     private let audioProtectionReleaseDelay: TimeInterval = 15
-    private let restorationAttempts = 3
+    let restorationAttempts = 3
     private let visibilityRecheckInterval: TimeInterval = 1
     static let launchGracePeriod: TimeInterval = 60
 
     private var eventHandler: EventHandler?
-    private var groups: [String: ProcessControlTarget] = [:]
-    private var rules: [String: AppRule] = [:]
+    var groups: [String: ProcessControlTarget] = [:]
+    var rules: [String: AppRule] = [:]
     private var backgroundSince: [String: Date] = [:]
-    private var stoppedByTempra: [String: Set<ProcessIdentity>] = [:]
-    private var loweredByTempra: [String: Set<ProcessIdentity>] = [:]
-    private var limitPulseLoweredProcesses: [String: Set<ProcessIdentity>] = [:]
-    private var limitPriorityProcesses: [String: Set<ProcessIdentity>] = [:]
+    var stoppedByTempra: [String: Set<ProcessIdentity>] = [:]
+    var loweredByTempra: [String: Set<ProcessIdentity>] = [:]
+    var limitPulseLoweredProcesses: [String: Set<ProcessIdentity>] = [:]
+    var limitPriorityProcesses: [String: Set<ProcessIdentity>] = [:]
     private var resumeRestorationFailureDescriptions: [String: String] = [:]
     private var priorityRestorationFailureDescriptions: [String: String] = [:]
-    private var limitRuntimes: [String: LimitRuntime] = [:]
-    private var limitSelections: [String: ProcessLimitSelection] = [:]
+    var limitRuntimes: [String: LimitRuntime] = [:]
+    var limitSelections: [String: ProcessLimitSelection] = [:]
     private var pausedBaselineCPU: [String: Double] = [:]
     private var pauseActivationProbeUntil: [String: Date] = [:]
-    private var foregroundActivationProtectionUntil: [String: ContinuousClock.Instant] = [:]
-    private var foregroundActivationMinimumRevision: [String: UInt64] = [:]
+    var foregroundActivationProtectionUntil: [String: ContinuousClock.Instant] = [:]
+    var foregroundActivationMinimumRevision: [String: UInt64] = [:]
     private var cachedFrontmostIdentifier: String?
     private var lastFrontmostProbeAt: ContinuousClock.Instant?
     private var networkSensitiveProcesses: [String: Set<ProcessIdentity>] = [:]
     private var networkSensitiveUntil: [String: [ProcessIdentity: ContinuousClock.Instant]] = [:]
-    private var downloadProtectedProcesses: [String: Set<ProcessIdentity>] = [:]
+    var downloadProtectedProcesses: [String: Set<ProcessIdentity>] = [:]
     private var criticalFileActivityCache: [ProcessIdentity: CriticalFileActivityCacheEntry] = [:]
-    private var automaticResumeIntervals: [ProcessIdentity: TimeInterval] = [:]
+    var automaticResumeIntervals: [ProcessIdentity: TimeInterval] = [:]
     private var automaticResumeStopOperations: [UUID: Set<ProcessIdentity>] = [:]
     private var crashWatchdogIsArmed = false
     private var signalStoppedAt: [ProcessIdentity: ContinuousClock.Instant] = [:]
@@ -141,24 +141,24 @@ actor ProcessController {
     private var statuses: [String: ManagementStatus] = [:]
     private var isEnabled = true
     private var isSystemTransitionSuspended = false
-    private var revision: UInt64 = 0
+    var revision: UInt64 = 0
     private var stateID = UUID()
     private var isDrainingReconciliationQueue = false
     private var needsStateReconciliation = false
     private var needsCadenceTick = false
-    private var pendingLimitSchedulerGeneration: UInt64?
+    var pendingLimitSchedulerGeneration: UInt64?
     private var reconciliationWaiters: [CheckedContinuation<Void, Never>] = []
     private var tickTask: Task<Void, Never>?
-    private var limitDeadlines = LimitDeadlineQueue()
-    private var limitPulseArbiter = LimitPulseArbiter()
-    private var limitSchedulerTask: Task<Void, Never>?
-    private var scheduledLimitDeadline: ContinuousClock.Instant?
-    private var limitSchedulerGeneration: UInt64 = 0
+    var limitDeadlines = LimitDeadlineQueue()
+    var limitPulseArbiter = LimitPulseArbiter()
+    var limitSchedulerTask: Task<Void, Never>?
+    var scheduledLimitDeadline: ContinuousClock.Instant?
+    var limitSchedulerGeneration: UInt64 = 0
     private var scheduledTickInterval: TimeInterval?
     private var scheduledTickDeadline: ContinuousClock.Instant?
     private var isPauseWakeMonitoringEnabled = false
 
-    private var managementIsActive: Bool {
+    var managementIsActive: Bool {
         isEnabled && !isSystemTransitionSuspended
     }
 
@@ -393,13 +393,13 @@ actor ProcessController {
         await drainReconciliationQueue()
     }
 
-    private func requestLimitDeadlineProcessing(schedulerGeneration: UInt64) async {
+    func requestLimitDeadlineProcessing(schedulerGeneration: UInt64) async {
         guard schedulerGeneration == limitSchedulerGeneration else { return }
         pendingLimitSchedulerGeneration = schedulerGeneration
         await drainReconciliationQueue()
     }
 
-    private var workIsCurrent: Bool {
+    var workIsCurrent: Bool {
         guard let context = Self.reconciliationContext else { return true }
         return context.stateID == stateID
     }
@@ -822,7 +822,7 @@ actor ProcessController {
         }
     }
 
-    private func latencySensitiveProcesses(
+    func latencySensitiveProcesses(
         for app: ProcessControlTarget
     ) -> Set<ProcessIdentity> {
         var processes = networkSensitiveProcesses[app.bundleIdentifier, default: []]
@@ -830,18 +830,6 @@ actor ProcessController {
             sample.networkActivity.isLatencySensitive ? sample.identity : nil
         })
         return processes.intersection(app.processIdentities)
-    }
-
-    private func scheduledAutomaticResumeInterval(
-        for identifier: String,
-        processes: Set<ProcessIdentity>
-    ) -> TimeInterval {
-        if let runtime = limitRuntimes[identifier],
-           runtime.processIdentities == processes,
-           runtime.scheduledStopDuration > 0 {
-            return runtime.scheduledStopDuration
-        }
-        return ProcessControlMath.limitPeriod
     }
 
     private func refreshCriticalFileProtection() async {
@@ -876,7 +864,7 @@ actor ProcessController {
         }
     }
 
-    private func criticalFileActivity(
+    func criticalFileActivity(
         for process: ProcessIdentity
     ) async -> ProcessCriticalFileActivity {
         let now = clock.now()
@@ -892,38 +880,6 @@ actor ProcessController {
             )
         )
         return activity
-    }
-
-    private func selectLimitTargets(
-        for app: ProcessControlTarget,
-        limitPercent: Double
-    ) -> ProcessLimitSelection {
-        let previousControlledProcesses = limitSelections[app.bundleIdentifier]?
-            .controlledProcesses ?? []
-        let sensitiveProcesses = latencySensitiveProcesses(for: app)
-        let criticalProcesses = downloadProtectedProcesses[
-            app.bundleIdentifier,
-            default: []
-        ]
-        let offlineSelection = ProcessLimitTargetSelector.select(
-            samples: app.processSamples,
-            limitPercent: limitPercent,
-            previousControlledProcesses: previousControlledProcesses,
-            latencySensitiveProcesses: sensitiveProcesses,
-            criticalActivityProcesses: criticalProcesses,
-            protectsAudio: rules[app.bundleIdentifier]?.protectAudio == true
-        )
-        guard !offlineSelection.controlledProcesses.isDisjoint(with: sensitiveProcesses) else {
-            return offlineSelection
-        }
-        return ProcessLimitTargetSelector.select(
-            samples: app.processSamples,
-            limitPercent: limitPercent,
-            previousControlledProcesses: previousControlledProcesses,
-            latencySensitiveProcesses: sensitiveProcesses,
-            criticalActivityProcesses: criticalProcesses,
-            protectsAudio: rules[app.bundleIdentifier]?.protectAudio == true
-        )
     }
 
     private func tick(trigger: ProcessControlTickTrigger) async {
@@ -1430,702 +1386,7 @@ actor ProcessController {
         return true
     }
 
-    private func applyLimitPulsePriority(
-        to processes: Set<ProcessIdentity>,
-        identifier: String
-    ) async -> Bool {
-        let alreadyApplied = limitPriorityProcesses[identifier, default: []]
-        if processes.isSubset(of: alreadyApplied) {
-            return true
-        }
-        limitPulseLoweredProcesses[identifier] = loweredByTempra[
-            identifier,
-            default: []
-        ].intersection(processes)
-        let result = await system.applyLimitPriority(processes.subtracting(alreadyApplied))
-        limitPriorityProcesses[identifier, default: []].formUnion(result.applied)
-        guard workIsCurrent else {
-            _ = await restoreLimitPulsePriority(
-                for: identifier,
-                processes: result.applied
-            )
-            return false
-        }
-        guard result.failed.isEmpty else {
-            _ = await restoreLimitPulsePriority(
-                for: identifier,
-                processes: result.applied
-            )
-            await markUnavailable(
-                identifier,
-                detail: result.failureDescription
-                    ?? "Tempra could not set limiter pulse priority."
-            )
-            return false
-        }
-        return true
-    }
-
-    private func restoreLimitPulsePriority(
-        for identifier: String,
-        processes: Set<ProcessIdentity>
-    ) async -> Bool {
-        let appliedProcesses = limitPriorityProcesses[identifier, default: []]
-            .intersection(processes)
-        guard !appliedProcesses.isEmpty else {
-            limitPulseLoweredProcesses.removeValue(forKey: identifier)
-            return true
-        }
-        let lowerPriorityProcesses = (
-            limitPulseLoweredProcesses[identifier]
-                ?? loweredByTempra[identifier]
-                ?? []
-        ).intersection(appliedProcesses)
-        let normalPriorityProcesses = appliedProcesses.subtracting(lowerPriorityProcesses)
-        let lowerResult = lowerPriorityProcesses.isEmpty
-            ? ProcessOperationResult()
-            : await system.lowerPriority(lowerPriorityProcesses)
-
-        guard workIsCurrent else { return false }
-        let normalResult = normalPriorityProcesses.isEmpty
-            ? ProcessOperationResult()
-            : await system.restorePriority(normalPriorityProcesses)
-        guard workIsCurrent else { return false }
-
-        loweredByTempra[identifier, default: []].formUnion(lowerResult.applied)
-        loweredByTempra[identifier]?.subtract(
-            lowerResult.stale
-                .union(normalResult.applied)
-                .union(normalResult.stale)
-        )
-        if loweredByTempra[identifier]?.isEmpty == true {
-            loweredByTempra.removeValue(forKey: identifier)
-        }
-
-        let failed = lowerResult.failed.union(normalResult.failed)
-        let restored = lowerResult.applied.union(lowerResult.stale)
-            .union(normalResult.applied)
-            .union(normalResult.stale)
-        limitPriorityProcesses[identifier]?.subtract(restored)
-        if limitPriorityProcesses[identifier]?.isEmpty == true {
-            limitPriorityProcesses.removeValue(forKey: identifier)
-        }
-        if failed.isEmpty {
-            limitPulseLoweredProcesses.removeValue(forKey: identifier)
-            return true
-        }
-        limitPulseLoweredProcesses[identifier] = lowerPriorityProcesses.intersection(failed)
-        return false
-    }
-
-    private func runLimitCycle(
-        for app: ProcessControlTarget,
-        limitPercent requestedLimitPercent: Double
-    ) async {
-        guard workIsCurrent else { return }
-        let identifier = app.bundleIdentifier
-        var earlyStopResult: ProcessOperationResult?
-        if let runningRuntime = limitRuntimes[identifier],
-           runningRuntime.phase == .running,
-           runningRuntime.hasActivatedLimit,
-           !runningRuntime.processIdentities.isEmpty,
-           runningRuntime.processIdentities.allSatisfy({
-               !$0.requiresPrivilegedControl
-                   && automaticResumeIntervals[$0] != nil
-           }) {
-            let result = await stopProcesses(
-                runningRuntime.processIdentities,
-                identifier: identifier,
-                reason: .cpuLimitPulse
-            )
-            guard workIsCurrent else {
-                await trackStoppedProcessesFromStaleWork(
-                    result.applied,
-                    for: identifier
-                )
-                return
-            }
-            guard limitControlIsCurrent(
-                identifier: identifier,
-                generation: runningRuntime.generation,
-                processIdentities: runningRuntime.processIdentities
-            ) else {
-                await resumeProcessesStoppedByObsoleteLimit(
-                    result.applied,
-                    for: identifier
-                )
-                return
-            }
-            guard result.failed.isEmpty else {
-                _ = await resumeProcesses(
-                    result.applied,
-                    identifier: identifier,
-                    reason: .stopRollback
-                )
-                _ = await restoreLimitPulsePriority(
-                    for: identifier,
-                    processes: runningRuntime.processIdentities
-                )
-                limitRuntimes.removeValue(forKey: identifier)
-                _ = await setStoppedProcesses(
-                    stoppedByTempra[identifier, default: []],
-                    for: identifier
-                )
-                await markUnavailable(
-                    identifier,
-                    detail: "Tempra could not limit every process."
-                )
-                scheduleNextTick()
-                return
-            }
-            guard !result.applied.isEmpty else {
-                _ = await restoreLimitPulsePriority(
-                    for: identifier,
-                    processes: runningRuntime.processIdentities
-                )
-                limitRuntimes.removeValue(forKey: identifier)
-                _ = await setStoppedProcesses([], for: identifier)
-                await setStatus(
-                    limitObservationStatus(
-                        for: identifier,
-                        fallback: requestedLimitPercent
-                    ),
-                    for: identifier
-                )
-                return
-            }
-            guard await setStoppedProcesses(
-                result.applied,
-                for: identifier
-            ) else {
-                _ = await restoreLimitPulsePriority(
-                    for: identifier,
-                    processes: runningRuntime.processIdentities
-                )
-                limitRuntimes.removeValue(forKey: identifier)
-                return
-            }
-            earlyStopResult = result
-        }
-        let selection = selectLimitTargets(
-            for: app,
-            limitPercent: requestedLimitPercent
-        )
-        limitSelections[identifier] = selection
-        let controlledProcesses = selection.controlledProcesses
-        await signalTelemetry.recordMeasurement(ProcessLimitMeasurement(
-            date: Date(),
-            bundleIdentifier: identifier,
-            kind: .observation,
-            requestedLimitPercent: requestedLimitPercent,
-            measuredCPUPercent: selection.controlledCPUPercent,
-            cpuDeltaNanoseconds: nil,
-            wallDuration: nil,
-            deadlineLateness: nil,
-            activePulseCount: limitPulseArbiter.activeCount,
-            serviceGap: nil
-        ))
-
-        let stoppedOutsideSelection = stoppedByTempra[identifier, default: []]
-            .subtracting(controlledProcesses)
-        if !stoppedOutsideSelection.isEmpty
-            || limitRuntimes[identifier]?.processIdentities != controlledProcesses {
-            limitPulseArbiter.release(identifier: identifier)
-            limitDeadlines.remove(identifier: identifier)
-            limitRuntimes.removeValue(forKey: identifier)
-            guard await resumeStoppedProcesses(
-                for: identifier,
-                attempts: restorationAttempts
-            ) else {
-                await markUnavailable(
-                    identifier,
-                    detail: "Tempra could not resume processes removed from the CPU-limit set."
-                )
-                return
-            }
-        }
-
-        guard !controlledProcesses.isEmpty else {
-            limitPulseArbiter.release(identifier: identifier)
-            limitDeadlines.remove(identifier: identifier)
-            limitRuntimes.removeValue(forKey: identifier)
-            await setStatus(
-                selection.targetIsReachable
-                    ? limitObservationStatus(
-                        for: identifier,
-                        fallback: requestedLimitPercent
-                    )
-                    : .waiting,
-                for: identifier
-            )
-            return
-        }
-
-        let limitPercent = selection.controlledLimitPercent
-        let now = clock.now()
-        guard let nowCPU = await readCPUTime(
-            for: controlledProcesses,
-            identifier: identifier
-        ) else { return }
-
-        if limitRuntimes[identifier] == nil {
-            let initialUsage = ProcessControlMath.normalizedCPUPercent(
-                selection.controlledCPUPercent
-            )
-            let startsAboveLimit = initialUsage > limitPercent
-            let runtime = LimitRuntime(
-                lastCPUNanoseconds: nowCPU,
-                lastAccountingAt: now,
-                runStartedAt: nil,
-                estimatedFullSpeedCPU: max(initialUsage, limitPercent, 1),
-                lastMeasuredCPUPercent: initialUsage,
-                dutyFactor: 0,
-                hasActivatedLimit: startsAboveLimit,
-                scheduledStopDuration: 0,
-                stoppedAt: nil,
-                generation: 1,
-                phase: startsAboveLimit ? .running : .observing,
-                processIdentities: controlledProcesses
-            )
-            limitRuntimes[identifier] = runtime
-            scheduleLimitObservation(
-                for: identifier,
-                runtime: runtime,
-                limitPercent: limitPercent,
-                now: now,
-                after: 0.001
-            )
-            await setStatus(
-                startsAboveLimit
-                    ? limitStatus(for: identifier, fallback: requestedLimitPercent)
-                    : limitObservationStatus(
-                        for: identifier,
-                        fallback: requestedLimitPercent
-                    ),
-                for: identifier
-            )
-            return
-        }
-
-        if var stoppedRuntime = limitRuntimes[identifier],
-           stoppedRuntime.phase == .stopped {
-            let guardianControlsPulse = crashWatchdog.controlsLimitPulseCadence
-                && stoppedRuntime.processIdentities.allSatisfy {
-                    !$0.requiresPrivilegedControl
-                        && automaticResumeIntervals[$0] != nil
-                }
-            let resumed: Bool
-            if guardianControlsPulse {
-                resumed = true
-            } else {
-                resumed = await resumeStoppedProcesses(
-                    for: identifier,
-                    attempts: restorationAttempts,
-                    reason: .cpuLimitPulse,
-                    retainingAutomaticResume: stoppedRuntime.processIdentities,
-                    retainingLimitPriority: true
-                )
-            }
-            guard workIsCurrent else { return }
-            guard resumed else {
-                await markUnavailable(
-                    identifier,
-                    detail: "Tempra could not finish the CPU-limit pulse."
-                )
-                return
-            }
-
-            let period = ProcessControlMath.controlPeriod(
-                usage: stoppedRuntime.lastMeasuredCPUPercent ?? 0,
-                previousDutyFactor: stoppedRuntime.dutyFactor
-            )
-            let elapsed = max(
-                0,
-                ProcessControlMath.timeInterval(
-                    stoppedRuntime.lastAccountingAt.duration(to: clock.now())
-                )
-            )
-            stoppedRuntime.phase = .running
-            stoppedRuntime.runStartedAt = clock.now()
-            stoppedRuntime.stoppedAt = nil
-            limitRuntimes[identifier] = stoppedRuntime
-            scheduleLimitObservation(
-                for: identifier,
-                runtime: stoppedRuntime,
-                limitPercent: limitPercent,
-                now: clock.now(),
-                after: max(0.001, period - elapsed)
-            )
-            await setStatus(
-                limitStatus(for: identifier, fallback: requestedLimitPercent),
-                for: identifier
-            )
-            return
-        }
-
-        let existingRuntime = limitRuntimes[identifier]
-        let measuredCPU: Double
-        if let existingRuntime, existingRuntime.runStartedAt == nil {
-            measuredCPU = existingRuntime.lastMeasuredCPUPercent
-                ?? selection.controlledCPUPercent
-        } else if let existingRuntime {
-            let elapsed = max(
-                0,
-                ProcessControlMath.timeInterval(
-                    existingRuntime.lastAccountingAt.duration(to: now)
-                )
-            )
-            if elapsed > 0, nowCPU >= existingRuntime.lastCPUNanoseconds {
-                measuredCPU = Double(nowCPU - existingRuntime.lastCPUNanoseconds)
-                    / (elapsed * 1_000_000_000)
-                    * 100
-            } else {
-                measuredCPU = selection.controlledCPUPercent
-            }
-        } else {
-            measuredCPU = selection.controlledCPUPercent
-        }
-        let usage = ProcessControlMath.normalizedCPUPercent(measuredCPU)
-        let previousDutyFactor = existingRuntime?.dutyFactor ?? 0
-        let controlPeriod = ProcessControlMath.controlPeriod(
-            usage: usage,
-            previousDutyFactor: previousDutyFactor
-        )
-        let startsAboveLimit = usage > limitPercent
-        let hasActivatedLimit = existingRuntime?.hasActivatedLimit == true
-            || startsAboveLimit
-        let estimatedFullSpeedCPU = max(
-            existingRuntime?.estimatedFullSpeedCPU ?? 0,
-            usage,
-            limitPercent,
-            1
-        )
-        let dutyFactor = hasActivatedLimit
-            ? ProcessControlMath.requiredDutyFactor(
-                estimatedFullSpeedCPU: estimatedFullSpeedCPU,
-                limitPercent: limitPercent
-            )
-            : 0
-
-        var runtime = existingRuntime ?? LimitRuntime(
-            lastCPUNanoseconds: nowCPU,
-            lastAccountingAt: now,
-            runStartedAt: now,
-            estimatedFullSpeedCPU: max(usage, limitPercent, 1),
-            lastMeasuredCPUPercent: usage,
-            dutyFactor: dutyFactor,
-            hasActivatedLimit: hasActivatedLimit,
-            scheduledStopDuration: dutyFactor,
-            stoppedAt: nil,
-            generation: 0,
-            phase: hasActivatedLimit ? .running : .observing,
-            processIdentities: controlledProcesses
-        )
-        runtime.lastCPUNanoseconds = nowCPU
-        runtime.lastAccountingAt = now
-        runtime.runStartedAt = now
-        runtime.estimatedFullSpeedCPU = estimatedFullSpeedCPU
-        runtime.lastMeasuredCPUPercent = usage
-        runtime.dutyFactor = dutyFactor
-        runtime.hasActivatedLimit = hasActivatedLimit
-        runtime.scheduledStopDuration = dutyFactor
-        runtime.stoppedAt = nil
-        runtime.generation = ProcessControlMath.nextGeneration(after: runtime.generation)
-        runtime.phase = hasActivatedLimit ? .running : .observing
-        runtime.processIdentities = controlledProcesses
-        let generation = runtime.generation
-        limitRuntimes[identifier] = runtime
-        limitDeadlines.remove(identifier: identifier)
-
-        await signalTelemetry.recordMeasurement(ProcessLimitMeasurement(
-            date: Date(),
-            bundleIdentifier: identifier,
-            kind: .pulse,
-            requestedLimitPercent: limitPercent,
-            measuredCPUPercent: usage,
-            cpuDeltaNanoseconds: existingRuntime.flatMap {
-                nowCPU >= $0.lastCPUNanoseconds ? nowCPU - $0.lastCPUNanoseconds : nil
-            },
-            wallDuration: existingRuntime.map {
-                max(0, ProcessControlMath.timeInterval($0.lastAccountingAt.duration(to: now)))
-            },
-            deadlineLateness: nil,
-            activePulseCount: limitPulseArbiter.activeCount,
-            serviceGap: nil
-        ))
-
-        guard dutyFactor >= ProcessControlMath.minimumDutyFactor else {
-            let priorityRestored = await restoreLimitPulsePriority(
-                for: identifier,
-                processes: controlledProcesses
-            )
-            let resumeResult: ProcessOperationResult
-            let synchronized: Bool
-            if earlyStopResult != nil {
-                resumeResult = await resumeProcesses(
-                    controlledProcesses,
-                    identifier: identifier,
-                    reason: .cpuLimitPulse
-                )
-                synchronized = await setStoppedProcesses(
-                    resumeResult.failed,
-                    for: identifier
-                )
-            } else {
-                resumeResult = await system.resume(controlledProcesses)
-                synchronized = true
-            }
-            guard workIsCurrent else { return }
-            guard priorityRestored,
-                  synchronized,
-                  resumeResult.failed.isEmpty else {
-                await markUnavailable(
-                    identifier,
-                    detail: resumeResult.failureDescription
-                        ?? "Tempra could not keep the CPU-limited process running."
-                )
-                return
-            }
-            scheduleLimitObservation(
-                for: identifier,
-                runtime: runtime,
-                limitPercent: limitPercent,
-                now: now,
-                after: controlPeriod
-            )
-            await setStatus(
-                limitObservationStatus(
-                    for: identifier,
-                    fallback: requestedLimitPercent
-                ),
-                for: identifier
-            )
-            return
-        }
-
-        guard await prepareLimitStop(
-            controlledProcesses,
-            identifier: identifier,
-            generation: generation,
-            requestedLimitPercent: requestedLimitPercent
-        ) else {
-            scheduleLimitScheduler()
-            return
-        }
-        guard await prepareWatchdogToStop(controlledProcesses, for: identifier) else {
-            limitRuntimes.removeValue(forKey: identifier)
-            scheduleNextTick()
-            return
-        }
-        guard let automaticResumeChange = await armWatchdogAutomaticResume(
-            controlledProcesses,
-            for: identifier,
-            automaticResumeAfter: dutyFactor
-        ) else {
-            scheduleNextTick()
-            return
-        }
-        guard limitControlIsCurrent(
-            identifier: identifier,
-            generation: generation,
-            processIdentities: controlledProcesses
-        ) else {
-            await cancelWatchdogAutomaticResume(
-                automaticResumeChange,
-                for: identifier
-            )
-            return
-        }
-        guard await applyLimitPulsePriority(
-            to: controlledProcesses,
-            identifier: identifier
-        ) else {
-            await cancelWatchdogAutomaticResume(
-                automaticResumeChange,
-                for: identifier
-            )
-            limitRuntimes.removeValue(forKey: identifier)
-            scheduleNextTick()
-            return
-        }
-
-        let result: ProcessOperationResult
-        if let earlyStopResult {
-            result = earlyStopResult
-        } else {
-            result = await stopProcesses(
-                controlledProcesses,
-                identifier: identifier,
-                reason: .cpuLimitPulse
-            )
-        }
-        guard workIsCurrent else {
-            await trackStoppedProcessesFromStaleWork(result.applied, for: identifier)
-            return
-        }
-        guard limitControlIsCurrent(
-            identifier: identifier,
-            generation: generation,
-            processIdentities: controlledProcesses
-        ) else {
-            await resumeProcessesStoppedByObsoleteLimit(result.applied, for: identifier)
-            _ = await restoreLimitPulsePriority(
-                for: identifier,
-                processes: controlledProcesses
-            )
-            return
-        }
-        guard result.failed.isEmpty else {
-            _ = await resumeProcesses(
-                result.applied,
-                identifier: identifier,
-                reason: .stopRollback
-            )
-            _ = await restoreLimitPulsePriority(
-                for: identifier,
-                processes: controlledProcesses
-            )
-            limitRuntimes.removeValue(forKey: identifier)
-            _ = await setStoppedProcesses(
-                stoppedByTempra[identifier, default: []],
-                for: identifier
-            )
-            await markUnavailable(identifier, detail: "Tempra could not limit every process.")
-            scheduleNextTick()
-            return
-        }
-        guard !result.applied.isEmpty else {
-            _ = await restoreLimitPulsePriority(
-                for: identifier,
-                processes: controlledProcesses
-            )
-            limitRuntimes.removeValue(forKey: identifier)
-            _ = await setStoppedProcesses([], for: identifier)
-            await setStatus(
-                limitObservationStatus(
-                    for: identifier,
-                    fallback: requestedLimitPercent
-                ),
-                for: identifier
-            )
-            return
-        }
-        guard await setStoppedProcesses(result.applied, for: identifier) else {
-            _ = await restoreLimitPulsePriority(
-                for: identifier,
-                processes: controlledProcesses
-            )
-            limitRuntimes.removeValue(forKey: identifier)
-            return
-        }
-
-        let stoppedAt = clock.now()
-        runtime.phase = .stopped
-        runtime.runStartedAt = nil
-        runtime.stoppedAt = stoppedAt
-        limitRuntimes[identifier] = runtime
-        scheduleLimitObservation(
-            for: identifier,
-            runtime: runtime,
-            limitPercent: limitPercent,
-            now: stoppedAt,
-            after: dutyFactor
-        )
-        await setStatus(
-            limitStatus(for: identifier, fallback: requestedLimitPercent),
-            for: identifier
-        )
-        await updatePauseWakeMonitoring()
-    }
-
-    private func scheduleLimitObservation(
-        for identifier: String,
-        runtime: LimitRuntime,
-        limitPercent: Double,
-        now: ContinuousClock.Instant,
-        after interval: TimeInterval
-    ) {
-        limitDeadlines.upsert(LimitDeadline(
-            identifier: identifier,
-            deadline: now.advanced(by: ProcessControlMath.duration(max(0.001, interval))),
-            generation: runtime.generation,
-            limitPercent: limitPercent,
-            processIdentities: runtime.processIdentities
-        ))
-    }
-
-    private func prepareLimitStop(
-        _ processes: Set<ProcessIdentity>,
-        identifier: String,
-        generation: UInt64,
-        requestedLimitPercent: Double
-    ) async -> Bool {
-        var activeDownloadProcesses: Set<ProcessIdentity> = []
-        var inactiveDownloadProcesses: Set<ProcessIdentity> = []
-
-        for process in processes.sorted(by: { $0.pid < $1.pid }) {
-            let fileActivity = await criticalFileActivity(for: process)
-            guard workIsCurrent,
-                  limitControlIsCurrent(
-                    identifier: identifier,
-                    generation: generation,
-                    processIdentities: processes
-                  ) else {
-                return false
-            }
-            switch fileActivity {
-            case .activeDownload:
-                activeDownloadProcesses.insert(process)
-            case .inactive:
-                inactiveDownloadProcesses.insert(process)
-            case .unknown:
-                break
-            }
-        }
-
-        if !inactiveDownloadProcesses.isEmpty {
-            downloadProtectedProcesses[identifier]?.subtract(inactiveDownloadProcesses)
-            if downloadProtectedProcesses[identifier]?.isEmpty == true {
-                downloadProtectedProcesses.removeValue(forKey: identifier)
-            }
-        }
-
-        guard !activeDownloadProcesses.isEmpty else {
-            return true
-        }
-
-        downloadProtectedProcesses[identifier, default: []].formUnion(
-            activeDownloadProcesses
-        )
-
-        guard workIsCurrent,
-              let app = groups[identifier],
-              rules[identifier]?.action == .limit else {
-            return false
-        }
-
-        let revisedSelection = selectLimitTargets(
-            for: app,
-            limitPercent: requestedLimitPercent
-        )
-        limitSelections[identifier] = revisedSelection
-        if revisedSelection.controlledProcesses != processes {
-            if !activeDownloadProcesses.isEmpty {
-                await recordPreventedStop(
-                    activeDownloadProcesses,
-                    identifier: identifier,
-                    reason: .criticalFileActivity
-                )
-            }
-            limitDeadlines.remove(identifier: identifier)
-            limitRuntimes.removeValue(forKey: identifier)
-            await runLimitCycle(for: app, limitPercent: requestedLimitPercent)
-            return false
-        }
-        return true
-    }
-
-    private func stopProcesses(
+    func stopProcesses(
         _ processes: Set<ProcessIdentity>,
         identifier: String,
         reason: ProcessControlSignalReason
@@ -2180,7 +1441,7 @@ actor ProcessController {
         return result
     }
 
-    private func resumeProcesses(
+    func resumeProcesses(
         _ processes: Set<ProcessIdentity>,
         identifier: String?,
         reason: ProcessControlSignalReason,
@@ -2236,7 +1497,7 @@ actor ProcessController {
         return result
     }
 
-    private func recordPreventedStop(
+    func recordPreventedStop(
         _ processes: Set<ProcessIdentity>,
         identifier: String,
         reason: ProcessControlSignalReason
@@ -2250,87 +1511,6 @@ actor ProcessController {
             result: ProcessOperationResult(),
             stoppedDurations: [:]
         ))
-    }
-
-    private func maintainLimitCycle(
-        for app: ProcessControlTarget,
-        limitPercent requestedLimitPercent: Double
-    ) async {
-        guard workIsCurrent else { return }
-        let identifier = app.bundleIdentifier
-        let selection = selectLimitTargets(
-            for: app,
-            limitPercent: requestedLimitPercent
-        )
-        limitSelections[identifier] = selection
-        guard let runtime = limitRuntimes[identifier] else {
-            await runLimitCycle(for: app, limitPercent: requestedLimitPercent)
-            return
-        }
-
-        if runtime.processIdentities != selection.controlledProcesses {
-            limitPulseArbiter.release(identifier: identifier)
-            limitDeadlines.remove(identifier: identifier)
-            limitRuntimes.removeValue(forKey: identifier)
-            await runLimitCycle(for: app, limitPercent: requestedLimitPercent)
-            return
-        }
-
-        await setStatus(
-            runtime.phase == .observing
-                ? limitObservationStatus(
-                    for: identifier,
-                    fallback: requestedLimitPercent
-                )
-                : limitStatus(for: identifier, fallback: requestedLimitPercent),
-            for: identifier
-        )
-    }
-
-    private func limitControlIsCurrent(
-        identifier: String,
-        generation: UInt64,
-        processIdentities: Set<ProcessIdentity>
-    ) -> Bool {
-        guard managementIsActive,
-              rules[identifier]?.action == .limit,
-              groups[identifier]?.processIdentities.isSuperset(of: processIdentities) == true,
-              let runtime = limitRuntimes[identifier],
-              runtime.generation == generation,
-              runtime.processIdentities == processIdentities else {
-            return false
-        }
-        if let minimumRevision = foregroundActivationMinimumRevision[identifier],
-           revision < minimumRevision {
-            return false
-        }
-        if let protectionUntil = foregroundActivationProtectionUntil[identifier],
-           clock.now() < protectionUntil {
-            return false
-        }
-        return true
-    }
-
-    private func resumeProcessesStoppedByObsoleteLimit(
-        _ processes: Set<ProcessIdentity>,
-        for identifier: String
-    ) async {
-        guard !processes.isEmpty else { return }
-        let result = await resumeProcesses(
-            processes,
-            identifier: identifier,
-            reason: .obsoleteLimit
-        )
-        let remaining = stoppedByTempra[identifier, default: []]
-            .subtracting(result.applied.union(result.stale))
-            .union(result.failed)
-        let synchronized = await setStoppedProcesses(remaining, for: identifier)
-        if !result.failed.isEmpty || !synchronized {
-            await markUnavailable(
-                identifier,
-                detail: "Tempra could not resume a process after canceling an obsolete CPU-limit pulse."
-            )
-        }
     }
 
     private func reconcileControlledProcesses() async {
@@ -2375,7 +1555,7 @@ actor ProcessController {
         await updatePauseWakeMonitoring()
     }
 
-    private func restore(
+    func restore(
         identifier: String,
         resetDelay: Bool,
         attempts: Int,
@@ -2475,7 +1655,7 @@ actor ProcessController {
         return priorityPrepared
     }
 
-    private func resumeStoppedProcesses(
+    func resumeStoppedProcesses(
         for identifier: String,
         attempts: Int,
         reason: ProcessControlSignalReason = .restoration,
@@ -2520,7 +1700,7 @@ actor ProcessController {
             && workIsCurrent
     }
 
-    private func trackStoppedProcessesFromStaleWork(
+    func trackStoppedProcessesFromStaleWork(
         _ processes: Set<ProcessIdentity>,
         for identifier: String
     ) async {
@@ -2552,7 +1732,7 @@ actor ProcessController {
         }
     }
 
-    private func prepareWatchdogToStop(
+    func prepareWatchdogToStop(
         _ processes: Set<ProcessIdentity>,
         for identifier: String
     ) async -> Bool {
@@ -2578,7 +1758,7 @@ actor ProcessController {
         }
     }
 
-    private func armWatchdogAutomaticResume(
+    func armWatchdogAutomaticResume(
         _ processes: Set<ProcessIdentity>,
         for identifier: String,
         automaticResumeAfter requestedInterval: TimeInterval? = nil
@@ -2632,7 +1812,7 @@ actor ProcessController {
         }
     }
 
-    private func cancelWatchdogAutomaticResume(
+    func cancelWatchdogAutomaticResume(
         _ change: AutomaticResumeChange,
         for identifier: String
     ) async {
@@ -2659,7 +1839,7 @@ actor ProcessController {
         )
     }
 
-    private func setStoppedProcesses(
+    func setStoppedProcesses(
         _ processes: Set<ProcessIdentity>,
         for identifier: String
     ) async -> Bool {
@@ -2820,7 +2000,7 @@ actor ProcessController {
         )
     }
 
-    private func isFrontmost(_ app: ProcessControlTarget) async -> Bool {
+    func isFrontmost(_ app: ProcessControlTarget) async -> Bool {
         if let minimumRevision = foregroundActivationMinimumRevision[app.bundleIdentifier] {
             guard revision >= minimumRevision else { return true }
             foregroundActivationMinimumRevision.removeValue(forKey: app.bundleIdentifier)
@@ -2849,7 +2029,7 @@ actor ProcessController {
         return frontmostIdentifier == app.bundleIdentifier
     }
 
-    private func readCPUTime(
+    func readCPUTime(
         for processes: Set<ProcessIdentity>,
         identifier: String
     ) async -> UInt64? {
@@ -2866,7 +2046,7 @@ actor ProcessController {
         }
     }
 
-    private func setStatus(_ status: ManagementStatus, for identifier: String) async {
+    func setStatus(_ status: ManagementStatus, for identifier: String) async {
         guard workIsCurrent else { return }
         let previous = statuses[identifier] ?? .normal
         statuses[identifier] = status
@@ -2880,32 +2060,7 @@ actor ProcessController {
         ))
     }
 
-    private func limitStatus(
-        for identifier: String,
-        fallback: Double
-    ) -> ManagementStatus {
-        let requestedLimit = rules[identifier]?.limitPercent ?? fallback
-        if limitSelections[identifier]?.targetIsReachable == false {
-            return .limitedWithProtectedProcesses(requestedLimit)
-        }
-        return .limited(requestedLimit)
-    }
-
-    private func limitObservationStatus(
-        for identifier: String,
-        fallback: Double
-    ) -> ManagementStatus {
-        if limitRuntimes[identifier]?.hasActivatedLimit == true {
-            return limitStatus(for: identifier, fallback: fallback)
-        }
-        if rules[identifier]?.usesLowerCPUPriority == true,
-           loweredByTempra[identifier]?.isEmpty == false {
-            return .lowerPriority
-        }
-        return .normal
-    }
-
-    private func markUnavailable(_ identifier: String, detail: String) async {
+    func markUnavailable(_ identifier: String, detail: String) async {
         guard workIsCurrent else { return }
         let shouldRecord = statuses[identifier] != .unavailable
         await setStatus(.unavailable, for: identifier)
@@ -2932,7 +2087,7 @@ actor ProcessController {
         return true
     }
 
-    private func updatePauseWakeMonitoring() async {
+    func updatePauseWakeMonitoring() async {
         guard workIsCurrent else { return }
         let needsMonitoring = stoppedByTempra.contains { identifier, processes in
             !processes.isEmpty && rules[identifier]?.action == .pause
@@ -2945,138 +2100,7 @@ actor ProcessController {
         ))
     }
 
-    private func scheduleLimitScheduler() {
-        guard managementIsActive, let nextDeadline = limitDeadlines.first else {
-            limitSchedulerTask?.cancel()
-            limitSchedulerTask = nil
-            scheduledLimitDeadline = nil
-            limitSchedulerGeneration = ProcessControlMath.nextGeneration(
-                after: limitSchedulerGeneration
-            )
-            return
-        }
-
-        if limitSchedulerTask != nil,
-           scheduledLimitDeadline == nextDeadline.deadline {
-            return
-        }
-
-        limitSchedulerTask?.cancel()
-        limitSchedulerGeneration = ProcessControlMath.nextGeneration(
-            after: limitSchedulerGeneration
-        )
-        let schedulerGeneration = limitSchedulerGeneration
-        let deadline = nextDeadline.deadline
-        scheduledLimitDeadline = deadline
-        let wakeRegistration = ProcessControlWakeRegistration()
-        limitSchedulerTask = Task(priority: .high) { [weak self, clock] in
-            await withTaskCancellationHandler {
-                await withCheckedContinuation { continuation in
-                    wakeRegistration.install(clock.scheduleWake(deadline) {
-                        continuation.resume()
-                    })
-                }
-            } onCancel: {
-                wakeRegistration.cancel()
-            }
-            guard !Task.isCancelled else { return }
-            await self?.requestLimitDeadlineProcessing(
-                schedulerGeneration: schedulerGeneration
-            )
-        }
-    }
-
-    private func processLimitDeadlines(
-        schedulerGeneration: UInt64
-    ) async {
-        guard schedulerGeneration == limitSchedulerGeneration else { return }
-        let now = clock.now()
-        var dueDeadlines: [LimitDeadline] = []
-        while let nextDeadline = limitDeadlines.first,
-              nextDeadline.deadline <= now,
-              let deadline = limitDeadlines.popFirst() {
-            dueDeadlines.append(deadline)
-        }
-
-        for deadline in dueDeadlines {
-            guard workIsCurrent else { return }
-            let deadlineLateness = max(
-                0,
-                ProcessControlMath.timeInterval(deadline.deadline.duration(to: clock.now()))
-            )
-            await signalTelemetry.recordMeasurement(ProcessLimitMeasurement(
-                date: Date(),
-                bundleIdentifier: deadline.identifier,
-                kind: .deadline,
-                requestedLimitPercent: deadline.limitPercent,
-                measuredCPUPercent: nil,
-                cpuDeltaNanoseconds: nil,
-                wallDuration: nil,
-                deadlineLateness: deadlineLateness,
-                activePulseCount: limitPulseArbiter.activeCount,
-                serviceGap: nil
-            ))
-            await evaluateLimitDeadline(deadline)
-            guard workIsCurrent else { return }
-        }
-
-        guard schedulerGeneration == limitSchedulerGeneration else {
-            scheduleLimitScheduler()
-            return
-        }
-        limitSchedulerTask = nil
-        scheduledLimitDeadline = nil
-        scheduleLimitScheduler()
-    }
-
-    private func resetLimitScheduler() {
-        limitSchedulerTask?.cancel()
-        limitSchedulerTask = nil
-        scheduledLimitDeadline = nil
-        pendingLimitSchedulerGeneration = nil
-        limitSchedulerGeneration = ProcessControlMath.nextGeneration(
-            after: limitSchedulerGeneration
-        )
-        limitDeadlines.removeAll()
-        limitPulseArbiter.removeAll()
-    }
-
-    private func evaluateLimitDeadline(_ deadline: LimitDeadline) async {
-        guard workIsCurrent,
-              managementIsActive,
-              let runtime = limitRuntimes[deadline.identifier],
-              runtime.generation == deadline.generation,
-              runtime.processIdentities == deadline.processIdentities,
-              let rule = rules[deadline.identifier],
-              rule.action == .limit,
-              let app = groups[deadline.identifier],
-              deadline.processIdentities.isSubset(of: app.processIdentities) else {
-            return
-        }
-
-        let appIsFrontmost = await isFrontmost(app)
-        guard workIsCurrent else { return }
-        if appIsFrontmost {
-            if await restore(
-                identifier: deadline.identifier,
-                resetDelay: true,
-                attempts: restorationAttempts
-            ) {
-                await setStatus(.normal, for: deadline.identifier)
-            } else {
-                await markUnavailable(
-                    deadline.identifier,
-                    detail: "Tempra could not restore every process."
-                )
-            }
-            scheduleNextTick()
-            return
-        }
-
-        await runLimitCycle(for: app, limitPercent: rule.limitPercent)
-    }
-
-    private func scheduleNextTick(now: Date = Date()) {
+    func scheduleNextTick(now: Date = Date()) {
         guard managementIsActive else { return }
         let audioClockNow = clock.now()
         var nextInterval: TimeInterval?
