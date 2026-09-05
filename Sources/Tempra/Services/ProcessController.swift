@@ -964,7 +964,7 @@ actor ProcessController {
                 continue
             }
 
-            var isAudioProtected = audioProtection.update(
+            let isAudioProtected = audioProtection.update(
                 identifier: identifier,
                 isPlayingAudio: app.isPlayingAudio,
                 protectsAudio: rule.protectAudio,
@@ -989,29 +989,6 @@ actor ProcessController {
                     )
                 }
                 continue
-            }
-
-            if rule.protectAudio, !isAudioProtected {
-                let liveAudioActivity = await system.audioActivity(
-                    for: app.processIdentities
-                )
-                guard workIsCurrent else { return }
-                switch liveAudioActivity {
-                case .active:
-                    isAudioProtected = audioProtection.update(
-                        identifier: identifier,
-                        isPlayingAudio: true,
-                        protectsAudio: true,
-                        now: clock.now(),
-                        releaseDelay: ProcessControlMath.duration(
-                            audioProtectionReleaseDelay
-                        )
-                    )
-                case .unknown:
-                    isAudioProtected = true
-                case .inactive:
-                    break
-                }
             }
 
             let isWithinLaunchGrace = app.launchedAt.map {
@@ -1039,15 +1016,7 @@ actor ProcessController {
             }
 
             if isAudioProtected {
-                if await prepareForDeferredAction(
-                    rule: rule,
-                    app: app,
-                    appliesLowerPriority: false
-                ) {
-                    guard workIsCurrent else { return }
-                    backgroundSince[identifier] = Date()
-                    await setStatus(.audioProtected, for: identifier)
-                }
+                await deferForAudioProtection(rule: rule, app: app)
                 continue
             }
 
@@ -1147,6 +1116,12 @@ actor ProcessController {
             }
 
             guard workIsCurrent else { return }
+            if await liveAudioBlocksAction(rule: rule, app: app) {
+                guard workIsCurrent else { return }
+                await deferForAudioProtection(rule: rule, app: app)
+                continue
+            }
+            guard workIsCurrent else { return }
             await apply(
                 rule: rule,
                 to: app,
@@ -1158,6 +1133,53 @@ actor ProcessController {
         guard workIsCurrent else { return }
         scheduleLimitScheduler()
         scheduleNextTick()
+    }
+
+    /// Asks Core Audio whether the app is playing right before a disruptive
+    /// action. The sample-driven listeners carry the steady state; this is the
+    /// last check against a stale sample, so it never runs for an app whose
+    /// processes Tempra has already stopped — they cannot start playing.
+    private func liveAudioBlocksAction(
+        rule: AppRule,
+        app: ProcessControlTarget
+    ) async -> Bool {
+        guard rule.protectAudio,
+              !app.processIdentities.isSubset(
+                of: stoppedByTempra[app.bundleIdentifier, default: []]
+              ) else {
+            return false
+        }
+        let liveAudioActivity = await system.audioActivity(for: app.processIdentities)
+        guard workIsCurrent else { return true }
+        switch liveAudioActivity {
+        case .active:
+            return audioProtection.update(
+                identifier: app.bundleIdentifier,
+                isPlayingAudio: true,
+                protectsAudio: true,
+                now: clock.now(),
+                releaseDelay: ProcessControlMath.duration(audioProtectionReleaseDelay)
+            )
+        case .unknown:
+            return true
+        case .inactive:
+            return false
+        }
+    }
+
+    private func deferForAudioProtection(
+        rule: AppRule,
+        app: ProcessControlTarget
+    ) async {
+        if await prepareForDeferredAction(
+            rule: rule,
+            app: app,
+            appliesLowerPriority: false
+        ) {
+            guard workIsCurrent else { return }
+            backgroundSince[app.bundleIdentifier] = Date()
+            await setStatus(.audioProtected, for: app.bundleIdentifier)
+        }
     }
 
     private func apply(

@@ -2499,6 +2499,65 @@ struct ProcessControllerSchedulingTests {
         await controller.shutdown()
     }
 
+    @Test("A live audio check only precedes a disruptive action")
+    func liveAudioCheckOnlyPrecedesAction() async {
+        let system = RecordingProcessSystem()
+        let controlledProcess = process(74)
+        let controller = ProcessController(
+            system: system,
+            crashWatchdog: RecordingProcessCrashWatchdog()
+        )
+        let rule = AppRule(
+            bundleIdentifier: identifier,
+            displayName: "Example",
+            action: .pause,
+            protectAudio: true
+        )
+
+        // Still inside the launch grace: nothing is about to happen, so
+        // Core Audio is not asked.
+        let waiting = await controller.update(
+            targets: [target(
+                processIdentities: [controlledProcess],
+                launchedAt: Date(),
+                isPlayingAudio: false
+            )],
+            rules: [identifier: rule],
+            isEnabled: true,
+            revision: 1
+        )
+        #expect(waiting.statuses[identifier] == .waiting)
+        #expect(system.audioProbeAttemptCount == 0)
+
+        let paused = await controller.update(
+            targets: [target(
+                processIdentities: [controlledProcess],
+                launchedAt: oldLaunchDate,
+                isPlayingAudio: false
+            )],
+            rules: [identifier: rule],
+            isEnabled: true,
+            revision: 2
+        )
+        #expect(paused.statuses[identifier] == .paused)
+        #expect(system.audioProbeAttemptCount == 1)
+
+        // Every process is stopped, so it cannot start playing: no probe.
+        let stillPaused = await controller.update(
+            targets: [target(
+                processIdentities: [controlledProcess],
+                launchedAt: oldLaunchDate,
+                isPlayingAudio: false
+            )],
+            rules: [identifier: rule],
+            isEnabled: true,
+            revision: 3
+        )
+        #expect(stillPaused.statuses[identifier] == .paused)
+        #expect(system.audioProbeAttemptCount == 1)
+        await controller.shutdown()
+    }
+
     @Test("Frontmost audio protects the first background sample")
     func frontmostAudioProtectsFirstBackgroundSample() async {
         let manualClock = ManualProcessControlClock()
@@ -4058,6 +4117,7 @@ private final class RecordingProcessSystem: ProcessSystemControlling, @unchecked
     private var cpuTimeNanoseconds: UInt64 = 0
     private var resumeCPUCostNanoseconds: UInt64 = 0
     private var audioActivityState: ProcessAudioActivity = .inactive
+    private var audioProbeCount = 0
     private var stopFailuresRemaining: [ProcessIdentity: Int] = [:]
     private var resumeFailuresRemaining: [ProcessIdentity: Int] = [:]
     private var priorityRestoreFailuresRemaining: [ProcessIdentity: Int] = [:]
@@ -4225,10 +4285,17 @@ private final class RecordingProcessSystem: ProcessSystemControlling, @unchecked
         }
     }
 
+    var audioProbeAttemptCount: Int {
+        withLock { audioProbeCount }
+    }
+
     func audioActivity(
         for processes: Set<ProcessIdentity>
     ) -> ProcessAudioActivity {
-        withLock { audioActivityState }
+        withLock {
+            audioProbeCount += 1
+            return audioActivityState
+        }
     }
 
     func networkActivity(for process: ProcessIdentity) -> ProcessNetworkActivity {

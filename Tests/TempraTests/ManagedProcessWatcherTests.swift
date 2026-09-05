@@ -176,6 +176,24 @@ struct ManagedProcessWatcherTests {
         ])
     }
 
+    @Test("Audio listeners cover helpers the watched app is responsible for")
+    func responsibleHelpersReceiveAudioListeners() async {
+        let backend = RecordingAudioBackend(
+            processObjects: [10: 110, 30: 130, 40: 140],
+            responsibleProcesses: [30: 10, 40: 20]
+        )
+        let monitor = AudioActivityMonitor(backend: backend)
+
+        await monitor.watch(
+            revision: 1,
+            processIdentifiers: [10],
+            onActivityChange: {}
+        )
+        #expect(backend.runningOutputTargets == [110, 130])
+
+        await monitor.stop(revision: 2)
+    }
+
     @Test("Older audio configurations cannot replace newer configurations")
     func staleAudioConfigurationIsIgnored() async {
         let backend = RecordingAudioBackend(processObjects: [10: 110, 20: 120])
@@ -333,10 +351,15 @@ private final class RecordingAudioBackend: AudioActivityBackend, @unchecked Send
 
     private let lock = NSLock()
     private let processObjects: [pid_t: AudioObjectID]
+    private let responsibleProcesses: [pid_t: pid_t]
     private var registrations: [AudioListenerToken: Registration] = [:]
 
-    init(processObjects: [pid_t: AudioObjectID]) {
+    init(
+        processObjects: [pid_t: AudioObjectID],
+        responsibleProcesses: [pid_t: pid_t] = [:]
+    ) {
         self.processObjects = processObjects
+        self.responsibleProcesses = responsibleProcesses
     }
 
     var listenerTargets: Set<AudioListenerTarget> {
@@ -350,8 +373,12 @@ private final class RecordingAudioBackend: AudioActivityBackend, @unchecked Send
         })
     }
 
-    func processObject(for processIdentifier: pid_t) -> AudioObjectID? {
-        processObjects[processIdentifier]
+    func processObjectsByID() -> [AudioObjectID: pid_t]? {
+        Dictionary(uniqueKeysWithValues: processObjects.map { ($0.value, $0.key) })
+    }
+
+    func responsibleProcessIdentifier(for processIdentifier: pid_t) -> pid_t? {
+        responsibleProcesses[processIdentifier]
     }
 
     func addListener(

@@ -33,27 +33,25 @@ enum ProcessResponsibilityResolver {
 }
 
 enum AudioOutputProbe {
+    /// Whether any of `processIdentifiers` — or a helper macOS holds one of
+    /// them responsible for — is producing output.
+    ///
+    /// Reading a process object's pid is cheap; reading its running-output
+    /// state is a round trip to coreaudiod, so the pid list is attributed
+    /// first and only the matching objects are asked whether they play.
     static func activity(
         for processIdentifiers: Set<pid_t>,
         responsibleProcessIdentifier: (pid_t) -> pid_t? =
             ProcessResponsibilityResolver.responsibleProcessIdentifier(for:)
     ) -> ProcessAudioActivity {
         guard !processIdentifiers.isEmpty else { return .inactive }
+        guard let processObjects = LiveAudioActivityBackend.processObjectsByID() else {
+            return .unknown
+        }
         var hadReadFailure = false
-
-        // The direct lookup answers the common case without enumerating every
-        // audio process, and it is the only place a per-process read failure
-        // is observable.
-        for processIdentifier in processIdentifiers.sorted() {
-            let processObject = LiveAudioActivityBackend.processObjectResult(
-                for: processIdentifier
-            )
-            guard processObject.status == noErr else {
-                hadReadFailure = true
-                continue
-            }
-            guard processObject.objectID != kAudioObjectUnknown else { continue }
-            let output = runningOutputState(processObject: processObject.objectID)
+        for (processObject, processIdentifier) in processObjects
+            where isAttributed(processIdentifier, to: processIdentifiers, responsibleProcessIdentifier) {
+            let output = runningOutputState(processObject: processObject)
             guard output.status == noErr else {
                 hadReadFailure = true
                 continue
@@ -62,17 +60,6 @@ enum AudioOutputProbe {
                 return .active
             }
         }
-
-        // Audio can come from helpers outside the app's own process set, such
-        // as launchd-spawned XPC services. Attribute every playing process to
-        // its responsible process and match again.
-        let playing = playingProcessIdentifiers(
-            responsibleProcessIdentifier: responsibleProcessIdentifier
-        )
-        if !processIdentifiers.isDisjoint(with: playing) {
-            return .active
-        }
-
         return hadReadFailure ? .unknown : .inactive
     }
 
@@ -81,14 +68,11 @@ enum AudioOutputProbe {
             ProcessResponsibilityResolver.responsibleProcessIdentifier(for:)
     ) -> Set<pid_t> {
         var playing: Set<pid_t> = []
-        for processObject in processObjects() {
+        for (processObject, processIdentifier)
+            in LiveAudioActivityBackend.processObjectsByID() ?? [:] {
             let output = runningOutputState(processObject: processObject)
-            guard output.status == noErr,
-                  output.isRunning,
-                  let playingIdentifier = processIdentifier(for: processObject) else {
-                continue
-            }
-            playing.insert(playingIdentifier)
+            guard output.status == noErr, output.isRunning else { continue }
+            playing.insert(processIdentifier)
         }
         return expandingResponsibleProcesses(
             playing,
@@ -109,53 +93,15 @@ enum AudioOutputProbe {
         return expanded
     }
 
-    private static func processObjects() -> [AudioObjectID] {
-        let systemObject = AudioObjectID(kAudioObjectSystemObject)
-        var address = AudioObjectPropertyAddress(
-            mSelector: kAudioHardwarePropertyProcessObjectList,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain
-        )
-        var dataSize: UInt32 = 0
-        guard AudioObjectGetPropertyDataSize(
-            systemObject,
-            &address,
-            0,
-            nil,
-            &dataSize
-        ) == noErr else { return [] }
-
-        let count = Int(dataSize) / MemoryLayout<AudioObjectID>.size
-        guard count > 0 else { return [] }
-        var objects = [AudioObjectID](repeating: kAudioObjectUnknown, count: count)
-        guard AudioObjectGetPropertyData(
-            systemObject,
-            &address,
-            0,
-            nil,
-            &dataSize,
-            &objects
-        ) == noErr else { return [] }
-        return objects
-    }
-
-    private static func processIdentifier(for processObject: AudioObjectID) -> pid_t? {
-        var processIdentifier: pid_t = 0
-        var valueSize = UInt32(MemoryLayout<pid_t>.size)
-        var address = AudioObjectPropertyAddress(
-            mSelector: kAudioProcessPropertyPID,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain
-        )
-        let status = AudioObjectGetPropertyData(
-            processObject,
-            &address,
-            0,
-            nil,
-            &valueSize,
-            &processIdentifier
-        )
-        return status == noErr && processIdentifier > 0 ? processIdentifier : nil
+    /// Whether `processIdentifier` belongs to `watched` directly or through
+    /// the process macOS holds responsible for it.
+    static func isAttributed(
+        _ processIdentifier: pid_t,
+        to watched: Set<pid_t>,
+        _ responsibleProcessIdentifier: (pid_t) -> pid_t?
+    ) -> Bool {
+        watched.contains(processIdentifier)
+            || responsibleProcessIdentifier(processIdentifier).map(watched.contains) == true
     }
 
     private static func runningOutputState(
@@ -190,12 +136,19 @@ struct AudioListenerToken: Hashable, Sendable {
 }
 
 protocol AudioActivityBackend: Sendable {
-    func processObject(for processIdentifier: pid_t) -> AudioObjectID?
+    /// Every Core Audio process object with the pid that owns it, or nil when
+    /// the list could not be read.
+    func processObjectsByID() -> [AudioObjectID: pid_t]?
+    func responsibleProcessIdentifier(for processIdentifier: pid_t) -> pid_t?
     func addListener(
         for target: AudioListenerTarget,
         onChange: @escaping @Sendable () -> Void
     ) -> AudioListenerToken?
     func removeListener(_ token: AudioListenerToken)
+}
+
+extension AudioActivityBackend {
+    func responsibleProcessIdentifier(for processIdentifier: pid_t) -> pid_t? { nil }
 }
 
 protocol AudioActivityMonitoring: Sendable {
@@ -221,8 +174,12 @@ final class LiveAudioActivityBackend: AudioActivityBackend, @unchecked Sendable 
     )
     private var registrations: [AudioListenerToken: Registration] = [:]
 
-    func processObject(for processIdentifier: pid_t) -> AudioObjectID? {
-        Self.processObject(for: processIdentifier)
+    func processObjectsByID() -> [AudioObjectID: pid_t]? {
+        Self.processObjectsByID()
+    }
+
+    func responsibleProcessIdentifier(for processIdentifier: pid_t) -> pid_t? {
+        ProcessResponsibilityResolver.responsibleProcessIdentifier(for: processIdentifier)
     }
 
     func addListener(
@@ -254,35 +211,61 @@ final class LiveAudioActivityBackend: AudioActivityBackend, @unchecked Sendable 
         )
     }
 
-    fileprivate static func processObject(for processIdentifier: pid_t) -> AudioObjectID? {
-        let result = processObjectResult(for: processIdentifier)
-        return result.status == noErr && result.objectID != kAudioObjectUnknown
-            ? result.objectID
-            : nil
-    }
-
-    fileprivate static func processObjectResult(
-        for processIdentifier: pid_t
-    ) -> (status: OSStatus, objectID: AudioObjectID) {
-        var pid = processIdentifier
-        var objectID = AudioObjectID(kAudioObjectUnknown)
-        var size = UInt32(MemoryLayout<AudioObjectID>.size)
+    fileprivate static func processObjectsByID() -> [AudioObjectID: pid_t]? {
+        let systemObject = AudioObjectID(kAudioObjectSystemObject)
         var address = AudioObjectPropertyAddress(
-            mSelector: kAudioHardwarePropertyTranslatePIDToProcessObject,
+            mSelector: kAudioHardwarePropertyProcessObjectList,
             mScope: kAudioObjectPropertyScopeGlobal,
             mElement: kAudioObjectPropertyElementMain
         )
-        let status = withUnsafePointer(to: &pid) { qualifier in
-            AudioObjectGetPropertyData(
-                AudioObjectID(kAudioObjectSystemObject),
-                &address,
-                UInt32(MemoryLayout<pid_t>.size),
-                qualifier,
-                &size,
-                &objectID
-            )
+        var dataSize: UInt32 = 0
+        guard AudioObjectGetPropertyDataSize(
+            systemObject,
+            &address,
+            0,
+            nil,
+            &dataSize
+        ) == noErr else { return nil }
+
+        let count = Int(dataSize) / MemoryLayout<AudioObjectID>.size
+        guard count > 0 else { return [:] }
+        var objects = [AudioObjectID](repeating: kAudioObjectUnknown, count: count)
+        guard AudioObjectGetPropertyData(
+            systemObject,
+            &address,
+            0,
+            nil,
+            &dataSize,
+            &objects
+        ) == noErr else { return nil }
+
+        var result: [AudioObjectID: pid_t] = [:]
+        result.reserveCapacity(objects.count)
+        for object in objects {
+            if let processIdentifier = processIdentifier(for: object) {
+                result[object] = processIdentifier
+            }
         }
-        return (status, objectID)
+        return result
+    }
+
+    private static func processIdentifier(for processObject: AudioObjectID) -> pid_t? {
+        var processIdentifier: pid_t = 0
+        var valueSize = UInt32(MemoryLayout<pid_t>.size)
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioProcessPropertyPID,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        let status = AudioObjectGetPropertyData(
+            processObject,
+            &address,
+            0,
+            nil,
+            &valueSize,
+            &processIdentifier
+        )
+        return status == noErr && processIdentifier > 0 ? processIdentifier : nil
     }
 
     fileprivate static var runningOutputAddress: AudioObjectPropertyAddress {
@@ -362,7 +345,15 @@ actor AudioActivityMonitor: AudioActivityMonitoring {
         }
         installProcessListListenerIfNeeded()
 
-        let desiredObjects = Set(watchedProcessIdentifiers.compactMap(backend.processObject))
+        // Audio often plays from helpers outside the app's own process set
+        // (launchd-spawned XPC services), so the listeners cover every process
+        // object whose pid, or responsible pid, is watched.
+        let watched = watchedProcessIdentifiers
+        let desiredObjects = Set((backend.processObjectsByID() ?? [:]).compactMap { object, pid in
+            AudioOutputProbe.isAttributed(pid, to: watched, backend.responsibleProcessIdentifier)
+                ? object
+                : nil
+        })
         for objectID in Set(processListeners.keys).subtracting(desiredObjects) {
             guard let listener = processListeners.removeValue(forKey: objectID) else { continue }
             backend.removeListener(listener.token)
