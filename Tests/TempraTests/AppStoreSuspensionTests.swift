@@ -75,10 +75,7 @@ struct AppStoreSuspensionTests {
             let coordinator = ProcessManagementCoordinator(
                 controller: ProcessController(
                     crashWatchdog: SuspensionTestProcessCrashWatchdog(),
-                    frontmostProvider: { nil },
-                    windowSnapshotProvider: {
-                        WindowVisibilitySnapshot(windowsFrontToBack: [], screenBounds: [])
-                    }
+                    frontmostProvider: { nil }
                 ),
                 processWatcher: ManagedProcessWatcher(
                     audioMonitor: SuspensionTestAudioMonitor()
@@ -239,10 +236,7 @@ struct AppStoreSuspensionTests {
             let coordinator = ProcessManagementCoordinator(
                 controller: ProcessController(
                     crashWatchdog: SuspensionTestProcessCrashWatchdog(),
-                    frontmostProvider: { nil },
-                    windowSnapshotProvider: {
-                        WindowVisibilitySnapshot(windowsFrontToBack: [], screenBounds: [])
-                    }
+                    frontmostProvider: { nil }
                 ),
                 processWatcher: ManagedProcessWatcher(
                     audioMonitor: SuspensionTestAudioMonitor()
@@ -312,10 +306,7 @@ struct AppStoreSuspensionTests {
             let coordinator = ProcessManagementCoordinator(
                 controller: ProcessController(
                     crashWatchdog: SuspensionTestProcessCrashWatchdog(),
-                    frontmostProvider: { nil },
-                    windowSnapshotProvider: {
-                        WindowVisibilitySnapshot(windowsFrontToBack: [], screenBounds: [])
-                    }
+                    frontmostProvider: { nil }
                 ),
                 processWatcher: ManagedProcessWatcher(
                     audioMonitor: SuspensionTestAudioMonitor()
@@ -393,10 +384,7 @@ struct AppStoreSuspensionTests {
                 controller: ProcessController(
                     system: processSystem,
                     crashWatchdog: SuspensionTestProcessCrashWatchdog(),
-                    frontmostProvider: { nil },
-                    windowSnapshotProvider: {
-                        WindowVisibilitySnapshot(windowsFrontToBack: [], screenBounds: [])
-                    }
+                    frontmostProvider: { nil }
                 ),
                 processWatcher: ManagedProcessWatcher(
                     audioMonitor: SuspensionTestAudioMonitor()

@@ -1934,7 +1934,6 @@ struct ProcessControllerSchedulingTests {
             system: RecordingProcessSystem(),
             crashWatchdog: RecordingProcessCrashWatchdog(),
             frontmostProvider: { nil },
-            windowSnapshotProvider: { nil },
             clock: manualClock.clock
         )
         let rule = AppRule(
@@ -3349,11 +3348,9 @@ struct ProcessControllerSchedulingTests {
         let manualClock = ManualProcessControlClock()
         let system = RecordingProcessSystem()
         let controlledProcess = process(17)
-        let hiddenSnapshot = WindowVisibilitySnapshot(windowsFrontToBack: [], screenBounds: [])
         let controller = ProcessController(
             system: system,
             crashWatchdog: RecordingProcessCrashWatchdog(),
-            windowSnapshotProvider: { hiddenSnapshot },
             controlInterval: 0.1,
             minimumRunDuration: 0.005,
             clock: manualClock.clock
@@ -3407,11 +3404,9 @@ struct ProcessControllerSchedulingTests {
         let system = RecordingProcessSystem()
         let watchdog = RecordingProcessCrashWatchdog()
         let controlledProcess = process(18)
-        let hiddenSnapshot = WindowVisibilitySnapshot(windowsFrontToBack: [], screenBounds: [])
         let controller = ProcessController(
             system: system,
             crashWatchdog: watchdog,
-            windowSnapshotProvider: { hiddenSnapshot },
             clock: manualClock.clock
         )
 
@@ -3487,11 +3482,9 @@ struct ProcessControllerSchedulingTests {
         let system = RecordingProcessSystem()
         let watchdog = RecordingProcessCrashWatchdog()
         let controlledProcess = process(35)
-        let hiddenSnapshot = WindowVisibilitySnapshot(windowsFrontToBack: [], screenBounds: [])
         let controller = ProcessController(
             system: system,
             crashWatchdog: watchdog,
-            windowSnapshotProvider: { hiddenSnapshot },
             clock: manualClock.clock
         )
 
@@ -3532,11 +3525,9 @@ struct ProcessControllerSchedulingTests {
         let manualClock = ManualProcessControlClock()
         let system = RecordingProcessSystem()
         let controlledProcess = process(34)
-        let hiddenSnapshot = WindowVisibilitySnapshot(windowsFrontToBack: [], screenBounds: [])
         let controller = ProcessController(
             system: system,
             crashWatchdog: RecordingProcessCrashWatchdog(),
-            windowSnapshotProvider: { hiddenSnapshot },
             clock: manualClock.clock
         )
 
@@ -3621,11 +3612,9 @@ struct ProcessControllerSchedulingTests {
         let system = RecordingProcessSystem()
         let controlledProcess = process(12)
         system.failNextStop(for: controlledProcess)
-        let hiddenSnapshot = WindowVisibilitySnapshot(windowsFrontToBack: [], screenBounds: [])
         let controller = ProcessController(
             system: system,
             crashWatchdog: RecordingProcessCrashWatchdog(),
-            windowSnapshotProvider: { hiddenSnapshot },
             controlInterval: 0.5,
             minimumRunDuration: 0.005,
             clock: manualClock.clock

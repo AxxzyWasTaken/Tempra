@@ -53,7 +53,6 @@ actor ProcessController {
     typealias FrontmostProvider = @MainActor @Sendable () -> String?
     typealias ApplicationAction = @MainActor @Sendable (String) -> Bool
     typealias AsyncApplicationAction = @MainActor @Sendable (String) async -> Bool
-    typealias WindowSnapshotProvider = @Sendable () -> WindowVisibilitySnapshot?
 
     @TaskLocal private static var reconciliationContext: ProcessReconciliationContext?
 
@@ -95,7 +94,6 @@ actor ProcessController {
     private let hideApplication: ApplicationAction
     private let gracefulTerminateApplication: ApplicationAction
     private let relaunchApplication: AsyncApplicationAction
-    private let windowSnapshotProvider: WindowSnapshotProvider
     private let controlInterval: TimeInterval
     private let minimumRunDuration: TimeInterval
     private let clock: ProcessControlClock
@@ -226,9 +224,6 @@ actor ProcessController {
                 }
             }
         },
-        windowSnapshotProvider: @escaping WindowSnapshotProvider = {
-            WindowVisibilitySnapshot.capture()
-        },
         controlInterval: TimeInterval = 0.5,
         minimumRunDuration: TimeInterval = 0.005,
         clock: ProcessControlClock = .continuous,
@@ -241,7 +236,6 @@ actor ProcessController {
         self.hideApplication = hideApplication
         self.gracefulTerminateApplication = gracefulTerminateApplication
         self.relaunchApplication = relaunchApplication
-        self.windowSnapshotProvider = windowSnapshotProvider
         self.controlInterval = controlInterval
         self.minimumRunDuration = minimumRunDuration
         self.clock = clock
@@ -312,12 +306,7 @@ actor ProcessController {
             return snapshot()
         }
 
-        for (identifier, target) in incomingGroups {
-            guard let current = groups[identifier] else { continue }
-            var updated = target
-            updated.windowVisibility = current.windowVisibility
-            groups[identifier] = updated
-        }
+        groups = incomingGroups
         return snapshot()
     }
 
@@ -950,7 +939,6 @@ actor ProcessController {
         let now = Date()
         refreshNetworkSensitivity()
         if trigger == .cadence {
-            refreshWindowVisibility()
             await refreshCriticalFileProtection()
             guard workIsCurrent else { return }
         }
@@ -3191,26 +3179,6 @@ actor ProcessController {
             }
             guard !Task.isCancelled else { return }
             await self?.requestCadenceTick()
-        }
-    }
-
-    private func refreshWindowVisibility() {
-        let snapshot = windowSnapshotProvider()
-        var identifiers: [String] = []
-        var requests: [WindowVisibilitySnapshot.Request] = []
-        for (identifier, rule) in rules where rule.hasBehavior {
-            guard let app = groups[identifier] else { continue }
-            identifiers.append(identifier)
-            requests.append(WindowVisibilitySnapshot.Request(
-                processIdentifiers: Set(app.processIdentities.map(\.pid)),
-                isHidden: false
-            ))
-        }
-        let visibilities = snapshot?.visibilities(for: requests)
-        for (index, identifier) in identifiers.enumerated() {
-            guard var app = groups[identifier] else { continue }
-            app.windowVisibility = visibilities?[index] ?? .unknown
-            groups[identifier] = app
         }
     }
 
