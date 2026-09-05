@@ -384,16 +384,12 @@ struct ProcessMonitorTests {
             audioProcessIdentifiers: { [] },
             windowSnapshot: { nil },
             processTableReader: {
-                (
-                    entries: [ProcessTableEntry(
-                        pid: 100,
-                        parentPID: 1,
-                        userID: 501,
-                        cpuPercent: 0,
-                        command: "/Applications/Example.app/Contents/MacOS/Example"
-                    )],
-                    samplerPID: 999
-                )
+                [ProcessTableEntry(
+                    pid: 100,
+                    parentPID: 1,
+                    userID: 501,
+                    command: "/Applications/Example.app/Contents/MacOS/Example"
+                )]
             },
             privilegedSnapshotReader: { _ in [:] }
         )
@@ -663,16 +659,12 @@ struct ProcessMonitorTests {
             audioProcessIdentifiers: { [] },
             windowSnapshot: { nil },
             processTableReader: {
-                (
-                    entries: [ProcessTableEntry(
-                        pid: 200,
-                        parentPID: 1,
-                        userID: 501,
-                        cpuPercent: 25,
-                        command: executablePath
-                    )],
-                    samplerPID: 999
-                )
+                [ProcessTableEntry(
+                    pid: 200,
+                    parentPID: 1,
+                    userID: 501,
+                    command: executablePath
+                )]
             }
         )
 
@@ -711,16 +703,12 @@ struct ProcessMonitorTests {
             audioProcessIdentifiers: { [] },
             windowSnapshot: { nil },
             processTableReader: {
-                (
-                    entries: [ProcessTableEntry(
-                        pid: processID,
-                        parentPID: 1,
-                        userID: 0,
-                        cpuPercent: 12,
-                        command: executablePath
-                    )],
-                    samplerPID: 999
-                )
+                [ProcessTableEntry(
+                    pid: processID,
+                    parentPID: 1,
+                    userID: 0,
+                    command: executablePath
+                )]
             },
             privilegedSnapshotReader: { requestedPIDs in
                 #expect(requestedPIDs == [processID])
@@ -746,6 +734,77 @@ struct ProcessMonitorTests {
         #expect(result.residentMemoryBytes == 64 * 1_024 * 1_024)
         #expect(result.name == "example-root-service")
         #expect(monitor.privilegedAccessError == nil)
+    }
+
+    @Test("The CPU report is read only for processes the helper cannot describe")
+    func cpuReportIsLastResort() async throws {
+        let reader = StubProcessSnapshotReader(snapshots: [:], paths: [:])
+        var cpuReportReadCount = 0
+        var privilegedSnapshots: [pid_t: ProcessKernelSnapshot] = [
+            220: ProcessKernelSnapshot(
+                identity: ProcessIdentity(
+                    pid: 220,
+                    startTimeMicroseconds: 7_000_000,
+                    requiresPrivilegedControl: true
+                ),
+                parentPID: 1,
+                userID: 0,
+                executableName: "root-service",
+                executablePath: "/usr/libexec/root-service",
+                totalCPUTimeNanoseconds: 0,
+                residentMemoryBytes: 0
+            ),
+        ]
+        var uptime: TimeInterval = 1
+        let monitor = ProcessMonitor(
+            processReader: reader,
+            currentUserID: 501,
+            uptime: { uptime },
+            audioProcessIdentifiers: { [] },
+            windowSnapshot: { nil },
+            processTableReader: {
+                [ProcessTableEntry(
+                    pid: 220,
+                    parentPID: 1,
+                    userID: 0,
+                    command: "/usr/libexec/root-service"
+                )]
+            },
+            processCPUReportReader: {
+                cpuReportReadCount += 1
+                return [220: 12.5]
+            },
+            privilegedSnapshotReader: { _ in privilegedSnapshots }
+        )
+
+        let described = try #require(await monitor.sample(
+            inventory: inventory(),
+            includingEssentialSystemProcesses: true,
+            processTableRefreshInterval: 1
+        ).first)
+        #expect(cpuReportReadCount == 0)
+        #expect(described.processIdentities.count == 1)
+
+        // The helper stops answering: the report is the only source left.
+        privilegedSnapshots = [:]
+        uptime = 10
+        let reported = try #require(await monitor.sample(
+            inventory: inventory(),
+            includingEssentialSystemProcesses: true,
+            processTableRefreshInterval: 1
+        ).first)
+        #expect(cpuReportReadCount == 1)
+        #expect(reported.processIdentities.isEmpty)
+        #expect(reported.cpuPercent == 12.5)
+
+        // Within the refresh interval the cached report is reused.
+        uptime = 10.5
+        _ = await monitor.sample(
+            inventory: inventory(),
+            includingEssentialSystemProcesses: true,
+            processTableRefreshInterval: 1
+        )
+        #expect(cpuReportReadCount == 1)
     }
 
     @Test("Window visibility is applied to each app from one snapshot")
@@ -956,16 +1015,12 @@ struct ProcessMonitorTests {
             windowSnapshot: { nil },
             processTableReader: {
                 processTableReadCount += 1
-                return (
-                    entries: [ProcessTableEntry(
-                        pid: 100,
-                        parentPID: 1,
-                        userID: 501,
-                        cpuPercent: 0,
-                        command: "/Applications/Example.app/Contents/MacOS/Example"
-                    )],
-                    samplerPID: 999
-                )
+                return [ProcessTableEntry(
+                    pid: 100,
+                    parentPID: 1,
+                    userID: 501,
+                    command: "/Applications/Example.app/Contents/MacOS/Example"
+                )]
             },
             privilegedSnapshotReader: { _ in [:] }
         )
@@ -1028,16 +1083,12 @@ struct ProcessMonitorTests {
             audioProcessIdentifiers: { audioProbe.read() },
             windowSnapshot: { nil },
             processTableReader: {
-                (
-                    entries: [ProcessTableEntry(
-                        pid: 100,
-                        parentPID: 1,
-                        userID: 501,
-                        cpuPercent: 0,
-                        command: "/Applications/Example.app/Contents/MacOS/Example"
-                    )],
-                    samplerPID: 999
-                )
+                [ProcessTableEntry(
+                    pid: 100,
+                    parentPID: 1,
+                    userID: 501,
+                    command: "/Applications/Example.app/Contents/MacOS/Example"
+                )]
             }
         )
         let appInventory = inventory(app("Example", pid: 100))

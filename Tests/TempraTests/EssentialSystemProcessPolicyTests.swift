@@ -319,23 +319,18 @@ struct BackgroundProcessPolicyTests {
         ))
     }
 
-    @Test("Process-table parsing preserves commands containing spaces")
-    func processTableParsing() throws {
-        let entries = ProcessTableEntry.parse(
+    @Test("CPU-report parsing maps pids to percentages and skips malformed rows")
+    func processCPUReportParsing() {
+        let report = ProcessCPUReport.parse(
             """
-                1     0     0   1.7 /sbin/launchd
-               42     1   501   0.3 /Applications/Example App.app/Contents/MacOS/Example App
+                1   1.7
+               42   0.3
+              100  -0.5
             malformed row
             """
         )
 
-        #expect(entries.count == 2)
-        let launchd = try #require(entries.first)
-        #expect(launchd.pid == 1)
-        #expect(launchd.userID == 0)
-        #expect(launchd.cpuPercent == 1.7)
-        #expect(launchd.command == "/sbin/launchd")
-        #expect(entries[1].command == "/Applications/Example App.app/Contents/MacOS/Example App")
+        #expect(report == [1: 1.7, 42: 0.3, 100: 0])
     }
 
     @Test("Live sampler includes root-owned launchd as monitor-only")

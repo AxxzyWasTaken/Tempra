@@ -3,35 +3,94 @@ import Darwin
 import Foundation
 import TempraSafety
 
+/// One row of the kernel process table. Comes from `sysctl(KERN_PROC_ALL)`,
+/// which lists every process regardless of owner.
 struct ProcessTableEntry: Equatable {
     let pid: pid_t
     let parentPID: pid_t
     let userID: uid_t
-    let cpuPercent: Double
     let command: String
 
-    static func parse(_ output: String) -> [ProcessTableEntry] {
-        output.split(whereSeparator: \.isNewline).compactMap { line in
-            let fields = line.split(
-                maxSplits: 4,
-                omittingEmptySubsequences: true,
-                whereSeparator: \.isWhitespace
-            )
-            guard fields.count == 5,
-                  let pid = Int32(fields[0]),
-                  let parentPID = Int32(fields[1]),
-                  let userID = UInt32(fields[2]),
-                  let cpuPercent = Double(fields[3]) else {
-                return nil
+    static func readAll(
+        executablePath: (pid_t) -> String? = LiveProcessSnapshotReader().executablePath(for:)
+    ) -> [ProcessTableEntry]? {
+        var name: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_ALL, 0]
+        var byteCount = 0
+        guard sysctl(&name, UInt32(name.count), nil, &byteCount, nil, 0) == 0,
+              byteCount > 0 else { return nil }
+        // The table can grow between the size query and the read.
+        byteCount += byteCount / 8
+        let stride = MemoryLayout<kinfo_proc>.stride
+        var buffer = [kinfo_proc](repeating: kinfo_proc(), count: byteCount / stride)
+        guard sysctl(&name, UInt32(name.count), &buffer, &byteCount, nil, 0) == 0 else {
+            return nil
+        }
+        return buffer.prefix(byteCount / stride).compactMap { info -> ProcessTableEntry? in
+            let pid = info.kp_proc.p_pid
+            guard pid > 0 else { return nil }
+            var shortName = info.kp_proc.p_comm
+            let fallbackName: String = withUnsafeBytes(of: &shortName) { bytes in
+                String(decoding: bytes.prefix { $0 != 0 }, as: UTF8.self)
             }
             return ProcessTableEntry(
                 pid: pid,
-                parentPID: parentPID,
-                userID: userID,
-                cpuPercent: max(0, cpuPercent),
-                command: String(fields[4])
+                parentPID: info.kp_eproc.e_ppid,
+                userID: info.kp_eproc.e_ucred.cr_uid,
+                command: executablePath(pid) ?? fallbackName
             )
         }
+    }
+}
+
+/// CPU percentages for processes nothing else can read.
+///
+/// `proc_pidinfo` refuses other users' processes, and so does everything
+/// else short of root; `/bin/ps` is setuid and can answer. Spawning it costs
+/// ~100ms, so this is the last resort for processes the privileged helper
+/// could not report either.
+enum ProcessCPUReport {
+    static func read() -> [pid_t: Double]? {
+        let process = Process()
+        let outputPipe = Pipe()
+        process.executableURL = URL(fileURLWithPath: "/bin/ps")
+        process.arguments = ["-axo", "pid=,pcpu="]
+        var environment = ProcessInfo.processInfo.environment
+        environment["LC_ALL"] = "C"
+        process.environment = environment
+        process.standardOutput = outputPipe
+        process.standardError = FileHandle.nullDevice
+
+        do {
+            try process.run()
+        } catch {
+            return nil
+        }
+
+        let data = outputPipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0,
+              let output = String(data: data, encoding: .utf8) else {
+            return nil
+        }
+        return parse(output)
+    }
+
+    static func parse(_ output: String) -> [pid_t: Double] {
+        var result: [pid_t: Double] = [:]
+        for line in output.split(whereSeparator: \.isNewline) {
+            let fields = line.split(
+                maxSplits: 2,
+                omittingEmptySubsequences: true,
+                whereSeparator: \.isWhitespace
+            )
+            guard fields.count == 2,
+                  let pid = Int32(fields[0]),
+                  let cpuPercent = Double(fields[1]) else {
+                continue
+            }
+            result[pid] = max(0, cpuPercent)
+        }
+        return result
     }
 }
 
@@ -668,10 +727,8 @@ struct ProcessAssignmentResolver {
 }
 
 final class ProcessMonitor {
-    typealias ProcessTableReader = () -> (
-        entries: [ProcessTableEntry],
-        samplerPID: pid_t
-    )?
+    typealias ProcessTableReader = () -> [ProcessTableEntry]?
+    typealias ProcessCPUReportReader = () -> [pid_t: Double]?
     typealias PrivilegedSnapshotReader = @Sendable ([pid_t]) async throws -> [
         pid_t: ProcessKernelSnapshot
     ]
@@ -724,6 +781,7 @@ final class ProcessMonitor {
     private var metadataCache = ProcessMetadataCache()
     private var cachedProcessTableEntries: [ProcessTableEntry] = []
     private var processTableRefreshTime: TimeInterval = 0
+    private var cachedCPUReport: [pid_t: Double] = [:]
     private let backgroundSampleReuseInterval: TimeInterval = 5
     private var cachedBackgroundSample: [ManagedApp] = []
     private var backgroundSampleTime: TimeInterval = 0
@@ -737,6 +795,7 @@ final class ProcessMonitor {
     private let networkActivity: @Sendable (ProcessIdentity) -> ProcessNetworkActivity
     private let windowSnapshot: () -> WindowVisibilitySnapshot?
     private let processTableReader: ProcessTableReader
+    private let processCPUReportReader: ProcessCPUReportReader
     private let privilegedSnapshotReader: PrivilegedSnapshotReader
     private let excludedExecutablePaths: Set<String>
     private var cachedAudioProcessIdentifiers: Set<pid_t>?
@@ -760,7 +819,10 @@ final class ProcessMonitor {
             WindowVisibilitySnapshot.capture()
         },
         processTableReader: @escaping ProcessTableReader = {
-            ProcessMonitor.readProcessTable()
+            ProcessTableEntry.readAll()
+        },
+        processCPUReportReader: @escaping ProcessCPUReportReader = {
+            ProcessCPUReport.read()
         },
         privilegedSnapshotReader: @escaping PrivilegedSnapshotReader = { processIdentifiers in
             try await PrivilegedProcessClient.shared.snapshots(for: processIdentifiers)
@@ -775,6 +837,7 @@ final class ProcessMonitor {
         self.networkActivity = networkActivity
         self.windowSnapshot = windowSnapshot
         self.processTableReader = processTableReader
+        self.processCPUReportReader = processCPUReportReader
         self.privilegedSnapshotReader = privilegedSnapshotReader
         self.excludedExecutablePaths = excludedExecutablePaths
             ?? Self.bundledHelperExecutablePaths()
@@ -1039,16 +1102,16 @@ final class ProcessMonitor {
         )
 
         let now = uptime()
-        if cachedProcessTableEntries.isEmpty
-            || now - processTableRefreshTime >= processTableRefreshInterval {
+        let refreshesProcessTable = cachedProcessTableEntries.isEmpty
+            || now - processTableRefreshTime >= processTableRefreshInterval
+        if refreshesProcessTable {
             guard let processTable = processTableReader() else {
                 cachedProcessTableEntries.removeAll()
+                cachedCPUReport.removeAll()
                 processTableRefreshTime = now
                 return accessibleProcesses
             }
-            cachedProcessTableEntries = processTable.entries.filter {
-                $0.pid != processTable.samplerPID
-            }
+            cachedProcessTableEntries = processTable
             processTableRefreshTime = now
         }
 
@@ -1067,6 +1130,14 @@ final class ProcessMonitor {
                 privilegedSnapshots = [:]
                 privilegedAccessError = error.localizedDescription
             }
+        }
+
+        // Processes neither this user nor the helper can read still get a
+        // usage figure, but only from the expensive report, and only on the
+        // table's own refresh cadence.
+        if refreshesProcessTable,
+           inaccessiblePIDs.contains(where: { privilegedSnapshots[$0] == nil }) {
+            cachedCPUReport = processCPUReportReader() ?? [:]
         }
 
         var processes = cachedProcessTableEntries.compactMap { entry in
@@ -1088,7 +1159,7 @@ final class ProcessMonitor {
                 ),
                 path: entry.command,
                 counter: nil,
-                reportedCPUPercent: entry.cpuPercent,
+                reportedCPUPercent: cachedCPUReport[entry.pid],
                 residentMemoryBytes: nil
             )
             return isIncludedProcess(process) ? process : nil
@@ -1161,36 +1232,6 @@ final class ProcessMonitor {
     private static func canUseApplicationCommands(_ app: ManagedApp) -> Bool {
         !app.requiresPrivilegedControl
             && !BackgroundProcessPolicy.isBackgroundIdentifier(app.bundleIdentifier)
-    }
-
-    private static func readProcessTable() -> (
-        entries: [ProcessTableEntry],
-        samplerPID: pid_t
-    )? {
-        let process = Process()
-        let outputPipe = Pipe()
-        process.executableURL = URL(fileURLWithPath: "/bin/ps")
-        process.arguments = ["-axo", "pid=,ppid=,uid=,pcpu=,comm="]
-        var environment = ProcessInfo.processInfo.environment
-        environment["LC_ALL"] = "C"
-        process.environment = environment
-        process.standardOutput = outputPipe
-        process.standardError = FileHandle.nullDevice
-
-        do {
-            try process.run()
-        } catch {
-            return nil
-        }
-
-        let samplerPID = process.processIdentifier
-        let data = outputPipe.fileHandleForReading.readDataToEndOfFile()
-        process.waitUntilExit()
-        guard process.terminationStatus == 0,
-              let output = String(data: data, encoding: .utf8) else {
-            return nil
-        }
-        return (ProcessTableEntry.parse(output), samplerPID)
     }
 
     private func runningBundles(
