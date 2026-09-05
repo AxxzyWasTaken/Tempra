@@ -20,12 +20,11 @@ struct ProcessGuardianTests {
 
         #expect(state.protectedProcesses.isEmpty)
         #expect(state.restoredProcesses == [process])
-        #expect(state.takeRestored(from: [process]) == [process])
-        #expect(state.restoredProcesses.isEmpty)
+        #expect(state.requiresSynchronization(with: []))
     }
 
-    @Test("A new stop protects a process again after recovery")
-    func stopProtectsProcessAgainAfterRecovery() {
+    @Test("A new preparation protects a process again after recovery")
+    func preparationProtectsProcessAgainAfterRecovery() {
         let process = clientProcessIdentity(pid: 2_002)
         let guardianInstanceID = UUID()
         var state = ProcessGuardianProtectionState()
@@ -34,11 +33,10 @@ struct ProcessGuardianTests {
         state.prepared([process], stale: [])
         state.connectionLost()
         state.connected(to: guardianInstanceID)
-        state.stopped([process])
+        state.prepared([process], stale: [])
 
         #expect(state.protectedProcesses == [process])
         #expect(state.restoredProcesses.isEmpty)
-        #expect(state.takeRestored(from: [process]).isEmpty)
     }
 
     @Test("A new guardian instance records guarded processes as restored")
@@ -53,20 +51,6 @@ struct ProcessGuardianTests {
         #expect(state.guardianInstanceID != nil)
         #expect(state.protectedProcesses.isEmpty)
         #expect(state.restoredProcesses == [process])
-    }
-
-    @Test("Resume sends only protected processes to the guardian")
-    func resumeSelectsOnlyProtectedProcesses() {
-        let protected = clientProcessIdentity(pid: 2_004)
-        let running = clientProcessIdentity(pid: 2_005)
-        var state = ProcessGuardianProtectionState()
-        state.connected(to: UUID())
-        state.prepared([protected], stale: [])
-
-        let selection = state.resumeSelection(from: [protected, running])
-
-        #expect(selection.requiresGuardian == [protected])
-        #expect(selection.alreadyRunning == [running])
     }
 
     @Test("Preparation sends only processes that do not have protection")

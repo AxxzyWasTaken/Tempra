@@ -22,18 +22,12 @@ enum ProcessLimitSchedulerModel {
         var processIdentities: Set<ProcessIdentity>
     }
 
-    enum DeadlineKind: Sendable {
-        case stop
-        case evaluate
-    }
-
     struct Deadline: Sendable {
         let identifier: String
         let deadline: ContinuousClock.Instant
         let generation: UInt64
         let limitPercent: Double
         let processIdentities: Set<ProcessIdentity>
-        let kind: DeadlineKind
     }
 
     struct DeadlineQueue: Sendable {

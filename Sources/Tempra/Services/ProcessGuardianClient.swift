@@ -59,34 +59,6 @@ struct ProcessGuardianProtectionState: Equatable, Sendable {
         restoredProcesses.subtract(protectedProcesses)
     }
 
-    mutating func stopped(_ processes: Set<ProcessIdentity>) {
-        protectedProcesses.formUnion(processes)
-        restoredProcesses.subtract(processes)
-    }
-
-    mutating func takeRestored(
-        from requested: Set<ProcessIdentity>
-    ) -> Set<ProcessIdentity> {
-        let restored = requested.intersection(restoredProcesses)
-        restoredProcesses.subtract(restored)
-        return restored
-    }
-
-    func resumeSelection(
-        from requested: Set<ProcessIdentity>
-    ) -> (requiresGuardian: Set<ProcessIdentity>, alreadyRunning: Set<ProcessIdentity>) {
-        let requiresGuardian = requested.intersection(protectedProcesses)
-        return (
-            requiresGuardian: requiresGuardian,
-            alreadyRunning: requested.subtracting(requiresGuardian)
-        )
-    }
-
-    mutating func resumed(_ processes: Set<ProcessIdentity>) {
-        protectedProcesses.subtract(processes)
-        restoredProcesses.subtract(processes)
-    }
-
     mutating func disarmed() {
         protectedProcesses.removeAll()
         restoredProcesses.removeAll()
@@ -652,83 +624,6 @@ actor ProcessGuardianClient {
         }
     }
 
-    func stop(
-        _ processes: Set<ProcessIdentity>,
-        automaticResumeAfter: TimeInterval?
-    ) async -> ProcessOperationResult {
-        let deadlines: [WatchdogResumeDeadline]
-        do {
-            if let automaticResumeAfter {
-                deadlines = try Self.resumeDeadlines(
-                    for: Dictionary(uniqueKeysWithValues: processes.map {
-                        ($0, automaticResumeAfter)
-                    })
-                )
-            } else {
-                deadlines = []
-            }
-            let response = try await perform(
-                .stop,
-                processes: processes,
-                resumeDeadlines: deadlines
-            )
-            let result = try operationResult(response, requested: processes)
-            protectionState.stopped(result.applied)
-            protectionState.resumed(result.stale)
-            if let automaticResumeAfter {
-                for process in result.applied {
-                    automaticResumeIntervals[process] = automaticResumeAfter
-                }
-            }
-            for process in result.stale.union(result.failed) {
-                automaticResumeIntervals.removeValue(forKey: process)
-            }
-            return result
-        } catch {
-            return ProcessOperationResult(
-                failed: processes,
-                failureDescription: error.localizedDescription
-            )
-        }
-    }
-
-    func resume(_ processes: Set<ProcessIdentity>) async -> ProcessOperationResult {
-        var selection = protectionState.resumeSelection(from: processes)
-        protectionState.resumed(selection.alreadyRunning)
-        guard !selection.requiresGuardian.isEmpty else {
-            return ProcessOperationResult(applied: selection.alreadyRunning)
-        }
-        do {
-            let connection = try await readyConnection()
-            selection = protectionState.resumeSelection(from: processes)
-            protectionState.resumed(selection.alreadyRunning)
-            guard !selection.requiresGuardian.isEmpty else {
-                return ProcessOperationResult(applied: selection.alreadyRunning)
-            }
-            let response = try await sendRequest(
-                .resume,
-                processes: selection.requiresGuardian,
-                through: connection
-            )
-            var result = try operationResult(
-                response,
-                requested: selection.requiresGuardian
-            )
-            protectionState.resumed(result.applied.union(result.stale))
-            for process in result.applied.union(result.stale) {
-                automaticResumeIntervals.removeValue(forKey: process)
-            }
-            result.applied.formUnion(selection.alreadyRunning)
-            return result
-        } catch {
-            return ProcessOperationResult(
-                applied: selection.alreadyRunning,
-                failed: selection.requiresGuardian,
-                failureDescription: error.localizedDescription
-            )
-        }
-    }
-
     func disarm() async throws {
         let response = try await perform(.disarm)
         _ = try mappedOperationState(
@@ -1033,31 +928,6 @@ actor ProcessGuardianClient {
             invalidate()
             throw ProcessGuardianClientError.invalidResponse
         }
-    }
-
-    private func operationResult(
-        _ response: ProcessGuardianResponse,
-        requested: Set<ProcessIdentity>
-    ) throws -> ProcessOperationResult {
-        let mapped = try mappedOperationState(response, among: requested)
-        let applied = mapped.applied
-        let stale = mapped.stale
-        var failed = mapped.failed
-        if response.errorCode != nil || response.errorMessage != nil {
-            failed.formUnion(
-                requested.subtracting(applied.union(stale).union(failed))
-            )
-        }
-        guard applied.union(stale).union(failed) == requested else {
-            invalidate()
-            throw ProcessGuardianClientError.invalidResponse
-        }
-        return ProcessOperationResult(
-            applied: applied,
-            stale: stale,
-            failed: failed,
-            failureDescription: response.errorMessage
-        )
     }
 
     private func mappedOperationState(

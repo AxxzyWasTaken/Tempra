@@ -2062,8 +2062,7 @@ actor ProcessController {
             deadline: now.advanced(by: ProcessControlMath.duration(max(0.001, interval))),
             generation: runtime.generation,
             limitPercent: limitPercent,
-            processIdentities: runtime.processIdentities,
-            kind: .evaluate
+            processIdentities: runtime.processIdentities
         ))
     }
 
@@ -2298,27 +2297,6 @@ actor ProcessController {
                 : limitStatus(for: identifier, fallback: requestedLimitPercent),
             for: identifier
         )
-    }
-
-    private func finishLimitCycle(
-        identifier: String,
-        generation: UInt64,
-        limitPercent: Double,
-        processIdentities: Set<ProcessIdentity>
-    ) async {
-        guard workIsCurrent,
-              let runtime = limitRuntimes[identifier],
-              runtime.generation == generation,
-              runtime.processIdentities == processIdentities else {
-            return
-        }
-        guard managementIsActive,
-              let currentApp = groups[identifier],
-              processIdentities.isSubset(of: currentApp.processIdentities),
-              rules[identifier]?.action == .limit else {
-            return
-        }
-        await runLimitCycle(for: currentApp, limitPercent: limitPercent)
     }
 
     private func limitControlIsCurrent(
@@ -3050,17 +3028,7 @@ actor ProcessController {
                 activePulseCount: limitPulseArbiter.activeCount,
                 serviceGap: nil
             ))
-            switch deadline.kind {
-            case .stop:
-                await finishLimitCycle(
-                    identifier: deadline.identifier,
-                    generation: deadline.generation,
-                    limitPercent: deadline.limitPercent,
-                    processIdentities: deadline.processIdentities
-                )
-            case .evaluate:
-                await evaluateLimitDeadline(deadline)
-            }
+            await evaluateLimitDeadline(deadline)
             guard workIsCurrent else { return }
         }
 
