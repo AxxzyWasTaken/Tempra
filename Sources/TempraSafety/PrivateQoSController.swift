@@ -1,32 +1,48 @@
 import Darwin
 import Foundation
 
-private enum POSIXProcessPriority {
-    static let selector = PRIO_PROCESS
-    static let minimumNiceValue = Int32(PRIO_MIN)
-    static let maximumNiceValue = Int32(PRIO_MAX)
-    static let lowerPriorityNiceValue: Int32 = 10
-    static let limitPulseNiceValue: Int32 = 3
+/// The Darwin-specific `setpriority(2)` selectors and values Tempra uses.
+///
+/// Classic Unix `nice` is nearly ignored by the macOS scheduler on Apple
+/// silicon: measured under full-core contention, nice 10 or 20 changed a
+/// spinner's runtime by under 10%. `PRIO_DARWIN_BG` is the mechanism the
+/// system itself uses for background work. It confines the process to
+/// efficiency cores, lowers it to the lowest scheduling band, and throttles
+/// disk and network I/O; the same spinner ran about 50 times slower.
+///
+/// Whether a process is currently backgrounded is read from the
+/// `PROC_FLAG_DARWINBG`-family bits in `proc_bsdinfo.pbi_flags`, not from
+/// `getpriority(PRIO_DARWIN_PROCESS, pid)`, which only ever describes the
+/// calling thread and returns 0 for other processes.
+private enum DarwinBackgroundPriority {
+    static let selector = PRIO_DARWIN_PROCESS
+    static let background = PRIO_DARWIN_BG
+    static let normal: Int32 = 0
+
+    /// `pbi_flags` bit set when another process backgrounded this one
+    /// (`PROC_FLAG_EXT_DARWINBG` in the private headers).
+    static let externallyBackgroundedFlag: UInt32 = 0x10000
+    /// `pbi_flags` bit set when the process backgrounded itself
+    /// (`PROC_FLAG_DARWINBG` in the private headers).
+    static let selfBackgroundedFlag: UInt32 = 0x8000
+    static let backgroundedFlags = externallyBackgroundedFlag | selfBackgroundedFlag
 }
 
 public struct ProcessPriorityPolicyState: Codable, Equatable, Hashable, Sendable {
-    public let niceValue: Int32
+    public let isBackgrounded: Bool
 
-    public init(niceValue: Int32) {
-        self.niceValue = niceValue
+    public init(isBackgrounded: Bool) {
+        self.isBackgrounded = isBackgrounded
     }
 
-    public var isValid: Bool {
-        (POSIXProcessPriority.minimumNiceValue...POSIXProcessPriority.maximumNiceValue)
-            .contains(niceValue)
-    }
+    public static let normal = ProcessPriorityPolicyState(isBackgrounded: false)
+    public static let backgrounded = ProcessPriorityPolicyState(isBackgrounded: true)
 }
 
 public enum ProcessPriorityControllerError: LocalizedError, Equatable, Sendable {
     case invalidProcessIdentifier
     case priorityReadFailed(Int32)
     case priorityWriteFailed(Int32)
-    case invalidPolicyState
 
     public var errorDescription: String? {
         switch self {
@@ -36,71 +52,62 @@ public enum ProcessPriorityControllerError: LocalizedError, Equatable, Sendable 
             "Tempra could not read the process priority (POSIX error \(code))."
         case .priorityWriteFailed(let code):
             "Tempra could not change the process priority (POSIX error \(code))."
-        case .invalidPolicyState:
-            "The saved process priority is invalid."
+        }
+    }
+
+    /// True when the kernel refused the write for lack of privilege, so a
+    /// privileged caller may still succeed.
+    public var isPermissionDenied: Bool {
+        switch self {
+        case .priorityWriteFailed(let code), .priorityReadFailed(let code):
+            code == EPERM
+        case .invalidProcessIdentifier:
+            false
         }
     }
 }
 
 public struct ProcessPriorityController: Sendable {
-    public static let lowerPriorityNiceValue = POSIXProcessPriority.lowerPriorityNiceValue
-    public static let limitPulseNiceValue = POSIXProcessPriority.limitPulseNiceValue
-
     public init() {}
 
+    /// The state a lowered process should be in. Independent of the
+    /// original state: backgrounding is idempotent.
     public static func loweredState(
         from original: ProcessPriorityPolicyState
-    ) throws -> ProcessPriorityPolicyState {
-        guard original.isValid else {
-            throw ProcessPriorityControllerError.invalidPolicyState
-        }
-        return ProcessPriorityPolicyState(
-            niceValue: max(original.niceValue, lowerPriorityNiceValue)
-        )
+    ) -> ProcessPriorityPolicyState {
+        .backgrounded
     }
 
+    /// The state a process should be in while the CPU limiter is pulsing it.
+    /// Backgrounding is the only Darwin priority knob that measurably slows a
+    /// process, so the limiter pulse uses the same state as lowering.
     public static func limitState(
         from original: ProcessPriorityPolicyState
-    ) throws -> ProcessPriorityPolicyState {
-        guard original.isValid else {
-            throw ProcessPriorityControllerError.invalidPolicyState
-        }
-        return ProcessPriorityPolicyState(
-            niceValue: max(original.niceValue, limitPulseNiceValue)
-        )
+    ) -> ProcessPriorityPolicyState {
+        .backgrounded
     }
 
     static func shouldRestore(
         current: ProcessPriorityPolicyState,
         original: ProcessPriorityPolicyState
-    ) throws -> Bool {
-        guard current.isValid else {
-            throw ProcessPriorityControllerError.invalidPolicyState
-        }
-        let lowered = try loweredState(from: original)
-        let limited = try limitState(from: original)
-        return current == lowered || current == limited
+    ) -> Bool {
+        current != original
     }
 
     public func state(for processIdentifier: Int32) throws -> ProcessPriorityPolicyState {
         guard processIdentifier > 1 else {
             throw ProcessPriorityControllerError.invalidProcessIdentifier
         }
-
+        var info = proc_bsdinfo()
+        let expectedSize = Int32(MemoryLayout<proc_bsdinfo>.size)
         errno = 0
-        let niceValue = getpriority(
-            POSIXProcessPriority.selector,
-            id_t(processIdentifier)
+        let readSize = proc_pidinfo(processIdentifier, PROC_PIDTBSDINFO, 0, &info, expectedSize)
+        guard readSize == expectedSize else {
+            throw ProcessPriorityControllerError.priorityReadFailed(errno == 0 ? ESRCH : errno)
+        }
+        return ProcessPriorityPolicyState(
+            isBackgrounded: info.pbi_flags & DarwinBackgroundPriority.backgroundedFlags != 0
         )
-        let readError = errno
-        guard readError == 0 else {
-            throw ProcessPriorityControllerError.priorityReadFailed(readError)
-        }
-        let state = ProcessPriorityPolicyState(niceValue: niceValue)
-        guard state.isValid else {
-            throw ProcessPriorityControllerError.invalidPolicyState
-        }
-        return state
     }
 
     public func lowerPriority(
@@ -117,22 +124,12 @@ public struct ProcessPriorityController: Sendable {
         try write(Self.limitState(from: original), to: processIdentifier)
     }
 
-    public func setNiceValue(
-        _ niceValue: Int32,
-        for processIdentifier: Int32
-    ) throws {
-        try write(ProcessPriorityPolicyState(niceValue: niceValue), to: processIdentifier)
-    }
-
     public func restore(
         _ state: ProcessPriorityPolicyState,
         to processIdentifier: Int32
     ) throws {
-        guard state.isValid else {
-            throw ProcessPriorityControllerError.invalidPolicyState
-        }
         let current = try self.state(for: processIdentifier)
-        guard try Self.shouldRestore(current: current, original: state) else { return }
+        guard Self.shouldRestore(current: current, original: state) else { return }
         try write(state, to: processIdentifier)
     }
 
@@ -143,15 +140,14 @@ public struct ProcessPriorityController: Sendable {
         guard processIdentifier > 1 else {
             throw ProcessPriorityControllerError.invalidProcessIdentifier
         }
-        guard state.isValid else {
-            throw ProcessPriorityControllerError.invalidPolicyState
-        }
 
         errno = 0
         let result = setpriority(
-            POSIXProcessPriority.selector,
+            DarwinBackgroundPriority.selector,
             id_t(processIdentifier),
-            state.niceValue
+            state.isBackgrounded
+                ? DarwinBackgroundPriority.background
+                : DarwinBackgroundPriority.normal
         )
         guard result == 0 else {
             throw ProcessPriorityControllerError.priorityWriteFailed(errno)

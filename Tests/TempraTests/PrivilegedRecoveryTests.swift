@@ -68,7 +68,7 @@ struct PrivilegedRecoveryTests {
     @Test("A failed priority recovery keeps the original policy for retry")
     func failedPriorityRestoreIsRetried() {
         let process = identity(4_006)
-        let originalPriority = ProcessPriorityPolicyState(niceValue: 2)
+        let originalPriority = ProcessPriorityPolicyState.normal
         var report = PrivilegedRecoveryReport(
             failedPriorities: [process: originalPriority]
         )
@@ -134,7 +134,7 @@ struct PrivilegedRecoveryTests {
     @Test("A process identity change after priority restore is stale")
     func identityChangeAfterPriorityRestoreIsStale() {
         let process = identity(4_010)
-        let originalPriority = ProcessPriorityPolicyState(niceValue: 3)
+        let originalPriority = ProcessPriorityPolicyState.backgrounded
         var report = PrivilegedRecoveryReport(
             failedPriorities: [process: originalPriority]
         )

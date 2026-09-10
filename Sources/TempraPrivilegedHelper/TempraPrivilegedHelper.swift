@@ -42,7 +42,6 @@ private struct PrivilegedWatchdogStream {
                   state.automaticResumeDeadlines.count
                     <= PrivilegedProcessProtocol.maximumProcessCount,
                   Set(state.priorities.map(\.process)).count == state.priorities.count,
-                  state.priorities.allSatisfy(\.originalPriority.isValid),
                   Set(state.automaticResumeDeadlines.map(\.process)).count
                     == state.automaticResumeDeadlines.count,
                   Set(state.automaticResumeDeadlines.map(\.process)).isSubset(
@@ -754,7 +753,7 @@ private final class PrivilegedProcessSession: NSObject, PrivilegedProcessXPCProt
     ) -> PrivilegedProcessResponse {
         applyPriority(
             request,
-            target: { try ProcessPriorityController.loweredState(from: $0) }
+            target: ProcessPriorityController.loweredState(from:)
         ) { [priorityController] originalPriority, processIdentifier in
             try priorityController.lowerPriority(
                 from: originalPriority,
@@ -768,7 +767,7 @@ private final class PrivilegedProcessSession: NSObject, PrivilegedProcessXPCProt
     ) -> PrivilegedProcessResponse {
         applyPriority(
             request,
-            target: { try ProcessPriorityController.limitState(from: $0) }
+            target: ProcessPriorityController.limitState(from:)
         ) { [priorityController] originalPriority, processIdentifier in
             try priorityController.applyLimitPriority(
                 from: originalPriority,
@@ -779,7 +778,7 @@ private final class PrivilegedProcessSession: NSObject, PrivilegedProcessXPCProt
 
     private func applyPriority(
         _ request: PrivilegedProcessRequest,
-        target: (ProcessPriorityPolicyState) throws -> ProcessPriorityPolicyState,
+        target: (ProcessPriorityPolicyState) -> ProcessPriorityPolicyState,
         mutation: (
             ProcessPriorityPolicyState,
             Int32
@@ -825,17 +824,7 @@ private final class PrivilegedProcessSession: NSObject, PrivilegedProcessXPCProt
                 result.failed.insert(process)
                 continue
             }
-            let targetPriority: ProcessPriorityPolicyState
-            do {
-                targetPriority = try target(originalPriority)
-            } catch {
-                if !wasManaged {
-                    proposedPolicies.removeValue(forKey: process)
-                }
-                result.failed.insert(process)
-                continue
-            }
-            if targetPriority == originalPriority {
+            if target(originalPriority) == originalPriority {
                 proposedPolicies.removeValue(forKey: process)
                 obsoleteNoOpState.insert(process)
                 result.unchanged.insert(process)

@@ -212,9 +212,7 @@ struct WatchdogProtocolTests {
                 pid: 42,
                 startTimeMicroseconds: 123_456
             ),
-            originalPriority: ProcessPriorityPolicyState(
-                niceValue: 0
-            )
+            originalPriority: .normal
         )
 
         let decoded = try JSONDecoder().decode(
@@ -223,6 +221,6 @@ struct WatchdogProtocolTests {
         )
 
         #expect(decoded == state)
-        #expect(decoded.originalPriority.isValid)
+        #expect(!decoded.originalPriority.isBackgrounded)
     }
 }
