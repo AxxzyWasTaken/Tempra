@@ -189,6 +189,35 @@ struct ProcessSystemControllerTests {
         #expect(try !ProcessPriorityController().state(for: pid).isBackgrounded)
     }
 
+    @Test("The limit pulse resolves current processes without touching them")
+    func limitPulseIsANoOpLocally() async throws {
+        let sleeper = Process()
+        sleeper.executableURL = URL(fileURLWithPath: "/bin/sleep")
+        sleeper.arguments = ["10"]
+        try sleeper.run()
+        let pid = sleeper.processIdentifier
+        defer {
+            if sleeper.isRunning {
+                sleeper.terminate()
+                sleeper.waitUntilExit()
+            }
+        }
+        let identity = try #require(
+            LiveProcessSystemController.currentIdentity(for: pid)
+        )
+        let stale = ProcessIdentity(pid: pid, startTimeMicroseconds: 1)
+        let journal = RecordingBackgroundJournal()
+        let controller = RoutedProcessSystemController(backgroundJournal: journal)
+
+        let result = await controller.applyLimitPriority([identity, stale])
+
+        #expect(result.applied.isEmpty)
+        #expect(result.stale == [stale])
+        #expect(result.failed.isEmpty)
+        #expect(journal.prepared.isEmpty)
+        #expect(try !ProcessPriorityController().state(for: pid).isBackgrounded)
+    }
+
     private func eventuallyStatus(
         of pid: pid_t,
         isStopped expectedStatus: Bool

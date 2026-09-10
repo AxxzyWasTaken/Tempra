@@ -765,15 +765,12 @@ private final class PrivilegedProcessSession: NSObject, PrivilegedProcessXPCProt
     private func limitPriority(
         _ request: PrivilegedProcessRequest
     ) -> PrivilegedProcessResponse {
+        // limitState is the identity, so every current process resolves as
+        // unchanged and the mutation closure is never reached.
         applyPriority(
             request,
             target: ProcessPriorityController.limitState(from:)
-        ) { [priorityController] originalPriority, processIdentifier in
-            try priorityController.applyLimitPriority(
-                from: originalPriority,
-                for: processIdentifier
-            )
-        }
+        ) { _, _ in }
     }
 
     private func applyPriority(
@@ -804,7 +801,6 @@ private final class PrivilegedProcessSession: NSObject, PrivilegedProcessXPCProt
                 proposedPolicies.removeValue(forKey: process)
                 continue
             }
-            let wasManaged = originalPriorities[process] != nil
             if proposedPolicies[process] == nil {
                 do {
                     proposedPolicies[process] = try priorityController.state(

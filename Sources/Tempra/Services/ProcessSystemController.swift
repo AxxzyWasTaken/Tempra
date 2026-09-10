@@ -121,10 +121,16 @@ struct LiveProcessSystemController: ProcessSystemControlling {
         }
     }
 
+    /// The limiter pulse does not change priority (see
+    /// `ProcessPriorityController.limitState`). Current processes resolve
+    /// without action; only stale identities are reported.
     func applyLimitPriority(_ processes: Set<ProcessIdentity>) async -> ProcessOperationResult {
-        applyPriority(processes) { pid in
-            try priorityController.applyLimitPriority(from: .normal, for: pid)
+        var result = ProcessOperationResult()
+        for process in processes
+        where !kernelIdentityMatches(Self.currentIdentity(for: process.pid), process) {
+            result.stale.insert(process)
         }
+        return result
     }
 
     private let priorityController = ProcessPriorityController()
@@ -351,9 +357,16 @@ struct RoutedProcessSystemController: ProcessSystemControlling {
     func applyLimitPriority(
         _ processes: Set<ProcessIdentity>
     ) async -> ProcessOperationResult {
-        await backgroundLocallyThenPrivileged(.limitPriority, to: processes) {
-            await local.applyLimitPriority($0)
-        }
+        // Nothing to journal: the pulse leaves priority alone everywhere.
+        let (localProcesses, privilegedProcesses) = partition(processes)
+        var result = await local.applyLimitPriority(localProcesses)
+        guard !privilegedProcesses.isEmpty else { return result }
+        let privilegedResult = await applyPrivileged(.limitPriority, to: privilegedProcesses)
+        result.applied.formUnion(privilegedResult.applied)
+        result.stale.formUnion(privilegedResult.stale)
+        result.failed.formUnion(privilegedResult.failed)
+        result.failureDescription = privilegedResult.failureDescription
+        return result
     }
 
     /// Same-user processes are backgrounded directly after the guardian has

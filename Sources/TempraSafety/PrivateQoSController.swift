@@ -102,12 +102,19 @@ public struct ProcessPriorityController: Sendable {
     }
 
     /// The state a process should be in while the CPU limiter is pulsing it.
-    /// Backgrounding is the only Darwin priority knob that measurably slows a
-    /// process, so the limiter pulse uses the same state as lowering.
+    ///
+    /// Darwin has no priority tier between normal and background that a
+    /// third party can set on a running process: nice is ignored by the
+    /// scheduler (measured under contention, nice 20 changed runtime by under
+    /// 10%), the QoS clamps are spawn-time only, and PRIO_DARWIN_ROLE returns
+    /// EPERM even as root. Background state is too strong for a CPU limit
+    /// because it also throttles disk and network I/O and pins the process
+    /// to efficiency cores. The pulse therefore leaves priority untouched;
+    /// the "lower CPU priority" rule is the explicit way to background an app.
     public static func limitState(
         from original: ProcessPriorityPolicyState
     ) -> ProcessPriorityPolicyState {
-        original.replacing(isBackgrounded: true)
+        original
     }
 
     static func shouldRestore(
@@ -136,13 +143,6 @@ public struct ProcessPriorityController: Sendable {
         for processIdentifier: Int32
     ) throws {
         try write(Self.loweredState(from: original), to: processIdentifier)
-    }
-
-    public func applyLimitPriority(
-        from original: ProcessPriorityPolicyState,
-        for processIdentifier: Int32
-    ) throws {
-        try write(Self.limitState(from: original), to: processIdentifier)
     }
 
     /// Returns the process to `state`. When that means leaving the background

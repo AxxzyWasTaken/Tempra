@@ -5,11 +5,11 @@ import Testing
 
 @Suite("Darwin background process priority", .serialized)
 struct ProcessPriorityControllerTests {
-    @Test("Lowering and limiting both background the process")
-    func lowerAndLimitBackground() {
+    @Test("Lowering backgrounds the process; the limit pulse leaves it alone")
+    func lowerBackgroundsAndLimitIsIdentity() {
         #expect(ProcessPriorityController.loweredState(from: .normal) == .backgrounded)
         #expect(ProcessPriorityController.loweredState(from: .backgrounded) == .backgrounded)
-        #expect(ProcessPriorityController.limitState(from: .normal) == .backgrounded)
+        #expect(ProcessPriorityController.limitState(from: .normal) == .normal)
         #expect(ProcessPriorityController.limitState(from: .backgrounded) == .backgrounded)
     }
 
