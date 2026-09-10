@@ -31,6 +31,12 @@ public enum ProcessGuardianAction: String, Codable, Sendable {
     case resume
     case renewLease
     case disarm
+    /// Journal the current priority of processes the app is about to
+    /// background, so the guardian can restore them if the app dies.
+    case prepareBackground
+    /// Replace the set of journaled backgrounded processes; anything dropped
+    /// is restored by the guardian.
+    case synchronizeBackground
 }
 
 public struct ProcessGuardianRequest: Codable, Equatable, Sendable {
@@ -92,7 +98,7 @@ public struct ProcessGuardianRequest: Codable, Equatable, Sendable {
         switch action {
         case .ping, .renewLease, .disarm:
             return processes.isEmpty && resumeDeadlines.isEmpty
-        case .prepare, .synchronize, .resume:
+        case .prepare, .synchronize, .resume, .prepareBackground, .synchronizeBackground:
             return resumeDeadlines.isEmpty
         case .armResume, .synchronizeResume:
             return processes.isEmpty

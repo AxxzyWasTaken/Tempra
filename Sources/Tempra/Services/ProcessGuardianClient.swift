@@ -556,6 +556,7 @@ actor ProcessGuardianClient {
     private var cachedPeerRequirement: String?
     private var protectionState = ProcessGuardianProtectionState()
     private var automaticResumeIntervals: [ProcessIdentity: TimeInterval] = [:]
+    private var backgroundedProcesses: Set<ProcessIdentity> = []
 
     init(requestTimeout: Duration = .seconds(4)) {
         self.requestTimeout = requestTimeout
@@ -636,6 +637,33 @@ actor ProcessGuardianClient {
         automaticResumeIntervals.removeAll()
     }
 
+    /// Journals the current priority of `processes` in the guardian before
+    /// the app backgrounds them locally. Must succeed before any local
+    /// setpriority call so a crash between the two leaves nothing unguarded.
+    func prepareBackground(_ processes: Set<ProcessIdentity>) async throws {
+        let processesToPrepare = processes.subtracting(backgroundedProcesses)
+        guard !processesToPrepare.isEmpty else { return }
+        let response = try await perform(.prepareBackground, processes: processesToPrepare)
+        let mapped = try mappedOperationState(response, among: processesToPrepare)
+        try requireSuccessfulStateResponse(response)
+        backgroundedProcesses.formUnion(processesToPrepare.subtracting(mapped.stale))
+    }
+
+    /// Tells the guardian which processes are still backgrounded by Tempra.
+    /// The guardian restores anything that dropped out of the set.
+    func synchronizeBackground(_ processes: Set<ProcessIdentity>) async throws {
+        guard processes != backgroundedProcesses
+                || protectionState.guardianInstanceID == nil
+                || protectionState.connectionRecoveryIsPending else {
+            return
+        }
+        let known = processes.union(backgroundedProcesses)
+        let response = try await perform(.synchronizeBackground, processes: processes)
+        let mapped = try mappedOperationState(response, among: known)
+        try requireSuccessfulStateResponse(response)
+        backgroundedProcesses = processes.subtracting(mapped.stale)
+    }
+
     func renewLeaseIfConnected() async throws {
         guard connection != nil, connectionIsHandshaken else { return }
         let request = try makeRequest(action: .renewLease)
@@ -649,6 +677,7 @@ actor ProcessGuardianClient {
 
     func invalidate() {
         protectionState.connectionLost()
+        backgroundedProcesses.removeAll()
         connection?.invalidate()
         connection = nil
         connectionIsHandshaken = false
@@ -976,6 +1005,7 @@ actor ProcessGuardianClient {
     private func connectionInvalidated(_ invalidated: NSXPCConnection?) {
         if connection === invalidated {
             protectionState.connectionLost()
+            backgroundedProcesses.removeAll()
             connection = nil
             connectionIsHandshaken = false
         }

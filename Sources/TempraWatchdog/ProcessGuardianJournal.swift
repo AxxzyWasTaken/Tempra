@@ -10,6 +10,10 @@ struct ProcessGuardianJournalState: Codable, Equatable {
     var owner: WatchdogProcessIdentity?
     var trackedProcesses: [WatchdogProcessIdentity]
     var automaticResumeIntervals: [WatchdogResumeDeadline]
+    /// Processes the app backgrounded with PRIO_DARWIN_BG, with the state to
+    /// return them to. Independent of `trackedProcesses`: a process can be
+    /// both stopped and backgrounded.
+    var backgroundedProcesses: [WatchdogProcessPriorityState]
 
     init(
         version: Int = Self.schemaVersion,
@@ -17,7 +21,8 @@ struct ProcessGuardianJournalState: Codable, Equatable {
         revision: UInt64 = 0,
         owner: WatchdogProcessIdentity? = nil,
         trackedProcesses: [WatchdogProcessIdentity] = [],
-        automaticResumeIntervals: [WatchdogResumeDeadline] = []
+        automaticResumeIntervals: [WatchdogResumeDeadline] = [],
+        backgroundedProcesses: [WatchdogProcessPriorityState] = []
     ) {
         self.version = version
         self.sessionID = sessionID
@@ -25,11 +30,47 @@ struct ProcessGuardianJournalState: Codable, Equatable {
         self.owner = owner
         self.trackedProcesses = trackedProcesses
         self.automaticResumeIntervals = automaticResumeIntervals
+        self.backgroundedProcesses = backgroundedProcesses
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case version, sessionID, revision, owner
+        case trackedProcesses, automaticResumeIntervals, backgroundedProcesses
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        version = try container.decode(Int.self, forKey: .version)
+        sessionID = try container.decodeIfPresent(UUID.self, forKey: .sessionID)
+        revision = try container.decode(UInt64.self, forKey: .revision)
+        owner = try container.decodeIfPresent(WatchdogProcessIdentity.self, forKey: .owner)
+        trackedProcesses = try container.decode(
+            [WatchdogProcessIdentity].self,
+            forKey: .trackedProcesses
+        )
+        automaticResumeIntervals = try container.decode(
+            [WatchdogResumeDeadline].self,
+            forKey: .automaticResumeIntervals
+        )
+        // Journals written before backgrounding was guarded lack this key.
+        backgroundedProcesses = try container.decodeIfPresent(
+            [WatchdogProcessPriorityState].self,
+            forKey: .backgroundedProcesses
+        ) ?? []
+    }
+
+    /// Every process the guardian owes a restoration to.
+    var guardedProcesses: Set<WatchdogProcessIdentity> {
+        Set(trackedProcesses).union(backgroundedProcesses.map(\.process))
+    }
+
+    var isEmpty: Bool {
+        trackedProcesses.isEmpty && backgroundedProcesses.isEmpty
     }
 
     var isValid: Bool {
         let sessionStateIsValid: Bool
-        if trackedProcesses.isEmpty {
+        if isEmpty {
             sessionStateIsValid = sessionID == nil
                 && revision == 0
                 && owner == nil
@@ -38,14 +79,21 @@ struct ProcessGuardianJournalState: Codable, Equatable {
                 && revision > 0
                 && owner != nil
         }
+        let backgrounded = backgroundedProcesses.map(\.process)
         guard version == Self.schemaVersion,
               sessionStateIsValid,
               trackedProcesses.count <= ProcessGuardianProtocol.maximumProcessCount,
               automaticResumeIntervals.count
                 <= ProcessGuardianProtocol.maximumProcessCount,
+              backgroundedProcesses.count <= ProcessGuardianProtocol.maximumProcessCount,
               Set(trackedProcesses).count == trackedProcesses.count,
               Set(trackedProcesses.map(\.pid)).count == trackedProcesses.count,
+              Set(backgrounded).count == backgrounded.count,
+              Set(backgrounded.map(\.pid)).count == backgrounded.count,
               trackedProcesses.allSatisfy({
+                  $0.pid > 1 && $0.startTimeMicroseconds > 0
+              }),
+              backgrounded.allSatisfy({
                   $0.pid > 1 && $0.startTimeMicroseconds > 0
               }),
               owner.map({

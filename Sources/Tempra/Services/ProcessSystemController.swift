@@ -7,6 +7,8 @@ struct ProcessOperationResult: Equatable, Sendable {
     var stale: Set<ProcessIdentity> = []
     var failed: Set<ProcessIdentity> = []
     var failureDescription: String?
+    /// Subset of `failed` the kernel refused for lack of privilege.
+    var permissionDenied: Set<ProcessIdentity> = []
 
     var succeeded: Bool {
         !applied.isEmpty && failed.isEmpty
@@ -104,16 +106,51 @@ struct LiveProcessSystemController: ProcessSystemControlling {
         apply(processes) { kill($0, SIGCONT) }
     }
 
+    /// Backgrounds same-user processes directly with PRIO_DARWIN_BG. The
+    /// result's `permissionDenied` set names processes the kernel refused,
+    /// so the router can retry them through the privileged helper.
     func lowerPriority(_ processes: Set<ProcessIdentity>) async -> ProcessOperationResult {
-        ProcessOperationResult(failed: processes)
+        applyPriority(processes) { pid in
+            try priorityController.lowerPriority(from: .normal, for: pid)
+        }
     }
 
     func restorePriority(_ processes: Set<ProcessIdentity>) async -> ProcessOperationResult {
-        ProcessOperationResult(failed: processes)
+        applyPriority(processes) { pid in
+            try priorityController.restore(.normal, to: pid)
+        }
     }
 
     func applyLimitPriority(_ processes: Set<ProcessIdentity>) async -> ProcessOperationResult {
-        ProcessOperationResult(failed: processes)
+        applyPriority(processes) { pid in
+            try priorityController.applyLimitPriority(from: .normal, for: pid)
+        }
+    }
+
+    private let priorityController = ProcessPriorityController()
+
+    private func applyPriority(
+        _ processes: Set<ProcessIdentity>,
+        operation: (pid_t) throws -> Void
+    ) -> ProcessOperationResult {
+        var result = ProcessOperationResult()
+        for process in processes {
+            guard kernelIdentityMatches(Self.currentIdentity(for: process.pid), process) else {
+                result.stale.insert(process)
+                continue
+            }
+            do {
+                try operation(process.pid)
+                result.applied.insert(process)
+            } catch let error as ProcessPriorityControllerError where error.isPermissionDenied {
+                result.failed.insert(process)
+                result.permissionDenied.insert(process)
+            } catch {
+                result.failed.insert(process)
+                result.failureDescription = error.localizedDescription
+            }
+        }
+        return result
     }
 
     func terminate(_ processes: Set<ProcessIdentity>) async -> ProcessOperationResult {
@@ -197,16 +234,30 @@ struct LiveProcessSystemController: ProcessSystemControlling {
     }
 }
 
+/// The crash-safety journal for processes the app backgrounds locally.
+/// `prepareBackground` must succeed before the local setpriority call, and
+/// `synchronizeBackground` must be told when processes leave the set.
+protocol ProcessBackgroundJournaling: Sendable {
+    func prepareBackground(_ processes: Set<ProcessIdentity>) async throws
+    func synchronizeBackground(_ processes: Set<ProcessIdentity>) async throws
+}
+
+extension ProcessGuardianClient: ProcessBackgroundJournaling {}
+
 struct RoutedProcessSystemController: ProcessSystemControlling {
     private let local: LiveProcessSystemController
     private let privileged: PrivilegedProcessClient
+    private let backgroundJournal: any ProcessBackgroundJournaling
+    private let backgroundedLocally = LockedProcessSet()
 
     init(
         local: LiveProcessSystemController = LiveProcessSystemController(),
-        privileged: PrivilegedProcessClient = .shared
+        privileged: PrivilegedProcessClient = .shared,
+        backgroundJournal: any ProcessBackgroundJournaling = ProcessGuardianClient.shared
     ) {
         self.local = local
         self.privileged = privileged
+        self.backgroundJournal = backgroundJournal
     }
 
     func totalCPUTime(for processes: Set<ProcessIdentity>) async throws -> UInt64 {
@@ -259,19 +310,100 @@ struct RoutedProcessSystemController: ProcessSystemControlling {
     func lowerPriority(
         _ processes: Set<ProcessIdentity>
     ) async -> ProcessOperationResult {
-        await applyPrivileged(.lowerPriority, to: processes)
+        await backgroundLocallyThenPrivileged(.lowerPriority, to: processes) {
+            await local.lowerPriority($0)
+        }
     }
 
     func restorePriority(
         _ processes: Set<ProcessIdentity>
     ) async -> ProcessOperationResult {
-        await applyPrivileged(.restorePriority, to: processes)
+        let (localProcesses, privilegedProcesses) = partition(processes)
+        let locallyOwned = backgroundedLocally.intersection(localProcesses)
+        // Anything this router did not background locally goes to the helper,
+        // which owns the record of what it changed. Its "unactionable" answer
+        // is `unchanged`, so unknown identities do not fail the batch.
+        var result = await applyPrivileged(
+            .restorePriority,
+            to: privilegedProcesses.union(localProcesses.subtracting(locallyOwned))
+        )
+        guard !locallyOwned.isEmpty else { return result }
+        let localResult = await local.restorePriority(locallyOwned)
+        let released = localResult.applied.union(localResult.stale)
+        backgroundedLocally.subtract(released)
+        result.applied.formUnion(localResult.applied)
+        result.stale.formUnion(localResult.stale)
+        result.failed.formUnion(localResult.failed)
+        if result.failureDescription == nil {
+            result.failureDescription = localResult.failureDescription
+        }
+        if !released.isEmpty {
+            do {
+                try await backgroundJournal.synchronizeBackground(backgroundedLocally.current)
+            } catch {
+                // The processes are restored; only the journal is stale, and
+                // the next successful request replaces it.
+            }
+        }
+        return result
     }
 
     func applyLimitPriority(
         _ processes: Set<ProcessIdentity>
     ) async -> ProcessOperationResult {
-        await applyPrivileged(.limitPriority, to: processes)
+        await backgroundLocallyThenPrivileged(.limitPriority, to: processes) {
+            await local.applyLimitPriority($0)
+        }
+    }
+
+    /// Same-user processes are backgrounded directly after the guardian has
+    /// journaled them, so a crash between journal and setpriority is safe.
+    /// Processes the kernel refuses (EPERM) fall back to the privileged
+    /// helper, as do processes that require privileged control outright.
+    private func backgroundLocallyThenPrivileged(
+        _ action: PrivilegedProcessAction,
+        to processes: Set<ProcessIdentity>,
+        localOperation: (Set<ProcessIdentity>) async -> ProcessOperationResult
+    ) async -> ProcessOperationResult {
+        let (localProcesses, privilegedProcesses) = partition(processes)
+        var result = ProcessOperationResult()
+        var fallback = privilegedProcesses
+
+        if !localProcesses.isEmpty {
+            do {
+                try await backgroundJournal.prepareBackground(localProcesses)
+                let localResult = await localOperation(localProcesses)
+                backgroundedLocally.formUnion(localResult.applied)
+                result.applied.formUnion(localResult.applied)
+                result.stale.formUnion(localResult.stale)
+                result.failed.formUnion(localResult.failed.subtracting(localResult.permissionDenied))
+                result.failureDescription = localResult.failureDescription
+                fallback.formUnion(localResult.permissionDenied)
+                let journaledButNotApplied = localProcesses.subtracting(localResult.applied)
+                if !journaledButNotApplied.isEmpty {
+                    try? await backgroundJournal.synchronizeBackground(backgroundedLocally.current)
+                }
+            } catch {
+                // No journal, no local mutation. The helper has its own
+                // watchdog, so route everything there instead.
+                fallback.formUnion(localProcesses)
+            }
+        }
+
+        guard !fallback.isEmpty else {
+            if !result.failed.isEmpty, result.failureDescription == nil {
+                result.failureDescription = Self.failureDescription(for: action)
+            }
+            return result
+        }
+        let privilegedResult = await applyPrivileged(action, to: fallback)
+        result.applied.formUnion(privilegedResult.applied)
+        result.stale.formUnion(privilegedResult.stale)
+        result.failed.formUnion(privilegedResult.failed)
+        if result.failureDescription == nil {
+            result.failureDescription = privilegedResult.failureDescription
+        }
+        return result
     }
 
     func terminate(_ processes: Set<ProcessIdentity>) async -> ProcessOperationResult {
@@ -364,5 +496,34 @@ struct RoutedProcessSystemController: ProcessSystemControlling {
     ) -> (local: Set<ProcessIdentity>, privileged: Set<ProcessIdentity>) {
         let privileged = processes.filter(\.requiresPrivilegedControl)
         return (processes.subtracting(privileged), Set(privileged))
+    }
+}
+
+/// A small thread-safe set so the Sendable router can remember which
+/// processes it backgrounded without the privileged helper.
+final class LockedProcessSet: @unchecked Sendable {
+    private let lock = NSLock()
+    private var processes: Set<ProcessIdentity> = []
+
+    var current: Set<ProcessIdentity> {
+        lock.lock()
+        defer { lock.unlock() }
+        return processes
+    }
+
+    func intersection(_ other: Set<ProcessIdentity>) -> Set<ProcessIdentity> {
+        current.intersection(other)
+    }
+
+    func formUnion(_ other: Set<ProcessIdentity>) {
+        lock.lock()
+        processes.formUnion(other)
+        lock.unlock()
+    }
+
+    func subtract(_ other: Set<ProcessIdentity>) {
+        lock.lock()
+        processes.subtract(other)
+        lock.unlock()
     }
 }

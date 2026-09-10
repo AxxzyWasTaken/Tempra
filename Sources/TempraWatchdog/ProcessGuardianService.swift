@@ -69,12 +69,10 @@ final class ProcessGuardianStateController: @unchecked Sendable {
         do {
             let loaded = try journalStore.load()
             journalState = loaded
-            activeSessionID = loaded.trackedProcesses.isEmpty
-                ? nil
-                : loaded.sessionID
-            activeOwner = loaded.trackedProcesses.isEmpty ? nil : loaded.owner
-            lastRevision = loaded.trackedProcesses.isEmpty ? 0 : loaded.revision
-            resetSessionAfterRecovery = !loaded.trackedProcesses.isEmpty
+            activeSessionID = loaded.isEmpty ? nil : loaded.sessionID
+            activeOwner = loaded.isEmpty ? nil : loaded.owner
+            lastRevision = loaded.isEmpty ? 0 : loaded.revision
+            resetSessionAfterRecovery = !loaded.isEmpty
         } catch {
             journalState = ProcessGuardianJournalState()
             activeSessionID = nil
@@ -84,15 +82,18 @@ final class ProcessGuardianStateController: @unchecked Sendable {
             return
         }
 
-        guard !journalState.trackedProcesses.isEmpty else { return }
+        guard !journalState.isEmpty else { return }
         let result = Self.resumeWithRetries(
             Set(journalState.trackedProcesses),
             attempts: Self.recoveryAttempts,
             retryMicroseconds: Self.recoveryRetryMicroseconds
         )
         let unresolved = result.failed
+        let unresolvedBackgrounded = Self.restorePriorities(
+            currentBackgroundedProcesses()
+        ).failed
         do {
-            if unresolved.isEmpty {
+            if unresolved.isEmpty, unresolvedBackgrounded.isEmpty {
                 try journalStore.save(ProcessGuardianJournalState())
                 journalState = ProcessGuardianJournalState()
                 activeSessionID = nil
@@ -105,6 +106,9 @@ final class ProcessGuardianStateController: @unchecked Sendable {
                     .automaticResumeIntervals.filter {
                         unresolved.contains($0.process)
                     }
+                journalState.backgroundedProcesses = Self.sorted(
+                    unresolvedBackgrounded
+                )
                 try journalStore.save(journalState)
                 blockingError = "The process guardian could not restore every saved process."
                 recoveryRetryDeadlineNanoseconds = Self.addingWithoutOverflow(
@@ -161,7 +165,7 @@ final class ProcessGuardianStateController: @unchecked Sendable {
     ) -> ProcessGuardianResponse {
         let now = clock()
         if let leaseDeadlineNanoseconds,
-           !journalState.trackedProcesses.isEmpty,
+           !journalState.isEmpty,
            leaseDeadlineNanoseconds <= now {
             _ = recoverAll(resetSession: true)
             invalidateConnection?()
@@ -236,6 +240,10 @@ final class ProcessGuardianStateController: @unchecked Sendable {
             response = resume(request)
         case .disarm:
             response = disarm(request)
+        case .prepareBackground:
+            response = prepareBackground(request)
+        case .synchronizeBackground:
+            response = synchronizeBackground(request)
         }
         scheduleTimer()
         return response
@@ -484,8 +492,135 @@ final class ProcessGuardianStateController: @unchecked Sendable {
         }
     }
 
+    /// Records the current priority of each requested process before the app
+    /// backgrounds it. Nothing is mutated here; the app performs the
+    /// setpriority call itself, so the journal entry must exist first.
+    private func prepareBackground(
+        _ request: ProcessGuardianRequest
+    ) -> ProcessGuardianResponse {
+        guard let owner = activeOwner else {
+            return failure(
+                request,
+                code: .sessionMismatch,
+                message: "The process guardian session owner is unavailable."
+            )
+        }
+        let classified = classifyForStop(Set(request.processes), owner: owner)
+        guard classified.failed.isEmpty else {
+            return resultResponse(
+                request,
+                result: rejectedStopResult(classified)
+            )
+        }
+
+        var backgrounded = currentBackgroundedProcesses()
+        var result = GuardianOperationResult(stale: classified.stale)
+        for process in classified.applied {
+            if backgrounded[process] != nil {
+                result.applied.insert(process)
+                continue
+            }
+            do {
+                backgrounded[process] = try Self.priorityController.state(for: process.pid)
+                result.applied.insert(process)
+            } catch {
+                result.failed.insert(process)
+            }
+        }
+        do {
+            try persist(
+                tracked: Set(journalState.trackedProcesses),
+                automaticResumeIntervals: currentAutomaticResumeIntervals(),
+                backgrounded: backgrounded,
+                request: request
+            )
+            return resultResponse(request, result: result)
+        } catch {
+            return failure(
+                request,
+                code: .journalFailure,
+                message: error.localizedDescription,
+                failed: classified.applied
+            )
+        }
+    }
+
+    /// Replaces the journaled backgrounded set. Processes that drop out of
+    /// the set are restored here, the same way `synchronize` resumes stopped
+    /// processes the app no longer claims.
+    private func synchronizeBackground(
+        _ request: ProcessGuardianRequest
+    ) -> ProcessGuardianResponse {
+        guard let owner = activeOwner else {
+            return failure(
+                request,
+                code: .sessionMismatch,
+                message: "The process guardian session owner is unavailable."
+            )
+        }
+        let desired = classifyForTracking(Set(request.processes), owner: owner).applied
+        let current = currentBackgroundedProcesses()
+        let removed = current.filter { !desired.contains($0.key) }
+        let restoration = Self.restorePriorities(removed)
+        var retained = current.filter { desired.contains($0.key) }
+        retained.merge(restoration.failed, uniquingKeysWith: { _, failed in failed })
+        do {
+            try persist(
+                tracked: Set(journalState.trackedProcesses),
+                automaticResumeIntervals: currentAutomaticResumeIntervals(),
+                backgrounded: retained,
+                request: request
+            )
+        } catch {
+            return failure(
+                request,
+                code: .journalFailure,
+                message: error.localizedDescription,
+                failed: Set(retained.keys)
+            )
+        }
+        var result = GuardianOperationResult()
+        result.applied = Set(retained.keys).intersection(desired)
+            .union(restoration.applied)
+        result.stale = restoration.stale
+        result.failed = Set(restoration.failed.keys)
+        return resultResponse(request, result: result)
+    }
+
+    private static let priorityController = ProcessPriorityController()
+
+    private struct PriorityRestorationResult {
+        var applied: Set<WatchdogProcessIdentity> = []
+        var stale: Set<WatchdogProcessIdentity> = []
+        var failed: [WatchdogProcessIdentity: ProcessPriorityPolicyState] = [:]
+    }
+
+    private static func restorePriorities(
+        _ processes: [WatchdogProcessIdentity: ProcessPriorityPolicyState]
+    ) -> PriorityRestorationResult {
+        var result = PriorityRestorationResult()
+        for (process, original) in processes {
+            guard currentIdentity(for: process.pid) == process else {
+                result.stale.insert(process)
+                continue
+            }
+            do {
+                try priorityController.restore(original, to: process.pid)
+                result.applied.insert(process)
+            } catch {
+                result.failed[process] = original
+            }
+        }
+        return result
+    }
+
+    /// `disarm` is the app saying "nothing is paused any more". It does not
+    /// mean "nothing is backgrounded": a lowered-priority rule keeps its
+    /// processes backgrounded across many pause/resume cycles, so only the
+    /// stopped set is released here. Backgrounded processes are released by
+    /// `synchronizeBackground([])`, the lease, or connection loss.
     private func disarm(_ request: ProcessGuardianRequest) -> ProcessGuardianResponse {
-        let result = recoverAll(resetSession: false)
+        let result = recoverStopped()
         guard result.failed.isEmpty, blockingError == nil else {
             return failure(
                 request,
@@ -498,11 +633,7 @@ final class ProcessGuardianStateController: @unchecked Sendable {
         return resultResponse(request, result: result)
     }
 
-    @discardableResult
-    private func recoverAll(resetSession: Bool) -> GuardianOperationResult {
-        if resetSession {
-            resetSessionAfterRecovery = true
-        }
+    private func recoverStopped() -> GuardianOperationResult {
         let tracked = Set(journalState.trackedProcesses)
         let result = Self.resumeWithRetries(
             tracked,
@@ -513,9 +644,57 @@ final class ProcessGuardianStateController: @unchecked Sendable {
         let intervals = currentAutomaticResumeIntervals().filter {
             unresolved.contains($0.key)
         }
+        do {
+            try persistCurrentSession(
+                tracked: unresolved,
+                automaticResumeIntervals: intervals,
+                backgrounded: currentBackgroundedProcesses()
+            )
+            automaticResumeStates = automaticResumeStates.filter {
+                unresolved.contains($0.key)
+            }
+            blockingError = unresolved.isEmpty
+                ? nil
+                : "The process guardian could not restore every managed process."
+        } catch {
+            blockingError = error.localizedDescription
+        }
+        if blockingError != nil || !unresolved.isEmpty {
+            recoveryRetryDeadlineNanoseconds = Self.addingWithoutOverflow(
+                clock(),
+                Self.retryDelayNanoseconds
+            )
+        } else {
+            recoveryRetryDeadlineNanoseconds = nil
+        }
+        scheduleTimer()
+        return result
+    }
+
+    @discardableResult
+    private func recoverAll(resetSession: Bool) -> GuardianOperationResult {
+        if resetSession {
+            resetSessionAfterRecovery = true
+        }
+        let tracked = Set(journalState.trackedProcesses)
+        var result = Self.resumeWithRetries(
+            tracked,
+            attempts: Self.recoveryAttempts,
+            retryMicroseconds: Self.recoveryRetryMicroseconds
+        )
+        let unresolved = result.failed
+        let intervals = currentAutomaticResumeIntervals().filter {
+            unresolved.contains($0.key)
+        }
+        let priorityResult = Self.restorePriorities(currentBackgroundedProcesses())
+        result.applied.formUnion(priorityResult.applied)
+        result.stale.formUnion(priorityResult.stale)
+        result.failed.formUnion(priorityResult.failed.keys)
+        let unresolvedBackgrounded = priorityResult.failed
+        let everythingRestored = unresolved.isEmpty && unresolvedBackgrounded.isEmpty
 
         do {
-            if resetSessionAfterRecovery, unresolved.isEmpty {
+            if resetSessionAfterRecovery, everythingRestored {
                 try journalStore.save(ProcessGuardianJournalState())
                 journalState = ProcessGuardianJournalState()
                 activeSessionID = nil
@@ -525,23 +704,24 @@ final class ProcessGuardianStateController: @unchecked Sendable {
             } else {
                 try persistCurrentSession(
                     tracked: unresolved,
-                    automaticResumeIntervals: intervals
+                    automaticResumeIntervals: intervals,
+                    backgrounded: unresolvedBackgrounded
                 )
             }
             automaticResumeStates = automaticResumeStates.filter {
                 unresolved.contains($0.key)
             }
-            if unresolved.isEmpty || resetSessionAfterRecovery {
+            if everythingRestored || resetSessionAfterRecovery {
                 leaseDeadlineNanoseconds = nil
             }
-            blockingError = unresolved.isEmpty
+            blockingError = everythingRestored
                 ? nil
                 : "The process guardian could not restore every managed process."
         } catch {
             blockingError = error.localizedDescription
         }
 
-        if blockingError != nil || !unresolved.isEmpty {
+        if blockingError != nil || !everythingRestored {
             recoveryRetryDeadlineNanoseconds = Self.addingWithoutOverflow(
                 clock(),
                 Self.retryDelayNanoseconds
@@ -556,7 +736,7 @@ final class ProcessGuardianStateController: @unchecked Sendable {
     private func attemptPendingRecovery(now: UInt64) {
         guard let recoveryRetryDeadlineNanoseconds,
               recoveryRetryDeadlineNanoseconds <= now,
-              !journalState.trackedProcesses.isEmpty else {
+              !journalState.isEmpty else {
             return
         }
         _ = recoverAll(resetSession: false)
@@ -575,7 +755,7 @@ final class ProcessGuardianStateController: @unchecked Sendable {
         timer = nil
 
         let deadlines = [
-            journalState.trackedProcesses.isEmpty ? nil : leaseDeadlineNanoseconds,
+            journalState.isEmpty ? nil : leaseDeadlineNanoseconds,
             automaticResumeStates.values.map(\.deadlineNanoseconds).min(),
             recoveryRetryDeadlineNanoseconds,
         ].compactMap { $0 }
@@ -605,7 +785,7 @@ final class ProcessGuardianStateController: @unchecked Sendable {
         }
 
         if let leaseDeadlineNanoseconds,
-           !journalState.trackedProcesses.isEmpty,
+           !journalState.isEmpty,
            leaseDeadlineNanoseconds <= now {
             _ = recoverAll(resetSession: true)
             invalidateConnection?()
@@ -786,10 +966,12 @@ final class ProcessGuardianStateController: @unchecked Sendable {
     private func persist(
         tracked: Set<WatchdogProcessIdentity>,
         automaticResumeIntervals: [WatchdogProcessIdentity: UInt32],
+        backgrounded: [WatchdogProcessIdentity: ProcessPriorityPolicyState]? = nil,
         request: ProcessGuardianRequest
     ) throws {
+        let backgrounded = backgrounded ?? currentBackgroundedProcesses()
         let state: ProcessGuardianJournalState
-        if tracked.isEmpty {
+        if tracked.isEmpty, backgrounded.isEmpty {
             guard automaticResumeIntervals.isEmpty else {
                 throw ProcessGuardianJournalError.invalidState
             }
@@ -800,18 +982,27 @@ final class ProcessGuardianStateController: @unchecked Sendable {
                 revision: request.revision,
                 owner: request.owner,
                 trackedProcesses: Self.sorted(tracked),
-                automaticResumeIntervals: Self.sorted(automaticResumeIntervals)
+                automaticResumeIntervals: Self.sorted(automaticResumeIntervals),
+                backgroundedProcesses: Self.sorted(backgrounded)
             )
         }
         try journalStore.save(state)
         journalState = state
     }
 
+    private func currentBackgroundedProcesses()
+        -> [WatchdogProcessIdentity: ProcessPriorityPolicyState] {
+        Dictionary(uniqueKeysWithValues: journalState.backgroundedProcesses.map {
+            ($0.process, $0.originalPriority)
+        })
+    }
+
     private func persistCurrentSession(
         tracked: Set<WatchdogProcessIdentity>,
-        automaticResumeIntervals: [WatchdogProcessIdentity: UInt32]
+        automaticResumeIntervals: [WatchdogProcessIdentity: UInt32],
+        backgrounded: [WatchdogProcessIdentity: ProcessPriorityPolicyState]
     ) throws {
-        if tracked.isEmpty {
+        if tracked.isEmpty, backgrounded.isEmpty {
             guard automaticResumeIntervals.isEmpty else {
                 throw ProcessGuardianJournalError.invalidState
             }
@@ -827,7 +1018,8 @@ final class ProcessGuardianStateController: @unchecked Sendable {
             revision: lastRevision,
             owner: activeOwner,
             trackedProcesses: Self.sorted(tracked),
-            automaticResumeIntervals: Self.sorted(automaticResumeIntervals)
+            automaticResumeIntervals: Self.sorted(automaticResumeIntervals),
+            backgroundedProcesses: Self.sorted(backgrounded)
         )
         try journalStore.save(state)
         journalState = state
@@ -974,6 +1166,14 @@ final class ProcessGuardianStateController: @unchecked Sendable {
         _ processes: Set<WatchdogProcessIdentity>
     ) -> [WatchdogProcessIdentity] {
         processes.sorted(by: identityOrder)
+    }
+
+    private static func sorted(
+        _ backgrounded: [WatchdogProcessIdentity: ProcessPriorityPolicyState]
+    ) -> [WatchdogProcessPriorityState] {
+        backgrounded.map { process, original in
+            WatchdogProcessPriorityState(process: process, originalPriority: original)
+        }.sorted { identityOrder($0.process, $1.process) }
     }
 
     private static func sorted(

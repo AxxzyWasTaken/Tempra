@@ -209,6 +209,156 @@ struct ProcessGuardianTests {
         #expect(try store.load().trackedProcesses.isEmpty)
     }
 
+    @Test("Connection loss restores a backgrounded process the app journaled")
+    func connectionLossRestoresBackgroundedProcess() async throws {
+        let (store, directoryURL) = try temporaryStore()
+        defer { try? FileManager.default.removeItem(at: directoryURL) }
+        let sleeper = try startSleeper()
+        defer { stopSleeper(sleeper.process) }
+        let sessionID = UUID()
+        let controller = ProcessGuardianStateController(journalStore: store)
+        let pid = sleeper.process.processIdentifier
+
+        // The app journals first, then backgrounds locally: the same order
+        // RoutedProcessSystemController uses.
+        let prepared = await send(
+            try request(
+                sessionID: sessionID,
+                revision: 1,
+                action: .prepareBackground,
+                processes: [sleeper.identity]
+            ),
+            to: controller
+        )
+        #expect(prepared.errorCode == nil)
+        #expect(prepared.applied == [sleeper.identity])
+        #expect(try store.load().backgroundedProcesses.map(\.process) == [sleeper.identity])
+        #expect(try store.load().trackedProcesses.isEmpty)
+        #expect(!isBackgrounded(pid))
+
+        try ProcessPriorityController().lowerPriority(from: .normal, for: pid)
+        #expect(isBackgrounded(pid))
+
+        await invalidate(sessionID: sessionID, in: controller)
+
+        #expect(await eventually { !self.isBackgrounded(pid) })
+        let recovered = try store.load()
+        #expect(recovered.backgroundedProcesses.isEmpty)
+        #expect(recovered.sessionID == nil)
+    }
+
+    @Test("Background synchronization restores processes dropped from the set")
+    func backgroundSynchronizationRestoresDroppedProcesses() async throws {
+        let (store, directoryURL) = try temporaryStore()
+        defer { try? FileManager.default.removeItem(at: directoryURL) }
+        let sleeper = try startSleeper()
+        defer { stopSleeper(sleeper.process) }
+        let sessionID = UUID()
+        let controller = ProcessGuardianStateController(journalStore: store)
+        let pid = sleeper.process.processIdentifier
+
+        _ = await send(
+            try request(
+                sessionID: sessionID,
+                revision: 1,
+                action: .prepareBackground,
+                processes: [sleeper.identity]
+            ),
+            to: controller
+        )
+        try ProcessPriorityController().lowerPriority(from: .normal, for: pid)
+        #expect(isBackgrounded(pid))
+
+        let response = await send(
+            try request(
+                sessionID: sessionID,
+                revision: 2,
+                action: .synchronizeBackground
+            ),
+            to: controller
+        )
+
+        #expect(response.errorCode == nil)
+        #expect(response.applied == [sleeper.identity])
+        #expect(!isBackgrounded(pid))
+        #expect(try store.load().backgroundedProcesses.isEmpty)
+    }
+
+    @Test("Disarm releases stopped processes but keeps backgrounded ones guarded")
+    func disarmKeepsBackgroundedProcessesGuarded() async throws {
+        let (store, directoryURL) = try temporaryStore()
+        defer { try? FileManager.default.removeItem(at: directoryURL) }
+        let sleeper = try startSleeper()
+        defer { stopSleeper(sleeper.process) }
+        let paused = try startSleeper()
+        defer { stopSleeper(paused.process) }
+        let sessionID = UUID()
+        let controller = ProcessGuardianStateController(journalStore: store)
+        let pid = sleeper.process.processIdentifier
+
+        _ = await send(
+            try request(
+                sessionID: sessionID,
+                revision: 1,
+                action: .prepareBackground,
+                processes: [sleeper.identity]
+            ),
+            to: controller
+        )
+        try ProcessPriorityController().lowerPriority(from: .normal, for: pid)
+        _ = await send(
+            try request(
+                sessionID: sessionID,
+                revision: 2,
+                action: .stop,
+                processes: [paused.identity]
+            ),
+            to: controller
+        )
+        #expect(await eventuallyStatus(of: paused.process.processIdentifier, isStopped: true))
+
+        let response = await send(
+            try request(sessionID: sessionID, revision: 3, action: .disarm),
+            to: controller
+        )
+
+        #expect(response.errorCode == nil)
+        #expect(await eventuallyStatus(of: paused.process.processIdentifier, isStopped: false))
+        #expect(isBackgrounded(pid))
+        let state = try store.load()
+        #expect(state.trackedProcesses.isEmpty)
+        #expect(state.backgroundedProcesses.map(\.process) == [sleeper.identity])
+        #expect(state.sessionID == sessionID)
+    }
+
+    @Test("A guardian restart restores journaled backgrounded processes")
+    func guardianRestartRestoresBackgroundedProcesses() async throws {
+        let (store, directoryURL) = try temporaryStore()
+        defer { try? FileManager.default.removeItem(at: directoryURL) }
+        let sleeper = try startSleeper()
+        defer { stopSleeper(sleeper.process) }
+        let pid = sleeper.process.processIdentifier
+        var firstController: ProcessGuardianStateController? =
+            ProcessGuardianStateController(journalStore: store)
+        _ = await send(
+            try request(
+                sessionID: UUID(),
+                revision: 1,
+                action: .prepareBackground,
+                processes: [sleeper.identity]
+            ),
+            to: try #require(firstController)
+        )
+        try ProcessPriorityController().lowerPriority(from: .normal, for: pid)
+        #expect(isBackgrounded(pid))
+        firstController = nil
+
+        _ = ProcessGuardianStateController(journalStore: store)
+
+        #expect(await eventually { !self.isBackgrounded(pid) })
+        #expect(try store.load().backgroundedProcesses.isEmpty)
+    }
+
     @Test("A guardian restart restores journaled processes")
     func guardianRestartRestoresJournaledProcesses() async throws {
         let (store, directoryURL) = try temporaryStore()
@@ -651,6 +801,18 @@ struct ProcessGuardianTests {
             return false
         }
         return UInt32(info.pbi_status) == UInt32(SSTOP)
+    }
+
+    private func isBackgrounded(_ pid: pid_t) -> Bool {
+        (try? ProcessPriorityController().state(for: pid).isBackgrounded) ?? false
+    }
+
+    private func eventually(_ condition: @escaping () -> Bool) async -> Bool {
+        for _ in 0..<100 {
+            if condition() { return true }
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        return condition()
     }
 
     private func temporaryStore() throws
