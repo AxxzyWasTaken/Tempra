@@ -5,22 +5,41 @@ import Testing
 
 @Suite("Process crash watchdog")
 struct ProcessCrashWatchdogTests {
+    /// The built `TempraWatchdog` executable, found relative to the loaded test
+    /// bundle rather than assembled from a build configuration name.
+    ///
+    /// SwiftPM does not promise one build layout: locally the products land in
+    /// `.build/out/Products/Debug`, on a clean checkout in
+    /// `.build/<triple>/debug`, and the test host process is a toolchain
+    /// binary, so `Bundle.main` points into Xcode. Asking the dynamic linker
+    /// where this test bundle itself came from is the one answer that holds in
+    /// every layout.
+    private static func watchdogExecutableURL() throws -> URL {
+        var info = Dl_info()
+        try #require(dladdr(#dsohandle, &info) != 0)
+        let imagePath = try #require(info.dli_fname)
+        var directory = URL(fileURLWithPath: String(cString: imagePath))
+            .deletingLastPathComponent()
+        // An .xctest bundle nests the binary in Contents/MacOS; the products
+        // directory that also holds TempraWatchdog is three levels up.
+        while directory.pathExtension != "xctest", directory.path != "/" {
+            directory = directory.deletingLastPathComponent()
+        }
+        let productsURL = directory.path == "/"
+            ? URL(fileURLWithPath: String(cString: imagePath))
+                .deletingLastPathComponent()
+            : directory.deletingLastPathComponent()
+        let helperURL = productsURL.appendingPathComponent("TempraWatchdog")
+        try #require(
+            FileManager.default.isExecutableFile(atPath: helperURL.path),
+            "TempraWatchdog is not next to the test bundle at \(productsURL.path)"
+        )
+        return helperURL
+    }
+
     @Test("The helper confirms its automatic-resume deadline before a stop")
     func helperAcknowledgesAutomaticResumeDeadline() async throws {
-        let repositoryURL = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-        #if DEBUG
-        let buildConfiguration = "Debug"
-        #else
-        let buildConfiguration = "Release"
-        #endif
-        let helperURL = repositoryURL
-            .appendingPathComponent(
-                ".build/out/Products/\(buildConfiguration)/TempraWatchdog"
-            )
-        try #require(FileManager.default.isExecutableFile(atPath: helperURL.path))
+        let helperURL = try Self.watchdogExecutableURL()
         let identity = try #require(
             LiveProcessSystemController.currentIdentity(for: getpid())
         )
@@ -39,20 +58,7 @@ struct ProcessCrashWatchdogTests {
 
     @Test("A repeated arm replaces the earlier automatic-resume deadline")
     func repeatedArmReplacesEarlierDeadline() async throws {
-        let repositoryURL = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-        #if DEBUG
-        let buildConfiguration = "Debug"
-        #else
-        let buildConfiguration = "Release"
-        #endif
-        let helperURL = repositoryURL
-            .appendingPathComponent(
-                ".build/out/Products/\(buildConfiguration)/TempraWatchdog"
-            )
-        try #require(FileManager.default.isExecutableFile(atPath: helperURL.path))
+        let helperURL = try Self.watchdogExecutableURL()
 
         let sleeper = Process()
         sleeper.executableURL = URL(fileURLWithPath: "/bin/sleep")

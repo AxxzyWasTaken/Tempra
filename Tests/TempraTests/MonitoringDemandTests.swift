@@ -273,7 +273,15 @@ struct MonitoringDemandTests {
     func closedMenuPacesProcessEventSamples() async throws {
         let service = RecordingMonitoringService()
         var receivedSamples: [MonitoringSample] = []
-        let coordinator = MonitoringCoordinator(service: service) { sample in
+        // The pacing gap is measured, not waited out, so the test drives the
+        // clock itself. A loaded machine can otherwise spend longer than the
+        // one second gap between the anchor sample and the churn below, which
+        // makes every event sample immediately and paces nothing.
+        let clock = TestInstantClock()
+        let coordinator = MonitoringCoordinator(
+            service: service,
+            now: { clock.now }
+        ) { sample in
             receivedSamples.append(sample)
         }
         let firstIdentity = ProcessIdentity(pid: 501, startTimeMicroseconds: 5_000_000)
@@ -299,6 +307,9 @@ struct MonitoringDemandTests {
         try await Task.sleep(for: .milliseconds(200))
         #expect(receivedSamples.count == 1)
 
+        // The deferred refresh wakes after the real one second gap and asks
+        // again; by then the paced gap has genuinely elapsed.
+        clock.advance(by: .seconds(1))
         try await waitForSampleCount(2, samples: { receivedSamples }, attempts: 300)
         let requests = await service.recordedRequests()
         #expect(requests.count == 2)
@@ -349,6 +360,25 @@ struct MonitoringDemandTests {
 }
 
 private struct MonitoringSampleTimeout: Error {}
+
+/// A clock the test advances by hand, so a paced gap is decided by the test
+/// rather than by how long a loaded machine took to get between two lines.
+private final class TestInstantClock: @unchecked Sendable {
+    private let lock = NSLock()
+    private var instant = ContinuousClock().now
+
+    var now: ContinuousClock.Instant {
+        lock.lock()
+        defer { lock.unlock() }
+        return instant
+    }
+
+    func advance(by duration: Duration) {
+        lock.lock()
+        defer { lock.unlock() }
+        instant = instant.advanced(by: duration)
+    }
+}
 
 private actor RecordingMonitoringService: MonitoringServicing {
     private var requests: [MonitoringRequest] = []

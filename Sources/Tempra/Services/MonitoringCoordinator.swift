@@ -7,7 +7,7 @@ final class MonitoringCoordinator {
     private let service: any MonitoringServicing
     private let inventoryReader = ApplicationInventoryReader()
     private let onSample: SampleHandler
-    private let clock = ContinuousClock()
+    private let now: @Sendable () -> ContinuousClock.Instant
     private var timer: Timer?
     private var configurationTask: Task<Void, Never>?
     private var samplingTask: Task<Void, Never>?
@@ -23,9 +23,13 @@ final class MonitoringCoordinator {
 
     init(
         service: any MonitoringServicing = MonitoringService(),
+        now: @escaping @Sendable () -> ContinuousClock.Instant = {
+            ContinuousClock().now
+        },
         onSample: @escaping SampleHandler
     ) {
         self.service = service
+        self.now = now
         self.onSample = onSample
     }
 
@@ -128,7 +132,7 @@ final class MonitoringCoordinator {
               samplingTask == nil,
               let lastSampleStartedAt else { return nil }
         let gap = ProcessControlMath.duration(interval)
-        let elapsed = lastSampleStartedAt.duration(to: clock.now)
+        let elapsed = lastSampleStartedAt.duration(to: now())
         guard elapsed >= .zero, elapsed < gap else { return nil }
         return gap - elapsed
     }
@@ -247,7 +251,7 @@ final class MonitoringCoordinator {
     private func start(_ request: MonitoringRequest) {
         let configurationTask = configurationTask
         let priority: TaskPriority = request.isLatencySensitive ? .userInitiated : .utility
-        lastSampleStartedAt = clock.now
+        lastSampleStartedAt = now()
         samplingTask = Task(priority: priority) { [weak self, service, onSample] in
             await configurationTask?.value
             guard !Task.isCancelled else { return }
