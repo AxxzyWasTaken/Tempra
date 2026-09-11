@@ -3,7 +3,9 @@ import Foundation
 import Testing
 @testable import Tempra
 
-@Suite("Process crash watchdog")
+/// Serialized for the same reason as the guardian suite: these tests stop and
+/// resume real processes and wait on real deadlines.
+@Suite("Process crash watchdog", .serialized)
 struct ProcessCrashWatchdogTests {
     /// The built `TempraWatchdog` executable, found relative to the loaded test
     /// bundle rather than assembled from a build configuration name.

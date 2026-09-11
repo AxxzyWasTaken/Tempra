@@ -305,15 +305,21 @@ struct MonitoringDemandTests {
             )
         }
         try await Task.sleep(for: .milliseconds(200))
-        #expect(receivedSamples.count == 1)
+        // Only the churn is under test. The periodic timer may also fire on a
+        // slow machine, and a sample it takes is not a cost of the churn, so
+        // the count that matters is of samples carrying a process change.
+        var eventRequests = await service.recordedRequests()
+            .filter { $0.processChange != nil }
+        #expect(eventRequests.isEmpty)
 
         // The deferred refresh wakes after the real one second gap and asks
         // again; by then the paced gap has genuinely elapsed.
         clock.advance(by: .seconds(1))
-        try await waitForSampleCount(2, samples: { receivedSamples }, attempts: 300)
-        let requests = await service.recordedRequests()
-        #expect(requests.count == 2)
-        #expect(requests[1].processChange == ProcessChangeNotification(
+        try await waitForEventRequestCount(1, service: service)
+        eventRequests = await service.recordedRequests()
+            .filter { $0.processChange != nil }
+        #expect(eventRequests.count == 1)
+        #expect(eventRequests[0].processChange == ProcessChangeNotification(
             invalidatedMetadata: [firstIdentity, secondIdentity],
             processTableChanged: true,
             audioActivityChanged: false
@@ -343,6 +349,21 @@ struct MonitoringDemandTests {
         )
         try await waitForSampleCount(2, samples: { receivedSamples })
         await coordinator.shutdown()
+    }
+
+    @MainActor
+    private func waitForEventRequestCount(
+        _ count: Int,
+        service: RecordingMonitoringService,
+        attempts: Int = 300
+    ) async throws {
+        for _ in 0..<attempts {
+            let requests = await service.recordedRequests()
+                .filter { $0.processChange != nil }
+            if requests.count >= count { return }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        throw MonitoringSampleTimeout()
     }
 
     @MainActor

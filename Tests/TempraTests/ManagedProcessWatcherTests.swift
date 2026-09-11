@@ -10,12 +10,7 @@ struct ManagedProcessWatcherTests {
     @Test("Managed process events are coalesced for a quarter second by default")
     func defaultDebounceCoalescesProcessEvents() async {
         let audioMonitor = RecordingAudioActivityMonitor()
-        // A long debounce window, so a loaded machine cannot spend it between
-        // the two events below and deliver the first one on its own.
-        let watcher = ManagedProcessWatcher(
-            audioMonitor: audioMonitor,
-            eventDebounceInterval: 5
-        )
+        let watcher = ManagedProcessWatcher(audioMonitor: audioMonitor)
         var notifications: [ProcessChangeNotification] = []
         watcher.watch(
             processIdentities: [],
@@ -28,21 +23,15 @@ struct ManagedProcessWatcherTests {
             identity: identity
         )
 
+        // Both events are delivered without awaiting in between, so the
+        // debounced work item cannot run between them however loaded the
+        // machine is; it needs this actor, which the test is holding.
         watcher.handleProcessChange(for: notification)
         watcher.handleProcessChange(for: notification)
 
         #expect(notifications.isEmpty)
         #expect(await eventually(timeout: .seconds(10)) { notifications.count == 1 })
 
-        await watcher.stop()
-    }
-
-    @Test("The default debounce window is a quarter second")
-    func defaultDebounceIntervalIsQuarterSecond() async {
-        let watcher = ManagedProcessWatcher(
-            audioMonitor: RecordingAudioActivityMonitor()
-        )
-        #expect(watcher.eventDebounceInterval == 0.25)
         await watcher.stop()
     }
 

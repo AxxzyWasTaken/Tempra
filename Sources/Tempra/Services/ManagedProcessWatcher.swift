@@ -48,7 +48,7 @@ final class ManagedProcessWatcher {
     }
 
     private let audioMonitor: any AudioActivityMonitoring
-    let eventDebounceInterval: TimeInterval
+    private let eventDebounceInterval: TimeInterval
     private var processEventSources: [ProcessIdentity: any DispatchSourceProcess] = [:]
     private var processChangeWorkItem: DispatchWorkItem?
     private var pendingMetadataInvalidations: Set<ProcessIdentity> = []

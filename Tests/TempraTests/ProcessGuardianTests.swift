@@ -5,7 +5,11 @@ import Testing
 @testable import TempraWatchdog
 import TempraSafety
 
-@Suite("Process guardian")
+/// Serialized because every test here controls real processes — SIGSTOP,
+/// SIGCONT and Darwin background priority — and polls for the result with a
+/// deadline. Running them against each other on a small CI runner makes those
+/// deadlines a measure of machine load rather than of the guardian.
+@Suite("Process guardian", .serialized)
 struct ProcessGuardianTests {
     @Test("A reconnect records guarded processes as restored")
     func reconnectRecordsGuardedProcessesAsRestored() {
@@ -785,11 +789,14 @@ struct ProcessGuardianTests {
         }
     }
 
+    /// Polls for up to five seconds. A passing check returns as soon as the
+    /// state flips, so the budget is only ever spent on a real failure; a
+    /// loaded CI runner can take far longer than a second to reflect a signal.
     private func eventuallyStatus(
         of pid: pid_t,
         isStopped expectedStopped: Bool
     ) async -> Bool {
-        for _ in 0..<100 {
+        for _ in 0..<500 {
             if isStopped(pid) == expectedStopped { return true }
             try? await Task.sleep(for: .milliseconds(10))
         }
@@ -807,8 +814,9 @@ struct ProcessGuardianTests {
         (try? ProcessPriorityController().state(for: pid).isBackgrounded) ?? false
     }
 
+    /// Polls for up to five seconds, for the reason given on `eventuallyStatus`.
     private func eventually(_ condition: @escaping () -> Bool) async -> Bool {
-        for _ in 0..<100 {
+        for _ in 0..<500 {
             if condition() { return true }
             try? await Task.sleep(for: .milliseconds(10))
         }

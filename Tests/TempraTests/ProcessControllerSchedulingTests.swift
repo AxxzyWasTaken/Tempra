@@ -3783,7 +3783,7 @@ struct ProcessControllerSchedulingTests {
 
     private func eventually(_ condition: @escaping @Sendable () -> Bool) async -> Bool {
         let clock = ContinuousClock()
-        let deadline = clock.now.advanced(by: .seconds(2))
+        let deadline = clock.now.advanced(by: .seconds(10))
         while clock.now < deadline {
             if condition() { return true }
             do {
@@ -3799,7 +3799,7 @@ struct ProcessControllerSchedulingTests {
         _ condition: @escaping @Sendable () async -> Bool
     ) async -> Bool {
         let clock = ContinuousClock()
-        let deadline = clock.now.advanced(by: .seconds(2))
+        let deadline = clock.now.advanced(by: .seconds(10))
         while clock.now < deadline {
             if await condition() { return true }
             do {
