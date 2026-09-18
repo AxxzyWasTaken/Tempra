@@ -5,7 +5,7 @@
 <h1 align="center">Tempra</h1>
 
 <p align="center"><strong>Keep background apps from taking over your Mac.</strong><br>
-A free, open-source menu bar app that limits, pauses, or deprioritizes apps the moment you stop looking at them, and hands everything back when you return.</p>
+A free menu bar app that slows down, pauses, or deprioritizes apps while you are not using them, and gives them back the moment you switch to them.</p>
 
 <p align="center">
   <a href="https://github.com/AxxzyWasTaken/Tempra/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/AxxzyWasTaken/Tempra?label=release&color=1f6be0"></a>
@@ -17,238 +17,105 @@ A free, open-source menu bar app that limits, pauses, or deprioritizes apps the 
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/hero-dark.webp">
-    <img src="docs/screenshots/hero-light.webp" alt="Tempra's menu bar panel with the CPU overview, five-minute graph, managed apps and highest-CPU list, flanked by the activity inspector for one app and the settings window." width="880">
+    <img src="docs/screenshots/hero-light.webp" alt="Tempra's menu bar panel with the CPU overview, five-minute graph, managed apps and highest-CPU list, next to the activity inspector for one app and the settings window." width="880">
   </picture>
 </p>
 
 <p align="center">
   <a href="https://github.com/AxxzyWasTaken/Tempra/releases/latest"><strong>Download the latest DMG</strong></a>
   &nbsp;·&nbsp;
-  <a href="#build-from-source">Build from source</a>
+  <a href="#install">Install</a>
   &nbsp;·&nbsp;
-  <a href="#safety">How it keeps your processes safe</a>
+  <a href="#build-from-source">Build from source</a>
 </p>
 
-Set a rule for an app, and Tempra applies its process-control action after the
-app leaves the foreground and its windows are no longer meaningfully visible.
-Tempra restores the app when you return to it or make one of its windows visible
-again.
+## Why
 
-## Features
+Chrome with forty tabs, a game you alt-tabbed out of, an Electron chat app: they all keep burning CPU after you stop looking at them. Your fans spin up, your battery drains, and the app you are actually using gets slower. Tempra watches which app is in front and applies a rule you set to everything else. When you come back to an app, it is running at full speed before the window finishes appearing.
 
-### Control background apps
+It is an open-source alternative to App Tamer. Same idea, no license fee, and the code is here if you want to see exactly what it does to your processes.
 
-- Limit an app from 1% of one logical CPU core up to the Mac's total logical CPU
-  capacity. In Tempra, 100% equals one logical CPU core.
-- Pause an app in the background and resume it in the foreground.
-- Lower an app's CPU priority, with or without a CPU limit. This action requires
-  Tempra's optional administrator helper.
-- Apply a rule only when an app is hidden or after a set delay.
-- Wait while an app plays audio before applying its rule.
-- Hide or quit an app after a set period in the background.
-- Manage supported user-owned background services and processes that require
-  administrator access.
-- Disable a rule, resume one app temporarily, or pause all management for 15
-  minutes, 1 hour, or 4 hours.
-- Adjust saved CPU limits and delays with management profiles. Select a profile
-  manually, or activate one by power source and user inactivity.
+## Install
 
-### See what your Mac is doing
+1. Download the DMG from the [latest release](https://github.com/AxxzyWasTaken/Tempra/releases/latest) and drag Tempra to Applications.
+2. Open it. macOS will refuse the first time, because the build is signed but not notarized. Open System Settings, go to Privacy & Security, scroll down and click Open Anyway. You only do this once.
+3. Tempra lives in the menu bar. Click the CPU percentage to open it.
 
-- View total CPU use and separate values for performance and efficiency cores.
-- Check current CPU use and the rolling one-minute average for each app.
-- Inspect an app's resident memory, subprocesses, active protections, running
-  time, and persistent CPU history.
-- Review system and per-app CPU history for the last 5 minutes, 1 hour, or 24
-  hours. Tempra stores up to 24 hours of graph history.
-- Read the CPU temperature through AppleSMC without root access.
-- Record up to seven days of rule activity, time limited, time paused, and
-  intervention counts.
-- Receive optional in-app high-CPU alerts with quick actions. These alerts do
-  not require notification permission.
-- Search and sort running apps, include background and system processes when
-  needed, or detach the monitor from the menu bar.
-- Export a JSON diagnostic report with the current rules, process state, recent
-  activity, and process-control measurements.
+Lowering an app's CPU priority and managing processes owned by other users need an administrator helper. Setup offers to install it, and you can add or remove it later in Settings. Everything else works without it.
 
-When its panels are closed, Tempra keeps only the sampling required for the
-menu-bar CPU value, automatic profiles, and active rules. Enable **Continuous
-Monitoring** to keep CPU history and high-CPU alerts active in the background.
+## What it does
 
-## How rules work
+Pick an app in the list and choose what happens when it leaves the front:
 
-1. Open Tempra from the menu bar.
-2. Select a running app.
-3. Choose a CPU limit, pause action, lower CPU priority, or idle action.
-4. Set the start delay and the conditions for the rule.
+- Slow it down to a CPU limit, anywhere from 1% of one core up to the whole machine.
+- Pause it outright. It resumes when you switch back.
+- Lower its CPU priority so macOS schedules it on the efficiency cores, with or without a limit.
+- Hide it or quit it after it has been in the background for a while.
 
-Tempra saves each rule automatically by bundle identifier. For apps with more
-than one subprocess, Tempra keeps audio-producing and newly discovered
-subprocesses out of CPU-limit pulses. When possible, it also leaves
-latency-sensitive network work and critical file activity running while it
-limits other subprocesses.
+You can also say when the rule starts: immediately, after a delay, or only once the app is hidden. Tempra holds off while an app is playing audio, so your music does not stutter because Spotify lost focus.
 
-Open an app's activity details to view its CPU history and subprocesses. You can
-also bring the app to the foreground, hide it, quit it, relaunch it, or end a
-temporary resume when the action is available.
+Rules are saved per app. Profiles hold a second set of limits, for example a stricter one for battery, and switch by hand or by power source or idle time. If a rule is getting in the way, pause everything for 15 minutes, 1 hour, or 4 hours from the menu.
+
+The panel itself is a small activity monitor: total CPU split by performance and efficiency cores, per-app CPU with a one-minute average, CPU temperature read from the SMC without root, and up to 24 hours of history. Open any app to see its subprocesses, memory, and its own CPU graph. Seven days of rule activity are kept so you can see how much an app was actually throttled. If something you have not set a rule for sits at high CPU in the background, Tempra shows an in-app alert with a one-click limit. No notification permission needed.
 
 <table align="center">
   <tr>
-    <td align="center" valign="top"><img src="docs/screenshots/rule-editor-dark.webp" alt="The rule editor for one app, with the stop, lower-priority and slow-down actions, the start delay, the audio and hidden-only conditions, and the idle actions." width="310"></td>
-    <td align="center" valign="top"><img src="docs/screenshots/activity-inspector-dark.webp" alt="The activity inspector for one app, showing its live CPU use, one-minute average, resident memory and CPU history." width="310"></td>
+    <td align="center" valign="top"><img src="docs/screenshots/rule-editor-dark.webp" alt="The rule editor for one app: the stop, lower-priority and slow-down actions, the start delay, the audio and hidden-only conditions, and the idle actions." width="310"></td>
+    <td align="center" valign="top"><img src="docs/screenshots/activity-inspector-dark.webp" alt="The activity inspector for one app: live CPU, one-minute average, resident memory and the CPU history graph." width="310"></td>
   </tr>
   <tr>
-    <td align="center"><sub>Rule editor: what happens when the app leaves the front</sub></td>
-    <td align="center"><sub>Activity inspector: live use and history for one app</sub></td>
+    <td align="center"><sub>The rule editor for one app</sub></td>
+    <td align="center"><sub>The activity inspector for the same app</sub></td>
   </tr>
 </table>
 
-Tempra restores controlled processes when you return to an app, make one of its
-windows visible, disable its rule, pause or turn off management, or quit Tempra
-normally.
+When the panel is closed, Tempra samples only what the menu bar number, automatic profiles, and active rules need. Turn on Continuous Monitoring in Settings if you want history and alerts to keep running in the background too.
 
-## Safety
+## How it stays safe
 
-Tempra manages ordinary apps and supported user-owned background services. Its
-optional administrator helper can lower CPU priority and control supported
-processes that the app cannot manage directly. Tempra shows an explicit error
-if the helper is unavailable. It does not replace the requested action with a
-weaker one.
+Stopping other people's processes is the kind of thing that goes wrong at the worst moment, so most of the code is about the failure cases.
 
-Tempra keeps SoundSource audio components and protected macOS processes in
-monitor-only mode. Protected processes include WindowServer, Finder, Dock,
-SystemUIServer, loginwindow, and WindowManager. Tempra does not stop, lower the
-priority of, or terminate these processes.
+Before Tempra pauses anything, a separate guardian process writes the target's process ID and start time to a journal on disk and confirms the write. Only then does the stop signal go out. The guardian holds a five-second lease that Tempra renews every second. If Tempra crashes, hangs, or gets killed, the lease expires and the guardian resumes everything in its journal. If the guardian itself dies, launchd restarts it and it resumes everything before accepting new work. Resume signals are only sent when the process ID and start time still match, so a reused PID never gets a stray SIGCONT.
 
-Before Tempra stops a process, a signed process guardian records the process ID
-and start time in a durable journal. The guardian confirms the journal write
-before it sends the stop signal. The guardian sends a resume signal only when
-the process ID and start time still match.
+The administrator helper follows the same pattern for privileged processes and sets its own resume deadlines for CPU-limit pulses. If Tempra cannot restore every managed process on quit, it refuses to quit normally and tells you why, with a Quit Anyway that still hands the cleanup to the guardian.
 
-The guardian has a five-second lease. Tempra renews the lease each second while
-the guardian protects a process. The guardian restores all protected processes
-if Tempra exits, the connection closes, or the lease expires. The `launchd`
-service restarts the guardian after an unsuccessful exit. A new guardian
-restores the journaled processes before it accepts new management requests.
-Tempra does not replace a registered guardian while its journal contains a
-protected process.
+Some things are never touched: WindowServer, Finder, Dock, SystemUIServer, loginwindow, WindowManager, and the audio components of apps that route system sound. They show up in the list so you can see their CPU, but no rule applies to them.
 
-The administrator helper also sets automatic-resume deadlines for privileged
-CPU-limit pulses. Tempra blocks a normal quit and shows an error if it cannot
-restore every managed process.
-
-Tempra validates saved rules, preferences, history, and management records
-before it starts process management. If saved data is invalid, Tempra preserves
-the stored bytes, shows an error, and stops startup. If a later save fails,
-Tempra shows an error and does not treat the failed write as successful.
-
-## Requirements
-
-- macOS 14.2 or later
-- Swift 5.10 or later
-- An Apple Development or Developer ID Application signing identity for the app
-  bundle, process guardian, and administrator helper
+If Tempra finds corrupt saved data on launch it stops and shows an error instead of guessing. It never overwrites the bad file.
 
 ## Build from source
 
-Run this command from the repository root:
+You need macOS 14.2, Swift 5.10, and any Apple code-signing identity (a free Apple Development one is enough).
 
 ```sh
 ./script/build_and_run.sh
 ```
 
-The script makes an optimized release build. It adds the process guardian launch
-agent and the administrator helper. It embeds Sparkle and signs each nested
-component with an Apple code-signing identity. It creates `dist/Tempra.app` and
-opens the app. The script selects the first available Apple Development or
-Developer ID Application identity. Set `CODE_SIGN_IDENTITY` to select a
-different identity:
+This makes a release build, embeds Sparkle and the guardian and helper, signs everything with the first identity it finds, writes `dist/Tempra.app`, and opens it. Set `CODE_SIGN_IDENTITY="Apple Development: Your Name (TEAMID)"` to pick a specific one.
+
+Other modes:
 
 ```sh
-CODE_SIGN_IDENTITY="Apple Development: Your Name (TEAMID)" ./script/build_and_run.sh
+./script/build_and_run.sh --build-only  # build, don't open
+./script/build_and_run.sh --debug       # debug build under LLDB
+./script/build_and_run.sh --logs        # open and stream the app's log
+./script/build_and_run.sh --telemetry   # open and stream telemetry
+./script/build_and_run.sh --verify      # build, open, check it stays up
+swift test                              # the test suite, about 400 tests
 ```
 
-Use a different mode when necessary:
+## Cutting a release
 
-```sh
-./script/build_and_run.sh --build-only  # Build without opening the app
-./script/build_and_run.sh --debug       # Build a debug version and open LLDB
-./script/build_and_run.sh --logs        # Open the app and stream its logs
-./script/build_and_run.sh --telemetry   # Open the app and stream its telemetry
-./script/build_and_run.sh --verify      # Build, open, and check that Tempra runs
-```
-
-Run the test suite with:
-
-```sh
-swift test
-```
-
-## Build a release DMG
-
-A release DMG requires a `Developer ID Application` identity and validated
-notarization credentials. It also requires the Tempra Sparkle signing key in
-the login Keychain. An Apple Development identity is not sufficient for
-distribution.
-
-1. Install the `Developer ID Application` identity in the login Keychain.
-2. Store the notarization credentials in a Keychain profile:
-
-   ```sh
-   xcrun notarytool store-credentials Tempra-notary
-   ```
-
-3. Build, notarize, staple, and verify the DMG:
-
-   ```sh
-   CODE_SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" \
-   NOTARYTOOL_PROFILE="Tempra-notary" \
-   ./script/package_release_dmg.sh
-   ```
-
-4. If the matching GitHub release exists, add `--upload` to attach the DMG and
-   the signed `appcast.xml` file:
-
-   ```sh
-   CODE_SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" \
-   NOTARYTOOL_PROFILE="Tempra-notary" \
-   ./script/package_release_dmg.sh --upload
-   ```
-
-The script stops if Developer ID signing, notarization, stapling, Gatekeeper
-assessment, Sparkle signing, or GitHub authentication fails. Increase both
-`APP_VERSION` and `APP_BUILD` in `script/build_and_run.sh` before each release.
-`APP_BUILD` must always increase.
-
-The Sparkle private key uses the Keychain account `tempra`. To move release
-work to another Mac, export the key on the current release Mac. Import it on
-the new release Mac. Keep the exported file secret. Delete it after the import.
-
-```sh
-.build/artifacts/sparkle/Sparkle/bin/generate_keys \
-  --account tempra -x /secure/path/tempra-sparkle-key
-
-.build/artifacts/sparkle/Sparkle/bin/generate_keys \
-  --account tempra -f /secure/path/tempra-sparkle-key
-```
-
-Tempra reads the stable update feed from the latest GitHub release. The release
-script signs the feed and each update archive. Tempra stops the update if feed
-or archive verification fails.
-
-If an Apple Developer Program membership is not available, you can create an
-explicitly labeled, unnotarized DMG with an Apple Development identity:
+Bump `APP_VERSION` and `APP_BUILD` in `script/build_and_run.sh`, then:
 
 ```sh
 ./script/package_release_dmg.sh --unnotarized --upload
 ```
 
-The file name includes `unnotarized`. macOS can warn users or block the app
-because Apple did not notarize it. The script does not use this mode unless you
-specify `--unnotarized`.
+That builds the DMG, names it `Tempra-X.Y.Z-unnotarized.dmg`, and attaches it to the matching GitHub release. Releases have shipped this way since 0.3.3 because there is no Developer ID. Without one there is no notarization and no signed Sparkle appcast, so existing installs do not auto-update; users download the new DMG.
+
+With a Developer ID Application identity the full path works: store notarization credentials with `xcrun notarytool store-credentials Tempra-notary`, put the Sparkle signing key in the login Keychain under the account `tempra`, then run the script without `--unnotarized` with `CODE_SIGN_IDENTITY` and `NOTARYTOOL_PROFILE` set. It notarizes, staples, checks Gatekeeper, signs the appcast, and stops on the first failure. To move the Sparkle key to another Mac, export it with `generate_keys --account tempra -x <file>` and import with `-f`, then delete the file.
 
 ## License
 
-Tempra is available under the [GNU General Public License v3.0](LICENSE).
-See [Third-Party Notices](THIRD_PARTY_NOTICES.md) for sensor implementation
-acknowledgements.
+GPL-3.0. The SMC temperature reader is adapted from [MacMonitor](https://github.com/DanielStormApps/MacMonitor) under the MIT license, see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
