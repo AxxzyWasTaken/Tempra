@@ -116,6 +116,12 @@ That builds the DMG, names it `Tempra-X.Y.Z-unnotarized.dmg`, and attaches it to
 
 With a Developer ID Application identity the full path works: store notarization credentials with `xcrun notarytool store-credentials Tempra-notary`, put the Sparkle signing key in the login Keychain under the account `tempra`, then run the script without `--unnotarized` with `CODE_SIGN_IDENTITY` and `NOTARYTOOL_PROFILE` set. It notarizes, staples, checks Gatekeeper, signs the appcast, and stops on the first failure. To move the Sparkle key to another Mac, export it with `generate_keys --account tempra -x <file>` and import with `-f`, then delete the file.
 
+## Security
+
+Tempra stops and deprioritizes other processes and installs an administrator helper, so if you
+find a way to abuse either, please report it privately rather than opening an issue. What is in
+scope and how to send it is in [SECURITY.md](SECURITY.md).
+
 ## License
 
 GPL-3.0. The SMC temperature reader is adapted from Daniel Storm's [SMC](https://github.com/DanielStormApps/SMC) library under the MIT license, see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
