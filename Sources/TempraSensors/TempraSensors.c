@@ -1,4 +1,4 @@
-// AppleSMC access is adapted from the MIT-licensed MacMonitor SMC reader.
+// AppleSMC access is adapted from Daniel Storm's MIT-licensed SMC library (github.com/DanielStormApps/SMC).
 
 #include "TempraSensors.h"
 

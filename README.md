@@ -118,4 +118,4 @@ With a Developer ID Application identity the full path works: store notarization
 
 ## License
 
-GPL-3.0. The SMC temperature reader is adapted from [MacMonitor](https://github.com/DanielStormApps/MacMonitor) under the MIT license, see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+GPL-3.0. The SMC temperature reader is adapted from Daniel Storm's [SMC](https://github.com/DanielStormApps/SMC) library under the MIT license, see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
