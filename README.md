@@ -1,23 +1,38 @@
 <p align="center">
-  <img src="Resources/AppIcon.png" alt="Tempra app icon" width="128" height="128">
+  <img src="Resources/AppIcon.png" alt="Tempra app icon" width="96" height="96">
 </p>
 
-# Tempra
+<h1 align="center">Tempra</h1>
 
-**Keep background apps from taking over your Mac.**
+<p align="center"><strong>Keep background apps from taking over your Mac.</strong><br>
+A free, open-source menu bar app that limits, pauses, or deprioritizes apps the moment you stop looking at them, and hands everything back when you return.</p>
+
+<p align="center">
+  <a href="https://github.com/AxxzyWasTaken/Tempra/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/AxxzyWasTaken/Tempra?label=release&color=1f6be0"></a>
+  <img alt="macOS 14.2 or later" src="https://img.shields.io/badge/macOS-14.2%2B-1f6be0">
+  <a href="LICENSE"><img alt="GPL-3.0 license" src="https://img.shields.io/badge/license-GPL--3.0-1f6be0"></a>
+  <a href="https://github.com/AxxzyWasTaken/Tempra/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/AxxzyWasTaken/Tempra/actions/workflows/ci.yml/badge.svg"></a>
+</p>
 
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/menu-panel-dark.png">
-    <img src="docs/screenshots/menu-panel-light.png" alt="The Tempra menu bar panel showing total, performance-core and efficiency-core CPU use with a five-minute graph, the apps Tempra is managing, and the highest-CPU apps." width="360">
+    <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/hero-dark.webp">
+    <img src="docs/screenshots/hero-light.webp" alt="Tempra's menu bar panel with the CPU overview, five-minute graph, managed apps and highest-CPU list, flanked by the activity inspector for one app and the settings window." width="880">
   </picture>
 </p>
 
-Tempra is a free, open-source macOS menu bar app that limits or pauses
-background apps and processes to reduce CPU use and save power. Set a rule for
-an app, and Tempra applies its process-control action after the app leaves the
-foreground and its windows are no longer meaningfully visible. Tempra restores
-the app when you return to it or make one of its windows visible again.
+<p align="center">
+  <a href="https://github.com/AxxzyWasTaken/Tempra/releases/latest"><strong>Download the latest DMG</strong></a>
+  &nbsp;·&nbsp;
+  <a href="#build-from-source">Build from source</a>
+  &nbsp;·&nbsp;
+  <a href="#safety">How it keeps your processes safe</a>
+</p>
+
+Set a rule for an app, and Tempra applies its process-control action after the
+app leaves the foreground and its windows are no longer meaningfully visible.
+Tempra restores the app when you return to it or make one of its windows visible
+again.
 
 ## Features
 
@@ -79,14 +94,12 @@ temporary resume when the action is available.
 
 <table align="center">
   <tr>
-    <td align="center"><img src="docs/screenshots/rule-editor-dark.png" alt="The rule editor for one app, with the stop, lower-priority and slow-down actions, the start delay, the audio and hidden-only conditions, and the idle actions." width="270"></td>
-    <td align="center"><img src="docs/screenshots/activity-inspector-dark.png" alt="The activity inspector for one app, showing its live CPU use, one-minute average, resident memory and CPU history." width="270"></td>
-    <td align="center"><img src="docs/screenshots/settings-dark.png" alt="The Tempra settings window on the General tab." width="260"></td>
+    <td align="center" valign="top"><img src="docs/screenshots/rule-editor-dark.webp" alt="The rule editor for one app, with the stop, lower-priority and slow-down actions, the start delay, the audio and hidden-only conditions, and the idle actions." width="310"></td>
+    <td align="center" valign="top"><img src="docs/screenshots/activity-inspector-dark.webp" alt="The activity inspector for one app, showing its live CPU use, one-minute average, resident memory and CPU history." width="310"></td>
   </tr>
   <tr>
-    <td align="center"><sub>Rule editor</sub></td>
-    <td align="center"><sub>Activity inspector</sub></td>
-    <td align="center"><sub>Settings</sub></td>
+    <td align="center"><sub>Rule editor: what happens when the app leaves the front</sub></td>
+    <td align="center"><sub>Activity inspector: live use and history for one app</sub></td>
   </tr>
 </table>
 
