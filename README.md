@@ -6,6 +6,13 @@
 
 **Keep background apps from taking over your Mac.**
 
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/menu-panel-dark.png">
+    <img src="docs/screenshots/menu-panel-light.png" alt="The Tempra menu bar panel showing total, performance-core and efficiency-core CPU use with a five-minute graph, the apps Tempra is managing, and the highest-CPU apps." width="360">
+  </picture>
+</p>
+
 Tempra is a free, open-source macOS menu bar app that limits or pauses
 background apps and processes to reduce CPU use and save power. Set a rule for
 an app, and Tempra applies its process-control action after the app leaves the
@@ -69,6 +76,19 @@ limits other subprocesses.
 Open an app's activity details to view its CPU history and subprocesses. You can
 also bring the app to the foreground, hide it, quit it, relaunch it, or end a
 temporary resume when the action is available.
+
+<table align="center">
+  <tr>
+    <td align="center"><img src="docs/screenshots/rule-editor-dark.png" alt="The rule editor for one app, with the stop, lower-priority and slow-down actions, the start delay, the audio and hidden-only conditions, and the idle actions." width="270"></td>
+    <td align="center"><img src="docs/screenshots/activity-inspector-dark.png" alt="The activity inspector for one app, showing its live CPU use, one-minute average, resident memory and CPU history." width="270"></td>
+    <td align="center"><img src="docs/screenshots/settings-dark.png" alt="The Tempra settings window on the General tab." width="260"></td>
+  </tr>
+  <tr>
+    <td align="center"><sub>Rule editor</sub></td>
+    <td align="center"><sub>Activity inspector</sub></td>
+    <td align="center"><sub>Settings</sub></td>
+  </tr>
+</table>
 
 Tempra restores controlled processes when you return to an app, make one of its
 windows visible, disable its rule, pause or turn off management, or quit Tempra
