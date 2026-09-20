@@ -1,0 +1,228 @@
+/* Tempra site — warm monochrome, editorial. No frameworks, no build step. */
+
+:root {
+  --bone: #F7F6F3;
+  --surface: #FFFFFF;
+  --ink: #161614;
+  --ink-soft: #57564F;
+  --ink-mute: #85837B;
+  --rule: #E6E4DE;
+  --accent-bg: #EDF3EC;
+  --accent-ink: #346538;
+  --sans: 'SF Pro Text', 'SF Pro Display', -apple-system, BlinkMacSystemFont, 'Helvetica Neue', sans-serif;
+  --serif: 'Instrument Serif', 'Newsreader', 'Lyon Text', Georgia, serif;
+  --mono: 'SF Mono', 'Geist Mono', 'JetBrains Mono', ui-monospace, monospace;
+}
+
+* { box-sizing: border-box; }
+
+html { -webkit-font-smoothing: antialiased; }
+
+body {
+  margin: 0;
+  background: var(--bone);
+  color: var(--ink);
+  font-family: var(--sans);
+  font-size: 17px;
+  line-height: 1.65;
+}
+
+a { color: var(--ink); text-decoration: none; border-bottom: 1px solid var(--rule); }
+a:hover { border-bottom-color: var(--ink); }
+
+/* ---------- header ---------- */
+
+.site-head {
+  max-width: 1040px;
+  margin: 0 auto;
+  padding: 32px 28px 0;
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 24px;
+}
+
+.wordmark {
+  font-family: var(--serif);
+  font-size: 24px;
+  letter-spacing: -0.02em;
+  border: 0;
+}
+
+.site-head nav { display: flex; gap: 24px; }
+
+.site-head nav a {
+  font-size: 14px;
+  color: var(--ink-soft);
+  border: 0;
+}
+
+.site-head nav a:hover { color: var(--ink); }
+
+/* ---------- layout ---------- */
+
+main { max-width: 1040px; margin: 0 auto; padding: 0 28px; }
+
+section { padding: 72px 0; border-bottom: 1px solid var(--rule); }
+section:last-of-type { border-bottom: 0; }
+
+.prose { max-width: 720px; }
+
+.prose p, .prose li { color: var(--ink-soft); }
+
+/* ---------- hero ---------- */
+
+.hero { padding-top: 88px; }
+
+.eyebrow {
+  font-family: var(--mono);
+  font-size: 12px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--ink-mute);
+  margin: 0 0 24px;
+}
+
+h1 {
+  font-family: var(--serif);
+  font-weight: 400;
+  font-size: clamp(40px, 6vw, 64px);
+  line-height: 1.08;
+  letter-spacing: -0.03em;
+  margin: 0 0 24px;
+}
+
+.lede {
+  max-width: 620px;
+  font-size: 19px;
+  color: var(--ink-soft);
+  margin: 0 0 32px;
+}
+
+.actions { display: flex; flex-wrap: wrap; gap: 12px; margin: 0 0 56px; }
+
+.btn {
+  display: inline-block;
+  padding: 11px 20px;
+  border: 1px solid var(--ink);
+  border-radius: 5px;
+  background: var(--ink);
+  color: var(--surface);
+  font-size: 15px;
+  transition: background 160ms ease, transform 120ms ease;
+}
+
+.btn:hover { background: #333029; border-color: #333029; }
+.btn:active { transform: scale(0.985); }
+
+.btn-quiet {
+  background: transparent;
+  color: var(--ink);
+  border-color: var(--rule);
+}
+
+.btn-quiet:hover { background: transparent; border-color: var(--ink); }
+
+/* ---------- headings ---------- */
+
+h2 {
+  font-family: var(--serif);
+  font-weight: 400;
+  font-size: 32px;
+  letter-spacing: -0.02em;
+  margin: 0 0 20px;
+}
+
+h3 {
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: -0.005em;
+  margin: 0 0 8px;
+}
+
+/* ---------- screenshots ---------- */
+
+.shot { margin: 0; }
+
+.shot img {
+  display: block;
+  width: 100%;
+  height: auto;
+  border: 1px solid var(--rule);
+  border-radius: 10px;
+  background: var(--surface);
+}
+
+.shot-pair {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 20px;
+  margin-top: 36px;
+}
+
+/* ---------- bento ---------- */
+
+.bento {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  margin: 28px 0 32px;
+}
+
+.cell {
+  background: var(--surface);
+  border: 1px solid var(--rule);
+  border-radius: 10px;
+  padding: 24px;
+}
+
+.cell p { margin: 0; font-size: 15px; }
+
+/* ---------- misc ---------- */
+
+.note {
+  background: var(--accent-bg);
+  color: var(--accent-ink);
+  border-radius: 8px;
+  padding: 16px 20px;
+  font-size: 15px;
+}
+
+.contact { list-style: none; padding: 0; margin: 20px 0 0; }
+.contact li { padding: 10px 0; border-bottom: 1px solid var(--rule); font-size: 15px; }
+
+ol { padding-left: 20px; }
+ol li { margin-bottom: 10px; }
+
+/* ---------- legal pages ---------- */
+
+.legal { max-width: 720px; margin: 0 auto; padding: 64px 28px 0; }
+.legal h1 { font-size: clamp(34px, 5vw, 44px); margin-bottom: 8px; }
+.legal .updated { font-family: var(--mono); font-size: 12px; color: var(--ink-mute); margin: 0 0 40px; }
+.legal h2 { font-size: 24px; margin-top: 44px; }
+.legal p, .legal li { color: var(--ink-soft); }
+.legal ul { padding-left: 20px; }
+.legal li { margin-bottom: 8px; }
+
+/* ---------- footer ---------- */
+
+.site-foot {
+  max-width: 1040px;
+  margin: 0 auto;
+  padding: 48px 28px 64px;
+  border-top: 1px solid var(--rule);
+  margin-top: 40px;
+}
+
+.site-foot p { margin: 0 0 10px; display: flex; flex-wrap: wrap; gap: 20px; }
+.site-foot a { font-size: 14px; color: var(--ink-soft); border: 0; }
+.site-foot a:hover { color: var(--ink); }
+.site-foot .fine { font-size: 13px; color: var(--ink-mute); display: block; }
+
+/* ---------- responsive ---------- */
+
+@media (max-width: 720px) {
+  .bento, .shot-pair { grid-template-columns: 1fr; }
+  .site-head { flex-direction: column; gap: 12px; }
+  section { padding: 56px 0; }
+}

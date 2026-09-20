@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tempra — keep background apps from taking over your Mac</title>
+<meta name="description" content="A free, open-source menu bar app that slows down, pauses, or deprioritizes Mac apps while you are not using them. An alternative to App Tamer.">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header class="site-head">
+  <a class="wordmark" href="./">Tempra</a>
+  <nav>
+    <a href="#what">What it does</a>
+    <a href="#safety">Safety</a>
+    <a href="https://github.com/AxxzyWasTaken/Tempra">Source</a>
+  </nav>
+</header>
+
+<main>
+
+<section class="hero">
+  <p class="eyebrow">Free and open source · GPL-3.0 · macOS 14.2+</p>
+  <h1>Keep background apps from<br>taking over your Mac.</h1>
+  <p class="lede">Tempra is a menu bar app that slows down, pauses, or deprioritizes apps while you are not using them, and gives them back the moment you switch back.</p>
+  <p class="actions">
+    <a class="btn" href="https://github.com/AxxzyWasTaken/Tempra/releases/latest">Download the latest DMG</a>
+    <a class="btn btn-quiet" href="https://github.com/AxxzyWasTaken/Tempra">Read the source</a>
+  </p>
+  <figure class="shot">
+    <img src="screenshots/hero-light.webp" alt="Tempra's menu bar panel showing the CPU overview, a five-minute graph, managed apps and the highest-CPU list, next to the activity inspector for one app and the settings window.">
+  </figure>
+</section>
+
+<section class="prose" id="why">
+  <h2>Why</h2>
+  <p>Chrome with forty tabs, a game you alt-tabbed out of, an Electron chat app: they all keep burning CPU after you stop looking at them. Fans spin up, the battery drains, and the app you are actually using gets slower. macOS gives you no control over this.</p>
+  <p>Tempra watches which app is in front and applies a rule you set to everything else. When you come back to an app, it is running at full speed before the window finishes appearing.</p>
+</section>
+
+<section class="prose" id="what">
+  <h2>What it does</h2>
+  <p>Pick an app and choose what happens when it leaves the front.</p>
+  <div class="bento">
+    <div class="cell">
+      <h3>Slow it down</h3>
+      <p>Hold an app to a CPU limit, anywhere from one percent of a single core up to the whole machine.</p>
+    </div>
+    <div class="cell">
+      <h3>Pause it</h3>
+      <p>Stop it outright. It resumes when you switch back, with its state intact.</p>
+    </div>
+    <div class="cell">
+      <h3>Lower its priority</h3>
+      <p>Let macOS schedule it on the efficiency cores, with or without a limit on top.</p>
+    </div>
+    <div class="cell">
+      <h3>Hide or quit it</h3>
+      <p>After it has sat in the background for as long as you decide.</p>
+    </div>
+  </div>
+  <p>You choose when a rule starts: immediately, after a delay, or only once the app is hidden. Tempra holds off while an app is playing audio, so your music does not stutter because Spotify lost focus. Rules are saved per app, and profiles hold a second set of limits, for instance a stricter one on battery, switched by hand or by power source or idle time.</p>
+  <p>The panel doubles as a small activity monitor: total CPU split across performance and efficiency cores, per-app CPU with a one-minute average, CPU temperature read from the SMC without root, and up to twenty-four hours of history.</p>
+  <figure class="shot shot-pair">
+    <img src="screenshots/rule-editor-dark.webp" alt="The rule editor for a single app, showing the stop, lower-priority and slow-down actions, the start delay, and the audio and hidden-only conditions.">
+    <img src="screenshots/activity-inspector-dark.webp" alt="The activity inspector for a single app, showing live CPU, a one-minute average, resident memory and a CPU history graph.">
+  </figure>
+</section>
+
+<section class="prose" id="safety">
+  <h2>How it stays safe</h2>
+  <p>Stopping other people's processes is the kind of thing that goes wrong at the worst moment, so most of the code is about the failure cases.</p>
+  <p>Before Tempra pauses anything, a separate guardian process writes the target's process ID and start time to a journal on disk and confirms the write. Only then does the stop signal go out. The guardian holds a five-second lease that Tempra renews every second. If Tempra crashes, hangs, or is killed outright, the lease expires and the guardian resumes everything in its journal. If the guardian itself dies, launchd restarts it and it resumes everything before accepting new work. Resume signals are only sent when the process ID and start time still match, so a reused process ID never receives a stray signal.</p>
+  <p>Some things are never touched: WindowServer, Finder, Dock, SystemUIServer, loginwindow, WindowManager, and the audio components of apps that route system sound. They appear in the list so you can see their CPU, but no rule applies to them.</p>
+  <p>If Tempra cannot restore every managed process on quit, it refuses to quit quietly and tells you why, with a Quit Anyway that still hands the cleanup to the guardian.</p>
+</section>
+
+<section class="prose" id="install">
+  <h2>Install</h2>
+  <ol>
+    <li>Download the DMG from the <a href="https://github.com/AxxzyWasTaken/Tempra/releases/latest">latest release</a> and drag Tempra to Applications.</li>
+    <li>Open it. macOS refuses the first time, because the build is signed but not notarized. Open System Settings, go to Privacy &amp; Security, scroll down and click Open Anyway. You do this once.</li>
+    <li>Tempra lives in the menu bar. Click the CPU percentage to open it.</li>
+  </ol>
+  <p>Lowering an app's CPU priority and managing processes owned by other users need an administrator helper. Setup offers to install it, and you can add or remove it later in Settings. Everything else works without it.</p>
+  <p class="note">Tempra is not on the Mac App Store. Pausing and reprioritizing other processes needs system-level behaviour that App Store sandboxing does not permit.</p>
+</section>
+
+<section class="prose" id="developer">
+  <h2>Who makes it</h2>
+  <p>Tempra is built and maintained in the open by <a href="https://github.com/AxxzyWasTaken">AxxzyWasTaken</a>. Every line that touches your processes lives in <a href="https://github.com/AxxzyWasTaken/Tempra">the repository</a> under the GPL-3.0, alongside the full test suite and the release history. That is deliberate: a utility that suspends your processes should be one you can audit rather than one you have to trust.</p>
+  <ul class="contact">
+    <li>Repository: <a href="https://github.com/AxxzyWasTaken/Tempra">github.com/AxxzyWasTaken/Tempra</a></li>
+    <li>Bugs and feature requests: <a href="https://github.com/AxxzyWasTaken/Tempra/issues">GitHub Issues</a></li>
+    <li>General contact: <a href="https://github.com/AxxzyWasTaken/Tempra/discussions">GitHub Discussions</a>, or open an issue</li>
+    <li>Security reports: <a href="https://github.com/AxxzyWasTaken/Tempra/security/advisories/new">private advisory</a>, per <a href="https://github.com/AxxzyWasTaken/Tempra/blob/main/SECURITY.md">SECURITY.md</a></li>
+  </ul>
+</section>
+
+</main>
+
+<footer class="site-foot">
+  <p>
+    <a href="privacy.html">Privacy Policy</a>
+    <a href="terms.html">Terms of Service</a>
+    <a href="https://github.com/AxxzyWasTaken/Tempra">Source</a>
+    <a href="https://github.com/AxxzyWasTaken/Tempra/blob/main/LICENSE">GPL-3.0</a>
+  </p>
+  <p class="fine">Tempra is free software. It collects nothing about you.</p>
+</footer>
+
+</body>
+</html>
