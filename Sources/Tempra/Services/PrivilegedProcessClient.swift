@@ -13,6 +13,16 @@ enum PrivilegedControlStatus: Equatable, Sendable {
         self == .enabled
     }
 
+    /// True whenever macOS holds a registration for the helper, approved or not.
+    var isRegistered: Bool {
+        switch self {
+        case .enabled, .requiresApproval, .helperUnavailable:
+            true
+        case .notRegistered, .unavailable:
+            false
+        }
+    }
+
     var message: String? {
         switch self {
         case .notRegistered:
@@ -831,6 +841,7 @@ actor PrivilegedProcessClient {
                 from: data
               ),
               response.protocolVersion == PrivilegedProcessProtocol.version,
+              response.requestID == nil || response.requestID == request.requestID,
               response.snapshots.count <= PrivilegedProcessProtocol.maximumProcessCount,
               response.applied.count <= PrivilegedProcessProtocol.maximumProcessCount,
               response.stale.count <= PrivilegedProcessProtocol.maximumProcessCount,
@@ -897,6 +908,7 @@ final class PrivilegedHelperManager {
     private let serviceStatus: () -> SMAppService.Status
     private let bundledServiceIsPresent: () -> Bool
     private let registerService: () async throws -> Void
+    private let unregisterService: () async throws -> Void
     private let openApprovalSettingsAction: () -> Void
     private let pingService: () async throws -> Void
 
@@ -908,6 +920,7 @@ final class PrivilegedHelperManager {
         serviceStatus = { service.status }
         bundledServiceIsPresent = { PrivilegedHelperBundle.containsBundledService() }
         registerService = { try await lifecycle.registerCurrentService() }
+        unregisterService = { try await service.unregister() }
         openApprovalSettingsAction = {
             SMAppService.openSystemSettingsLoginItems()
         }
@@ -918,12 +931,14 @@ final class PrivilegedHelperManager {
         serviceStatus: @escaping () -> SMAppService.Status,
         bundledServiceIsPresent: @escaping () -> Bool,
         registerService: @escaping () async throws -> Void,
+        unregisterService: @escaping () async throws -> Void = {},
         openApprovalSettings: @escaping () -> Void,
         pingService: @escaping () async throws -> Void
     ) {
         self.serviceStatus = serviceStatus
         self.bundledServiceIsPresent = bundledServiceIsPresent
         self.registerService = registerService
+        self.unregisterService = unregisterService
         openApprovalSettingsAction = openApprovalSettings
         self.pingService = pingService
     }
@@ -1003,6 +1018,23 @@ final class PrivilegedHelperManager {
         }
         guard currentServiceStatus == .enabled else { return status }
         return await verifyConnection(opensSettingsForApproval: false)
+    }
+
+    /// Removes the helper daemon registration. macOS stops the helper, whose
+    /// safety watchdog restores anything it still controlled.
+    func requestDisable() async -> PrivilegedControlStatus {
+        guard serviceStatus() != .notRegistered, serviceStatus() != .notFound else {
+            return status
+        }
+        do {
+            try await unregisterService()
+        } catch {
+            return .helperUnavailable(
+                "Tempra could not remove administrator access: "
+                    + error.localizedDescription
+            )
+        }
+        return status
     }
 
     func openApprovalSettings() {

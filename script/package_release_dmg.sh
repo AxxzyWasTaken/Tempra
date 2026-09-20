@@ -85,6 +85,26 @@ if $UPLOAD_RELEASE; then
     exit 1
   fi
   gh auth status >/dev/null
+  if ! git -C "$ROOT_DIR" diff --quiet HEAD --; then
+    echo "The working tree has uncommitted changes; commit or stash them before uploading a release." >&2
+    exit 1
+  fi
+  HEAD_TAG="$(git -C "$ROOT_DIR" describe --exact-match --tags HEAD 2>/dev/null || true)"
+  if [[ "$HEAD_TAG" != "v$APP_VERSION" ]]; then
+    echo "HEAD is tagged '${HEAD_TAG:-<none>}' but the app version is $APP_VERSION; tag HEAD as v$APP_VERSION before uploading." >&2
+    exit 1
+  fi
+fi
+
+if [[ ! -x "$SPARKLE_GENERATE_APPCAST" ]]; then
+  echo "The Sparkle appcast tool is missing from the Swift package artifacts." >&2
+  echo "Run swift package resolve and retry." >&2
+  exit 1
+fi
+if ! /usr/bin/security find-generic-password -a "$SPARKLE_ACCOUNT" -s "https://sparkle-project.org" >/dev/null 2>&1; then
+  echo "The Sparkle EdDSA signing key for account '$SPARKLE_ACCOUNT' is not in the login Keychain." >&2
+  echo "Import it with generate_keys --account $SPARKLE_ACCOUNT -f <file>." >&2
+  exit 1
 fi
 
 if ! $UNNOTARIZED; then
@@ -204,34 +224,22 @@ fi
 /bin/mv -f "$TEMP_DMG_PATH" "$DMG_PATH"
 /usr/bin/shasum -a 256 "$DMG_PATH"
 
-if ! $UNNOTARIZED; then
-  if [[ ! -x "$SPARKLE_GENERATE_APPCAST" ]]; then
-    echo "The Sparkle appcast tool is missing from the Swift package artifacts." >&2
-    exit 1
-  fi
-  mkdir -p "$UPDATES_DIR"
-  /usr/bin/ditto "$DMG_PATH" "$UPDATES_DIR/$DMG_FILENAME"
-  "$SPARKLE_GENERATE_APPCAST" \
-    --account "$SPARKLE_ACCOUNT" \
-    --download-url-prefix \
-    "https://github.com/AxxzyWasTaken/Tempra/releases/download/v$APP_VERSION/" \
-    --maximum-deltas 0 \
-    --versions "$APP_BUILD" \
-    "$UPDATES_DIR"
-  /usr/bin/xmllint --noout "$APPCAST_PATH"
-fi
+rm -rf "$UPDATES_DIR"
+mkdir -p "$UPDATES_DIR"
+/usr/bin/ditto "$DMG_PATH" "$UPDATES_DIR/$DMG_FILENAME"
+"$SPARKLE_GENERATE_APPCAST" \
+  --account "$SPARKLE_ACCOUNT" \
+  --download-url-prefix \
+  "https://github.com/AxxzyWasTaken/Tempra/releases/download/v$APP_VERSION/" \
+  --maximum-deltas 0 \
+  --versions "$APP_BUILD" \
+  "$UPDATES_DIR"
+/usr/bin/xmllint --noout "$APPCAST_PATH"
 
 if $UPLOAD_RELEASE; then
-  if $UNNOTARIZED; then
-    gh release upload "v$APP_VERSION" "$DMG_PATH" --clobber
-    echo "Uploaded $DMG_PATH to release v$APP_VERSION."
-  else
-    gh release upload "v$APP_VERSION" "$DMG_PATH" "$APPCAST_PATH" --clobber
-    echo "Uploaded $DMG_PATH and $APPCAST_PATH to release v$APP_VERSION."
-  fi
+  gh release upload "v$APP_VERSION" "$DMG_PATH" "$APPCAST_PATH" --clobber
+  echo "Uploaded $DMG_PATH and $APPCAST_PATH to release v$APP_VERSION."
 else
   echo "Created $DMG_PATH."
-  if ! $UNNOTARIZED; then
-    echo "Created $APPCAST_PATH."
-  fi
+  echo "Created $APPCAST_PATH."
 fi

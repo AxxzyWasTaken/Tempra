@@ -1,3 +1,4 @@
+import Foundation
 import TempraSafety
 import Testing
 
@@ -5,6 +6,22 @@ import Testing
 
 @Suite("Privileged process client response mapping")
 struct PrivilegedProcessClientTests {
+    @Test("A response carries the identifier of the request it answers")
+    func responseEchoesRequestIdentifier() throws {
+        let request = PrivilegedProcessRequest(action: .ping)
+        let response = PrivilegedProcessResponse(applied: [remote(identity(pid: 5_000))])
+            .answering(request.requestID)
+
+        #expect(response.requestID == request.requestID)
+        #expect(response.applied == [remote(identity(pid: 5_000))])
+
+        let decoded = try JSONDecoder().decode(
+            PrivilegedProcessResponse.self,
+            from: JSONEncoder().encode(response)
+        )
+        #expect(decoded == response)
+    }
+
     @Test("Operation errors preserve completed sets and fail only omitted identities")
     func mapsPartialOperationError() throws {
         let applied = identity(pid: 5_001)

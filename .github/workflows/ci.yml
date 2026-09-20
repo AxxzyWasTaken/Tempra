@@ -9,8 +9,15 @@ permissions:
 
 jobs:
   build-and-test:
+    name: build-and-test (${{ matrix.build-system }})
     runs-on: macos-latest
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        # Swift 6.4+ defaults to swiftbuild, older toolchains to native; the two
+        # lay out .build differently, so both must stay green.
+        build-system: [native, swiftbuild]
 
     steps:
       - name: Check out repository
@@ -20,7 +27,7 @@ jobs:
         run: swift --version
 
       - name: Build release configuration
-        run: swift build --configuration release
+        run: swift build --configuration release --build-system ${{ matrix.build-system }}
 
       - name: Run tests
-        run: swift test
+        run: swift test --build-system ${{ matrix.build-system }}

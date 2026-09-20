@@ -83,6 +83,27 @@ struct ApplicationTerminationTests {
         #expect(presentedFailures == 2)
     }
 
+    @Test("The quit alert names the app and the cause of the failure")
+    func quitAlertTextNamesAppAndCause() {
+        let result = ProcessRestorationResult(failures: [ProcessRestorationFailure(
+            bundleIdentifier: "example.app",
+            stoppedProcesses: [ProcessIdentity(pid: 42, startTimeMicroseconds: 100)],
+            backgroundPriorityProcesses: [],
+            resumeFailureDescription: "The privileged helper connection failed."
+        )])
+
+        let text = AppDelegate.restorationFailureText(result) { identifier in
+            identifier == "example.app" ? "Example" : identifier
+        }
+
+        #expect(text.hasPrefix(
+            "Tempra could not resume 1 process in 1 app. "
+                + "The privileged helper connection failed. Management remains blocked."
+        ))
+        #expect(text.contains("Example (processes: 42)"))
+        #expect(!text.contains("example.app"))
+    }
+
     private var failureResult: ProcessRestorationResult {
         ProcessRestorationResult(failures: [ProcessRestorationFailure(
             bundleIdentifier: "example.app",

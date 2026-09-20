@@ -41,7 +41,7 @@ It is an open-source alternative to App Tamer. Same idea, no license fee, and th
 2. Open it. macOS will refuse the first time, because the build is signed but not notarized. Open System Settings, go to Privacy & Security, scroll down and click Open Anyway. You only do this once.
 3. Tempra lives in the menu bar. Click the CPU percentage to open it.
 
-Lowering an app's CPU priority and managing processes owned by other users need an administrator helper. Setup offers to install it, and you can add or remove it later in Settings. Everything else works without it.
+Lowering an app's CPU priority and managing processes owned by other users need an administrator helper. Setup offers to install it, and you can add or remove it later in Settings under Administrator Access. Everything else works without it.
 
 ## What it does
 
@@ -106,15 +106,19 @@ swift test                              # the test suite, about 400 tests
 
 ## Cutting a release
 
-Bump `APP_VERSION` and `APP_BUILD` in `script/build_and_run.sh`, then:
+Bump `APP_VERSION` and `APP_BUILD` in `script/build_and_run.sh`, commit, tag the commit `vX.Y.Z`, create the GitHub release, then:
 
 ```sh
 ./script/package_release_dmg.sh --unnotarized --upload
 ```
 
-That builds the DMG, names it `Tempra-X.Y.Z-unnotarized.dmg`, and attaches it to the matching GitHub release. Releases have shipped this way since 0.3.3 because there is no Developer ID. Without one there is no notarization and no signed Sparkle appcast, so existing installs do not auto-update; users download the new DMG.
+That builds the DMG, names it `Tempra-X.Y.Z-unnotarized.dmg`, signs an `appcast.xml` with the Sparkle key in the login Keychain (account `tempra`), and attaches both to the release. The upload refuses to run from a dirty tree or from a commit that is not tagged with the same version. Releases have shipped without notarization since 0.3.3 because there is no Developer ID; Gatekeeper still asks for Open Anyway on first launch, but the signed appcast means Check for Updates works and existing installs are offered the new version.
 
-With a Developer ID Application identity the full path works: store notarization credentials with `xcrun notarytool store-credentials Tempra-notary`, put the Sparkle signing key in the login Keychain under the account `tempra`, then run the script without `--unnotarized` with `CODE_SIGN_IDENTITY` and `NOTARYTOOL_PROFILE` set. It notarizes, staples, checks Gatekeeper, signs the appcast, and stops on the first failure. To move the Sparkle key to another Mac, export it with `generate_keys --account tempra -x <file>` and import with `-f`, then delete the file.
+With a Developer ID Application identity the full path works: store notarization credentials with `xcrun notarytool store-credentials Tempra-notary`, then run the script without `--unnotarized` with `CODE_SIGN_IDENTITY` and `NOTARYTOOL_PROFILE` set. It notarizes, staples, checks Gatekeeper, and stops on the first failure. To move the Sparkle key to another Mac, export it with `generate_keys --account tempra -x <file>` and import with `-f`, then delete the file.
+
+## Contributing
+
+Build and test commands, the CI layout gotcha, and the testing rules are in [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Security
 

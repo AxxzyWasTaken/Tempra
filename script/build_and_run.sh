@@ -179,6 +179,8 @@ cat >"$INFO_PLIST" <<PLIST
   <string>$SPARKLE_FEED_URL</string>
   <key>SUPublicEDKey</key>
   <string>$SPARKLE_PUBLIC_ED_KEY</string>
+  <key>SUEnableAutomaticChecks</key>
+  <true/>
   <key>SUVerifyUpdateBeforeExtraction</key>
   <true/>
   <key>SURequireSignedFeed</key>

@@ -78,7 +78,10 @@ struct TempraDiagnosticReport: Codable, Equatable {
         let displayName: String
         let cpuPercent: Double
         let residentMemoryBytes: UInt64?
+        /// A stable state name; the limit percentage travels separately in
+        /// `limitPercent` so consumers never parse the status string.
         let status: String
+        let limitPercent: Double?
         let isFrontmost: Bool
         let isHidden: Bool
         let isPlayingAudio: Bool
@@ -176,14 +179,14 @@ struct TempraDiagnosticReport: Codable, Equatable {
                 app.bundleIdentifier
             ] ?? [:]
             let rule = rules[app.bundleIdentifier]
+            let status = statuses[app.bundleIdentifier] ?? app.status
             return Application(
                 bundleIdentifier: diagnosticIdentifier(app.bundleIdentifier),
                 displayName: app.name,
                 cpuPercent: finite(app.cpuPercent),
                 residentMemoryBytes: app.residentMemoryBytes,
-                status: diagnosticStatus(
-                    statuses[app.bundleIdentifier] ?? app.status
-                ),
+                status: diagnosticStatus(status),
+                limitPercent: diagnosticLimitPercent(status),
                 isFrontmost: app.isFrontmost,
                 isHidden: app.isHidden,
                 isPlayingAudio: app.isPlayingAudio,
@@ -255,7 +258,7 @@ struct TempraDiagnosticReport: Codable, Equatable {
         }
 
         return TempraDiagnosticReport(
-            formatVersion: 1,
+            formatVersion: 2,
             generatedAt: generatedAt,
             app: AppInformation(
                 version: appVersion,
@@ -330,9 +333,8 @@ struct TempraDiagnosticReport: Codable, Equatable {
         switch status {
         case .normal: "normal"
         case .waiting: "waiting"
-        case .limited(let percent): "limited-\(Int(percent))"
-        case .limitedWithProtectedProcesses(let percent):
-            "best-effort-limited-\(Int(percent))"
+        case .limited: "limited"
+        case .limitedWithProtectedProcesses: "best-effort-limited"
         case .paused: "paused"
         case .lowerPriority: "lower-priority"
         case .audioProtected: "audio-protected"
@@ -342,6 +344,15 @@ struct TempraDiagnosticReport: Codable, Equatable {
         case .disabled: "disabled"
         case .notRunning: "not-running"
         case .unavailable: "unavailable"
+        }
+    }
+
+    private static func diagnosticLimitPercent(_ status: ManagementStatus) -> Double? {
+        switch status {
+        case .limited(let percent), .limitedWithProtectedProcesses(let percent):
+            finite(percent)
+        default:
+            nil
         }
     }
 }

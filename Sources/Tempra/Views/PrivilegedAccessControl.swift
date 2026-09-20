@@ -33,7 +33,7 @@ struct PrivilegedAccessControl: View {
                 .foregroundStyle(detailColor)
                 .fixedSize(horizontal: false, vertical: true)
 
-            if actionTitle != nil || context == .onboarding {
+            if actionTitle != nil || context == .onboarding || showsRemoveAction {
                 HStack(spacing: 8) {
                     if let actionTitle {
                         Button {
@@ -54,6 +54,31 @@ struct PrivilegedAccessControl: View {
                         .buttonStyle(.borderedProminent)
                         .controlSize(.small)
                         .disabled(store.isRequestingPrivilegedControl)
+                    }
+
+                    if showsRemoveAction {
+                        Button {
+                            Task {
+                                _ = await store.removePrivilegedControl()
+                            }
+                        } label: {
+                            if store.isRequestingPrivilegedControl {
+                                HStack(spacing: 5) {
+                                    ProgressView()
+                                        .controlSize(.small)
+                                    Text("Removing…")
+                                }
+                            } else {
+                                Text("Remove Administrator Access")
+                            }
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                        .disabled(store.isRequestingPrivilegedControl)
+                        .help(
+                            "Unregisters Tempra's helper. Rules that need administrator "
+                                + "access stop applying until you enable it again."
+                        )
                     }
 
                     if context == .onboarding {
@@ -78,6 +103,11 @@ struct PrivilegedAccessControl: View {
 
     private var actionTitle: String? {
         store.privilegedControlStatus.actionTitle
+    }
+
+    /// Removal lives in Settings only; onboarding never shows an enabled helper.
+    private var showsRemoveAction: Bool {
+        context == .settings && store.privilegedControlStatus.isRegistered
     }
 
     private var detail: String {

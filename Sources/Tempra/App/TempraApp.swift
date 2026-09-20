@@ -48,7 +48,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 await store.shutdown()
             },
             presentFailure: { result in
-                Self.presentRestorationFailure(result)
+                Self.presentRestorationFailure(
+                    result,
+                    displayName: { store.displayName(forBundleIdentifier: $0) }
+                )
             },
             invalidate: { [weak self] in
                 self?.guardianLeaseHeartbeat.stop()
@@ -85,20 +88,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private static func presentRestorationFailure(
-        _ result: ProcessRestorationResult
+        _ result: ProcessRestorationResult,
+        displayName: (String) -> String
     ) -> TerminationFailureAction {
         NSApp.activate(ignoringOtherApps: true)
         let alert = NSAlert()
         alert.alertStyle = .critical
         alert.messageText = "Tempra could not safely quit"
-        let details = result.failures.map { failure in
-            let processList = failure.processIdentifiers.map(String.init).joined(separator: ", ")
-            return "\(failure.bundleIdentifier) (processes: \(processList))"
-        }.joined(separator: "\n")
-        alert.informativeText = "Tempra could not restore every managed process.\n\n"
-            + details
-            + "\n\nIf you quit anyway, Tempra's safety processes restore the remaining "
-            + "managed processes as soon as Tempra exits."
+        alert.informativeText = restorationFailureText(result, displayName: displayName)
         alert.addButton(withTitle: "Retry Restoration")
         let quitAnywayButton = alert.addButton(withTitle: "Quit Anyway")
         quitAnywayButton.hasDestructiveAction = true
@@ -111,6 +108,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         default:
             return .cancel
         }
+    }
+
+    static func restorationFailureText(
+        _ result: ProcessRestorationResult,
+        displayName: (String) -> String
+    ) -> String {
+        let summary = MenuBarView.lifecycleFailureMessage(result)
+        let details = result.failures.map { failure in
+            let processList = failure.processIdentifiers.map(String.init).joined(separator: ", ")
+            return "\(displayName(failure.bundleIdentifier)) (processes: \(processList))"
+        }.joined(separator: "\n")
+        return summary
+            + "\n\n"
+            + details
+            + "\n\nIf you quit anyway, Tempra's safety processes restore the remaining "
+            + "managed processes as soon as Tempra exits."
     }
 }
 

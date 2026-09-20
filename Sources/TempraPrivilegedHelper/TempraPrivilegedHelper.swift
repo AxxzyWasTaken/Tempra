@@ -546,6 +546,10 @@ private final class PrivilegedProcessSession: NSObject, PrivilegedProcessXPCProt
         } catch {
             return failure(.invalidRequest, "The privileged request is invalid.")
         }
+        return handle(request).answering(request.requestID)
+    }
+
+    private func handle(_ request: PrivilegedProcessRequest) -> PrivilegedProcessResponse {
         guard request.protocolVersion == PrivilegedProcessProtocol.version else {
             return failure(
                 .invalidRequest,
@@ -1216,7 +1220,7 @@ private final class PrivilegedProcessSession: NSObject, PrivilegedProcessXPCProt
             return encoded
         } catch {
             return Data(
-                "{\"protocolVersion\":5,\"errorCode\":\"operationFailed\",\"errorMessage\":\"The helper could not encode its response.\",\"snapshots\":[],\"applied\":[],\"stale\":[],\"failed\":[],\"unchanged\":[],\"totalCPUTimeNanoseconds\":0}".utf8
+                "{\"protocolVersion\":6,\"errorCode\":\"operationFailed\",\"errorMessage\":\"The helper could not encode its response.\",\"snapshots\":[],\"applied\":[],\"stale\":[],\"failed\":[],\"unchanged\":[],\"totalCPUTimeNanoseconds\":0}".utf8
             )
         }
     }

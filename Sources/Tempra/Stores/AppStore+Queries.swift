@@ -25,6 +25,16 @@ extension AppStore {
         apps.filter { $0.status.isActiveManagement }.count
     }
 
+    /// The name a user knows an app by, falling back to the bundle identifier
+    /// when Tempra has neither a rule nor a running app for it.
+    func displayName(forBundleIdentifier bundleIdentifier: String) -> String {
+        if let rule = rules[bundleIdentifier] { return rule.displayName }
+        if let app = apps.first(where: { $0.bundleIdentifier == bundleIdentifier }) {
+            return app.name
+        }
+        return bundleIdentifier
+    }
+
     var totalCPUPercent: Double {
         apps.reduce(0) { $0 + $1.cpuPercent }
     }

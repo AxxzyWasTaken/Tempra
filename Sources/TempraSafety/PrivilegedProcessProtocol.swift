@@ -3,7 +3,7 @@ import Foundation
 import Security
 
 public enum PrivilegedProcessProtocol {
-    public static let version = 5
+    public static let version = 6
     public static let daemonPlistName = "io.github.temperapp.Temper.PrivilegedHelper.plist"
     public static let machServiceName = "io.github.temperapp.Temper.PrivilegedHelper"
     public static let applicationIdentifier = "io.github.temperapp.Temper"
@@ -43,6 +43,9 @@ public struct PrivilegedProcessIdentity: Codable, Hashable, Sendable {
 
 public struct PrivilegedProcessRequest: Codable, Equatable, Sendable {
     public let protocolVersion: Int
+    /// Echoed back in the response so a reply can be tied to its request in
+    /// logs and telemetry.
+    public let requestID: UUID
     public let action: PrivilegedProcessAction
     public let processIdentifiers: [Int32]
     public let processes: [PrivilegedProcessIdentity]
@@ -50,12 +53,14 @@ public struct PrivilegedProcessRequest: Codable, Equatable, Sendable {
 
     public init(
         protocolVersion: Int = PrivilegedProcessProtocol.version,
+        requestID: UUID = UUID(),
         action: PrivilegedProcessAction,
         processIdentifiers: [Int32] = [],
         processes: [PrivilegedProcessIdentity] = [],
         automaticResumeAfterMilliseconds: UInt32? = nil
     ) {
         self.protocolVersion = protocolVersion
+        self.requestID = requestID
         self.action = action
         self.processIdentifiers = processIdentifiers
         self.processes = processes
@@ -101,6 +106,9 @@ public enum PrivilegedProcessErrorCode: String, Codable, Sendable {
 
 public struct PrivilegedProcessResponse: Codable, Equatable, Sendable {
     public let protocolVersion: Int
+    /// The `requestID` of the request this answers; nil only when the helper
+    /// could not decode the request at all.
+    public let requestID: UUID?
     public let snapshots: [PrivilegedProcessSnapshot]
     public let applied: [PrivilegedProcessIdentity]
     public let stale: [PrivilegedProcessIdentity]
@@ -112,6 +120,7 @@ public struct PrivilegedProcessResponse: Codable, Equatable, Sendable {
 
     public init(
         protocolVersion: Int = PrivilegedProcessProtocol.version,
+        requestID: UUID? = nil,
         snapshots: [PrivilegedProcessSnapshot] = [],
         applied: [PrivilegedProcessIdentity] = [],
         stale: [PrivilegedProcessIdentity] = [],
@@ -122,6 +131,7 @@ public struct PrivilegedProcessResponse: Codable, Equatable, Sendable {
         errorMessage: String? = nil
     ) {
         self.protocolVersion = protocolVersion
+        self.requestID = requestID
         self.snapshots = snapshots
         self.applied = applied
         self.stale = stale
@@ -130,6 +140,24 @@ public struct PrivilegedProcessResponse: Codable, Equatable, Sendable {
         self.totalCPUTimeNanoseconds = totalCPUTimeNanoseconds
         self.errorCode = errorCode
         self.errorMessage = errorMessage
+    }
+}
+
+extension PrivilegedProcessResponse {
+    /// The same response stamped with the request it answers.
+    public func answering(_ requestID: UUID) -> PrivilegedProcessResponse {
+        PrivilegedProcessResponse(
+            protocolVersion: protocolVersion,
+            requestID: requestID,
+            snapshots: snapshots,
+            applied: applied,
+            stale: stale,
+            failed: failed,
+            unchanged: unchanged,
+            totalCPUTimeNanoseconds: totalCPUTimeNanoseconds,
+            errorCode: errorCode,
+            errorMessage: errorMessage
+        )
     }
 }
 

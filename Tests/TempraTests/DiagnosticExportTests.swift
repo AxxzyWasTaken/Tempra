@@ -74,7 +74,9 @@ struct DiagnosticExportTests {
         let data = try report.encodedData()
         let json = try #require(String(data: data, encoding: .utf8))
 
-        #expect(report.formatVersion == 1)
+        #expect(report.formatVersion == 2)
+        #expect(report.applications.first?.status == "best-effort-limited")
+        #expect(report.applications.first?.limitPercent == 10)
         #expect(report.applications.first?.processes.first?.protectionReasons == [
             "audioPlayback",
             "mainProcessLifeline",

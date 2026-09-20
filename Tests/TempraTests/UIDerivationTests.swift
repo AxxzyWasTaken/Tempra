@@ -210,6 +210,49 @@ struct UIDerivationTests {
         #expect(settingsOpenCount == 0)
     }
 
+    @Test("Removing administrator access unregisters the helper")
+    func removingPrivilegedHelperUnregisters() async {
+        var currentStatus = SMAppService.Status.enabled
+        var unregisterCount = 0
+        let manager = PrivilegedHelperManager(
+            serviceStatus: { currentStatus },
+            bundledServiceIsPresent: { true },
+            registerService: {},
+            unregisterService: {
+                unregisterCount += 1
+                currentStatus = .notRegistered
+            },
+            openApprovalSettings: {},
+            pingService: {}
+        )
+
+        #expect(await manager.requestDisable() == .notRegistered)
+        #expect(unregisterCount == 1)
+        #expect(await manager.requestDisable() == .notRegistered)
+        #expect(unregisterCount == 1)
+    }
+
+    @Test("A failed removal keeps the helper registered and names the cause")
+    func failedPrivilegedHelperRemovalReportsCause() async {
+        struct RemovalError: LocalizedError {
+            var errorDescription: String? { "launchd refused." }
+        }
+        let manager = PrivilegedHelperManager(
+            serviceStatus: { .enabled },
+            bundledServiceIsPresent: { true },
+            registerService: {},
+            unregisterService: { throw RemovalError() },
+            openApprovalSettings: {},
+            pingService: {}
+        )
+
+        let status = await manager.requestDisable()
+        #expect(status == .helperUnavailable(
+            "Tempra could not remove administrator access: launchd refused."
+        ))
+        #expect(status.isRegistered)
+    }
+
     @Test("Process scopes preserve search and every sort order")
     func processScopesAndSorting() {
         let items = menuFixtures()

@@ -443,6 +443,17 @@ final class AppStore: ObservableObject {
         return status
     }
 
+    func removePrivilegedControl() async -> PrivilegedControlStatus {
+        guard !isRequestingPrivilegedControl else { return privilegedControlStatus }
+        isRequestingPrivilegedControl = true
+        defer { isRequestingPrivilegedControl = false }
+        let status = await privilegedHelperManager.requestDisable()
+        guard !hasBegunShutdown else { return status }
+        privilegedControlStatus = status
+        refresh()
+        return status
+    }
+
     private func prepareRegisteredPrivilegedService() async {
         let status = await privilegedHelperManager.prepareRegisteredService()
         guard !hasBegunShutdown else { return }
